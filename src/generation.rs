@@ -29,6 +29,7 @@ pub struct Packages {
     pub aur: Vec<String>,
     pub local: BTreeMap<String, String>,
     pub providers: BTreeMap<String, String>,
+    pub versions: BTreeMap<String, String>,
     pub server: Option<String>,
     pub serve: Serve,
 }

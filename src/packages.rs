@@ -16,10 +16,12 @@ const PROTECTED: &[&str] = &["base", "pacman", "nix", "pacnix"];
 pub struct Plan {
     notes: Vec<String>,
     unknown: Vec<String>,
+    conflicts: Vec<String>,
     build: Vec<String>,
     local: Vec<String>,
     drop: Vec<String>,
     install: Vec<String>,
+    archive: Vec<String>,
     explicit: Vec<String>,
     deps: Vec<String>,
     remove: Vec<String>,
@@ -36,6 +38,7 @@ impl Plan {
         add("build local package", &self.local);
         add("drop from local repository", &self.drop);
         add("install package", &self.install);
+        add("install package from the Arch Linux Archive", &self.archive);
         add("mark package explicit", &self.explicit);
         add("mark package as dependency", &self.deps);
         add("remove package", &self.remove);
@@ -49,6 +52,7 @@ struct Info {
     depends: Vec<String>,
     makedepends: Vec<String>,
     provides: Vec<String>,
+    conflicts: Vec<String>,
     explicit: bool,
     filename: String,
 }
@@ -82,6 +86,7 @@ fn parse_info(text: &str) -> Vec<Info> {
             "Version" => cur.version = v.into(),
             "Depends On" => cur.depends.extend(list_of(v)),
             "Provides" => cur.provides.extend(list_of(v)),
+            "Conflicts With" => cur.conflicts.extend(list_of(v)),
             "Install Reason" => cur.explicit = v.starts_with("Explicitly"),
             _ => {}
         }
@@ -173,6 +178,7 @@ fn repo_db(g: &Generation) -> Result<Vec<Info>> {
                 "%DEPENDS%" => "depends",
                 "%MAKEDEPENDS%" | "%CHECKDEPENDS%" => "makedepends",
                 "%PROVIDES%" => "provides",
+                "%CONFLICTS%" => "conflicts",
                 _ => "",
             };
             continue;
@@ -188,6 +194,7 @@ fn repo_db(g: &Generation) -> Result<Vec<Info>> {
             "depends" => cur.depends.push(v),
             "makedepends" => cur.makedepends.push(v),
             "provides" => cur.provides.push(v),
+            "conflicts" => cur.conflicts.push(v),
             _ => {}
         }
     }
@@ -336,6 +343,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
     plan.explicit = declared.iter().filter(|n| inst.get(*n).is_some_and(|i| !i.explicit)).cloned().collect();
     plan.deps = inst.values().filter(|i| i.explicit && !declared.contains(&i.name)).map(|i| i.name.clone()).collect();
     plan.deps.sort();
+    pin(g, &mut plan, &inst, &sync, &repo)?;
 
     // The local or served repository database is current, the synced copy of it can be older.
     let mut universe: HashMap<String, Info> = repo.iter().map(|i| (i.name.clone(), i.clone())).collect();
@@ -410,6 +418,17 @@ pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
             universe.insert(i.name.clone(), i);
         }
     }
+    // pacman removes one of two declared packages that conflict, and the next
+    // apply installs it again. The plan refuses them before any change.
+    // Conflicts with a version constraint are left to pacman.
+    let wanted: BTreeSet<&String> = declared.iter().chain(&chosen).collect();
+    let info = |n: &String| inst.get(n).or_else(|| universe.get(n));
+    for a in &wanted {
+        for c in info(a).map(|i| i.conflicts.as_slice()).unwrap_or_default().iter().filter(|c| dep_name(c) == c.as_str()) {
+            let hit = |b: &&&String| a != *b && (b.as_str() == c || info(b).is_some_and(|i| i.provides.iter().any(|v| dep_name(v) == c)));
+            plan.conflicts.extend(wanted.iter().filter(hit).map(|b| format!("{} and {}", a.min(b), a.max(b))));
+        }
+    }
     // pacman -S marks its targets explicit. The chosen providers become dependencies after it.
     chosen.retain(|n| !declared.contains(n) && !(defer_builds(g) && !sync.contains(n)));
     plan.install.extend(chosen.iter().cloned());
@@ -425,6 +444,54 @@ pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
         .cloned()
         .collect();
     Ok(plan)
+}
+
+/// Installs each pinned package at its version from the source that has that
+/// version: the sync repositories, the local repository or the Arch Linux Archive.
+fn pin(g: &Generation, plan: &mut Plan, inst: &HashMap<String, Info>, sync: &BTreeSet<String>, repo: &[Info]) -> Result<()> {
+    for (name, version) in &g.m.packages.versions {
+        if inst.get(name).is_some_and(|i| &i.version == version) || (defer_builds(g) && !sync.contains(name)) {
+            continue;
+        }
+        plan.install.retain(|n| n != name);
+        let source = if sync.contains(name) {
+            parse_info(&output_any(pacman(&["-Si"]).arg(name))?).into_iter().next().map(|i| i.version)
+        } else if let Some(i) = repo.iter().find(|i| &i.name == name) {
+            Some(i.version.clone())
+        } else if is_builder(g) && has_aurutils() {
+            let info: serde_json::Value = serde_json::from_str(&output_any(cmd("aur", &["query", "-t", "info", name]))?).unwrap_or_default();
+            info["results"][0]["Version"].as_str().map(String::from)
+        } else {
+            None
+        };
+        if source.as_ref() == Some(version) {
+            plan.install.push(name.clone());
+        } else if sync.contains(name) {
+            match archive_url(name, version) {
+                Some(url) => plan.archive.push(url),
+                None => plan.unknown.push(format!("{name} {version} (not in the Arch Linux Archive)")),
+            }
+        } else {
+            let has = source.unwrap_or_else(|| "no version".to_string());
+            plan.unknown.push(format!("{name} {version} (the AUR or the local repository has {has}; declare a PKGBUILD of that version in packages.local)"));
+        }
+    }
+    Ok(())
+}
+
+/// The URL of a package version in the Arch Linux Archive, if the archive has it.
+fn archive_url(name: &str, version: &str) -> Option<String> {
+    let first = name.chars().next()?;
+    let urls = ["x86_64", "any"].into_iter().flat_map(|arch| {
+        ["zst", "xz"].map(|ext| format!("https://archive.archlinux.org/packages/{first}/{name}/{name}-{version}-{arch}.pkg.tar.{ext}"))
+    });
+    urls.into_iter().find(|u| cmd("curl", &["-fsIL", "--retry", "2", "-o", "/dev/null", u]).status().is_ok_and(|s| s.success()))
+}
+
+/// pacman and aur sync arguments that keep the pinned packages at their version.
+fn pinned(g: &Generation) -> Vec<String> {
+    let names: Vec<&str> = g.m.packages.versions.keys().map(String::as_str).collect();
+    if names.is_empty() { vec![] } else { vec!["--ignore".to_string(), names.join(",")] }
 }
 
 /// Providers that do not provide their dependency, from the sync databases, the
@@ -468,6 +535,12 @@ pub fn check(ctx: &Ctx, plan: &Plan) -> Result<()> {
     }
     if !plan.unknown.is_empty() {
         bail!("unknown packages: {}", plan.unknown.join(", "));
+    }
+    if !plan.conflicts.is_empty() {
+        let mut pairs = plan.conflicts.clone();
+        pairs.sort();
+        pairs.dedup();
+        bail!("declared packages conflict: {}. Declare one package of each pair", pairs.join(", "));
     }
     if !plan.protected.is_empty() && !ctx.opts.allow_protected_removal {
         bail!(
@@ -668,6 +741,11 @@ pub fn apply(plan: &Plan) -> Result<()> {
         args.extend(plan.install.iter().map(String::as_str));
         transaction(&args)?;
     }
+    if !plan.archive.is_empty() {
+        let mut args = vec!["-U", "--noconfirm", "--ask=4", "--config", CONF];
+        args.extend(plan.archive.iter().map(String::as_str));
+        transaction(&args)?;
+    }
     if !plan.explicit.is_empty() {
         run_cmd(pacman(&["-D", "--asexplicit"]).args(&plan.explicit))?;
     }
@@ -689,14 +767,20 @@ pub fn apply(plan: &Plan) -> Result<()> {
 /// Full upgrade: all sync databases, the system packages, then changed AUR packages.
 pub fn upgrade(_ctx: &Ctx, g: &Generation) -> Result<()> {
     write_confs(g)?;
-    transaction(&["-Syu", "--noconfirm", "--ask=4", "--config", CONF])?;
+    transaction(&[&["-Syu", "--noconfirm", "--config", CONF][..], &pinned(g).iter().map(String::as_str).collect::<Vec<_>>()].concat())?;
     if is_builder(g) && Path::new(REPO).join("pacnix-local.db.tar.gz").exists() {
         ensure_repo()?;
         ensure_chroot()?;
         run_cmd(as_builder(&["aur", "chroot", "--update", "--pacman-conf", CONF, "--makepkg-conf", AUR_ARGS[4].trim_start_matches("--makepkg-conf=")]))?;
-        run_cmd(as_builder(&["aur", "sync", "--no-view", "--upgrades"]).args(AUR_ARGS).args(ignored(g)))?;
+        // aur sync keeps the pinned AUR packages and the dependencies with a chosen provider.
+        let ignore: Vec<&str> = g.m.packages.providers.keys().chain(g.m.packages.versions.keys()).map(String::as_str).collect();
+        let mut sync = as_builder(&["aur", "sync", "--no-view", "--upgrades"]);
+        if !ignore.is_empty() {
+            sync.args(["--ignore", &ignore.join(",")]);
+        }
+        run_cmd(sync.args(AUR_ARGS))?;
         sync_pacnix_db()?;
-        transaction(&["-Su", "--noconfirm", "--ask=4", "--config", CONF])?;
+        transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pinned(g).iter().map(String::as_str).collect::<Vec<_>>()].concat())?;
     }
     Ok(())
 }

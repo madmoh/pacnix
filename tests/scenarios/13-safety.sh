@@ -24,6 +24,8 @@ refused '{ packages.aur = [ "downgradee" ]; }' 'unknown packages: downgradee' 'a
 refused '{ imports = [ { files."/etc/x.conf".text = "a"; } { files."/etc/x.conf".text = "b"; } ]; }' 'conflicting definition values' 'two contents for one file'
 refused '{ units.mask = [ "sshd.service" ]; }' 'enabled and also masked or disabled' 'a unit that is enabled and masked'
 refused '{ packages.aur = [ "htop" ]; packages.repo = [ "htop" ]; }' 'more than one of repo, aur and local' 'a package in repo and aur'
+refused '{ packages.repo = [ "vim" "gvim" ]; }' 'declared packages conflict: gvim and vim' 'two declared packages that conflict'
+refused '{ packages.versions.htop = "3.0.0-1"; }' 'declare these packages in repo or aur: htop' 'a version of a package that is not declared'
 refused '{ lib, ... }: { features.base.enable = lib.mkForce false; packages.repo = [ "openssh" "sudo" "cloud-init" "rsync" "git" "jq" "grub" ]; units.enable = [ "sshd.service" ]; }' 'protected packages: base' 'removal of base and the kernel'
 on $h 'sudo touch /etc/unmanaged.conf'
 refused '{ files."/etc/unmanaged.conf".text = "x"; }' 'no package or generation owns them' 'replacement of an unmanaged file'

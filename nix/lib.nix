@@ -40,6 +40,7 @@ let
       local = lib.mapAttrs (name: dir: "${builtins.path { path = dir; name = storeName name; }}") cfg.packages.local;
       server = cfg.packages.server;
       providers = cfg.packages.providers;
+      versions = cfg.packages.versions;
       serve = {
         aur = lib.unique cfg.packages.serve.aur;
         local = lib.mapAttrs (name: dir: "${builtins.path { path = dir; name = storeName name; }}") cfg.packages.serve.local;

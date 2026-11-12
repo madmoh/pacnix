@@ -40,6 +40,12 @@ in
         description = "Local PKGBUILD directories that this host builds into its repository for other hosts.";
       };
     };
+    versions = mkOption {
+      type = types.attrsOf types.str;
+      default = { };
+      example = { linux = "6.12.9.arch1-1"; };
+      description = "Exact versions of declared repo and AUR packages, by name, as pacman -Q shows them. pacnix installs that version and pacnix upgrade keeps it. A repo package at a different version comes from the Arch Linux Archive. An AUR package keeps the version that the local repository has. Arch Linux does not support partial upgrades: a pinned library can break the packages that need a newer version.";
+    };
     server = mkOption {
       type = types.nullOr types.str;
       default = null;
@@ -55,6 +61,10 @@ in
     {
       assertion = cfg.server != null || (cfg.aur == [ ] && cfg.local == { } && cfg.serve.aur == [ ] && cfg.serve.local == { }) || lib.elem "aurutils" cfg.aur;
       message = "packages: a host that builds AUR or local packages declares aurutils in packages.aur. pacnix builds it first on a new host.";
+    }
+    {
+      assertion = lib.all (n: lib.elem n (cfg.repo ++ cfg.aur)) (lib.attrNames cfg.versions);
+      message = "packages.versions: declare these packages in repo or aur: ${toString (lib.filter (n: !lib.elem n (cfg.repo ++ cfg.aur)) (lib.attrNames cfg.versions))}";
     }
     {
       assertion = lib.all (n: builtins.match "[a-z0-9@._+-]+" n != null) names;

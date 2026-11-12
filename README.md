@@ -94,10 +94,15 @@ Each file in `modules` is a module of the [NixOS module system](https://nixos.or
 | `packages.aur` | Packages from the [AUR](https://wiki.archlinux.org/title/Arch_User_Repository). This option needs `aurutils`. |
 | `packages.local` | Directories that contain a [PKGBUILD](https://wiki.archlinux.org/title/PKGBUILD), by package name. |
 | `packages.providers` | The package that satisfies a dependency, for example `{ jack = "pipewire-jack"; }`. This option has the same function as the provider choice of pacman. |
+| `packages.versions` | An exact version for a declared package, for example `{ linux = "6.12.9.arch1-1"; }`. A repository package at a different version comes from the [Arch Linux Archive](https://wiki.archlinux.org/title/Arch_Linux_Archive). `pacnix upgrade` keeps the version. |
 | `packages.server` | The URL of the repository of a different host. With this option, the host builds nothing. |
 | `packages.serve.aur`, `packages.serve.local` | Packages that this host builds only for other hosts. |
 
 After an apply, the explicitly installed packages are equal to the declared packages, and no orphan packages stay installed. pacnix uses [aurutils](https://github.com/aurutils/aurutils) to build AUR and local packages in a [clean chroot](https://wiki.archlinux.org/title/DeveloperWiki:Building_in_a_clean_chroot). The packages go into the local repository `/var/lib/pacnix/repo`. To give this repository to other hosts, serve it with an HTTP server.
+
+Arch Linux does not support [partial upgrades](https://wiki.archlinux.org/title/System_maintenance#Partial_upgrades_are_unsupported). A pinned library can break the packages that need a newer version. An AUR package keeps the version in the local repository. For a different version, declare its PKGBUILD in `packages.local`.
+
+When two declared packages conflict, pacnix refuses the plan. `pacnix upgrade` does not remove a package because of a conflict. If an upgrade needs such a removal, pacman stops, and you do the steps in the [Arch Linux news](https://archlinux.org/news/).
 
 `apply` does not refresh the sync databases. `pacnix upgrade` runs `pacman -Syu`, builds the AUR packages again when necessary, and then applies.
 
