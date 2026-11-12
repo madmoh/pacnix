@@ -44,7 +44,7 @@ enum Verb {
 
 #[derive(Args, Clone, Default)]
 pub struct Opts {
-    /// Do not ask for confirmation before packages are removed
+    /// Do not ask for confirmation of package removals and of changes to AUR packages
     #[arg(long, short)]
     pub yes: bool,
     /// Permit removal of base, pacman, nix, pacnix and the booted kernel

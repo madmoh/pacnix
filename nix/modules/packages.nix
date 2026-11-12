@@ -10,7 +10,7 @@ in
     repo = mkOption {
       type = types.listOf types.str;
       default = [ ];
-      description = "Packages from the sync repositories that are explicitly installed.";
+      description = "Packages from the sync repositories that are explicitly installed. As with pacman -S, a group name stands for all the members of the group. To select some members, declare the members.";
     };
     aur = mkOption {
       type = types.listOf types.str;

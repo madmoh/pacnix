@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Scenario 3: add and remove a repo package and AUR packages, remove a whole
+# Scenario 3: add and remove a repo package, a group and AUR packages, remove a whole
 # feature, and restore pristine files after an override is dropped.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
@@ -22,6 +22,16 @@ for p in htop downgrade perl-email-outlook-message perl-ole-storage-lite; do
 	refute $h "$repo | grep -qx $p" "$p is still in the local repository"
 done
 packages_match $h
+
+step "a group stands for its members, as with pacman -S"
+scenario $h '{ packages.repo = [ "fprint" ]; }'
+apply $h >/dev/null || fail "apply failed"
+check $h "pacman -Qqe fprintd libfprint" "the members of the group are not explicitly installed"
+empty_plan $h
+pacnix $h audit | grep -q 'explicit package not declared: .*fprint' && fail "the audit does not count the members as declared"
+scenario $h ''
+apply $h >/dev/null || fail "apply failed"
+refute $h "pacman -Q fprintd" "a member of the removed group is still installed"
 
 step "a symbolic link: create, change the target, drop"
 scenario $h '{ files."/etc/pacnix-zone".target = "/usr/share/zoneinfo/UTC"; }'

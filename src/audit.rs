@@ -95,10 +95,9 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
         }
     }
 
-    let declared: BTreeSet<&String> =
-        g.m.packages.repo.iter().chain(&g.m.packages.aur).chain(g.m.packages.local.keys()).collect();
+    let (declared, _) = crate::packages::declared(&g, &crate::packages::sync_names()?)?;
     for p in output(cmd("pacman", &["-Qqe"]))?.lines() {
-        if !declared.contains(&p.to_string()) {
+        if !declared.contains(p) {
             report.push(format!("explicit package not declared: {p}"));
         }
     }

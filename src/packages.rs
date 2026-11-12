@@ -107,8 +107,25 @@ fn installed() -> Result<HashMap<String, Info>> {
     Ok(parse_info(&output(&mut pacman(&["-Qi"]))?).into_iter().map(|i| (i.name.clone(), i)).collect())
 }
 
+/// The declared package names, and the names in packages.repo that are no
+/// package and no group. As with pacman -S, a group that has no package of the
+/// same name stands for each of its members.
+pub fn declared(g: &Generation, sync: &BTreeSet<String>) -> Result<(BTreeSet<String>, Vec<String>)> {
+    let p = &g.m.packages;
+    let mut names: BTreeSet<String> = p.repo.iter().filter(|n| sync.contains(*n)).chain(&p.aur).chain(p.local.keys()).cloned().collect();
+    let other: Vec<&String> = p.repo.iter().filter(|n| !sync.contains(*n)).collect();
+    let mut groups = BTreeSet::new();
+    if !other.is_empty() {
+        for (group, member) in output_any(pacman(&["-Sg"]).args(&other))?.lines().filter_map(|l| l.split_once(' ')) {
+            groups.insert(group.to_string());
+            names.insert(member.to_string());
+        }
+    }
+    Ok((names, other.into_iter().filter(|n| !groups.contains(*n)).cloned().collect()))
+}
+
 /// Package names in the sync databases of every repository except pacnix-local.
-fn sync_names() -> Result<BTreeSet<String>> {
+pub fn sync_names() -> Result<BTreeSet<String>> {
     let text = output(&mut pacman(&["-Sl"]))?;
     Ok(text
         .lines()
@@ -282,10 +299,9 @@ pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
     let repo = repo_db(g)?;
     let repo_names: BTreeSet<String> = repo.iter().map(|i| i.name.clone()).collect();
     let local_names: Vec<String> = p.local.keys().cloned().collect();
-    let declared: BTreeSet<String> = p.repo.iter().chain(&p.aur).chain(&local_names).cloned().collect();
+    let (declared, unknown) = declared(g, &sync)?;
     plan.declared = declared.len();
-
-    plan.unknown.extend(p.repo.iter().filter(|n| !sync.contains(*n)).cloned());
+    plan.unknown = unknown;
     let locals = local_dirs(g);
     let mut built_aur = built_aur(g);
     built_aur.extend(p.providers.values().filter(|v| !sync.contains(*v) && !locals.contains_key(*v)).cloned());
@@ -765,7 +781,7 @@ pub fn apply(plan: &Plan) -> Result<()> {
 }
 
 /// Full upgrade: all sync databases, the system packages, then changed AUR packages.
-pub fn upgrade(_ctx: &Ctx, g: &Generation) -> Result<()> {
+pub fn upgrade(ctx: &Ctx, g: &Generation) -> Result<()> {
     write_confs(g)?;
     transaction(&[&["-Syu", "--noconfirm", "--config", CONF][..], &pinned(g).iter().map(String::as_str).collect::<Vec<_>>()].concat())?;
     if is_builder(g) && Path::new(REPO).join("pacnix-local.db.tar.gz").exists() {
@@ -774,13 +790,48 @@ pub fn upgrade(_ctx: &Ctx, g: &Generation) -> Result<()> {
         run_cmd(as_builder(&["aur", "chroot", "--update", "--pacman-conf", CONF, "--makepkg-conf", AUR_ARGS[4].trim_start_matches("--makepkg-conf=")]))?;
         // aur sync keeps the pinned AUR packages and the dependencies with a chosen provider.
         let ignore: Vec<&str> = g.m.packages.providers.keys().chain(g.m.packages.versions.keys()).map(String::as_str).collect();
-        let mut sync = as_builder(&["aur", "sync", "--no-view", "--upgrades"]);
-        if !ignore.is_empty() {
-            sync.args(["--ignore", &ignore.join(",")]);
-        }
-        run_cmd(sync.args(AUR_ARGS))?;
+        let sync = |args: &[&str]| {
+            let mut c = as_builder(&["aur", "sync", "--no-view", "--upgrades"]);
+            if !ignore.is_empty() {
+                c.args(["--ignore", &ignore.join(",")]);
+            }
+            c.args(args).args(AUR_ARGS);
+            c
+        };
+        let dirs = output(sync(&["--no-build"]))?;
+        review(ctx, &dirs.lines().collect::<Vec<_>>())?;
+        run_cmd(sync(&[]))?;
         sync_pacnix_db()?;
         transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pinned(g).iter().map(String::as_str).collect::<Vec<_>>()].concat())?;
+    }
+    Ok(())
+}
+
+/// Shows the changes of the AUR packages since their last review, and asks
+/// before the build, because an AUR package is code from any AUR user. The
+/// reviewed revisions go into the database of aur-view(1). A package without a
+/// review shows all of its files.
+fn review(ctx: &Ctx, dirs: &[&str]) -> Result<()> {
+    let db = format!("{BUILD}/.local/share/aurutils/view");
+    let mut heads = Vec::new();
+    for dir in dirs {
+        let pkg = Path::new(dir).file_name().context("aur sync gave no package directory")?.to_string_lossy().into_owned();
+        let head = output(as_builder(&["git", "-C", dir, "rev-parse", "HEAD"]))?.trim().to_string();
+        // The hash of the empty tree of git.
+        let seen = std::fs::read_to_string(format!("{db}/{pkg}")).unwrap_or("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string());
+        if seen.trim() != head {
+            println!("pacnix: changes of the AUR package {pkg}:");
+            run_cmd(as_builder(&["git", "-C", dir, "--no-pager", "diff", "--stat", "--patch", seen.trim(), &head]))?;
+            heads.push((pkg, head));
+        }
+    }
+    if heads.is_empty() {
+        return Ok(());
+    }
+    confirm(&format!("Build {} AUR packages with these changes?", heads.len()), &ctx.opts)?;
+    std::fs::create_dir_all(&db)?;
+    for (pkg, head) in heads {
+        std::fs::write(format!("{db}/{pkg}"), head + "\n")?;
     }
     Ok(())
 }

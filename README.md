@@ -90,7 +90,7 @@ Each file in `modules` is a module of the [NixOS module system](https://nixos.or
 
 | Option | Function |
 |---|---|
-| `packages.repo` | Packages from the sync repositories. |
+| `packages.repo` | Packages from the sync repositories. A [group](https://wiki.archlinux.org/title/Package_group) name, for example `gnome`, stands for all the members of the group. To select some members, declare the members. |
 | `packages.aur` | Packages from the [AUR](https://wiki.archlinux.org/title/Arch_User_Repository). This option needs `aurutils`. |
 | `packages.local` | Directories that contain a [PKGBUILD](https://wiki.archlinux.org/title/PKGBUILD), by package name. |
 | `packages.providers` | The package that satisfies a dependency, for example `{ jack = "pipewire-jack"; }`. This option has the same function as the provider choice of pacman. |
@@ -105,6 +105,8 @@ Arch Linux does not support [partial upgrades](https://wiki.archlinux.org/title/
 When two declared packages conflict, pacnix refuses the plan. `pacnix upgrade` does not remove a package because of a conflict. If an upgrade needs such a removal, pacman stops, and you do the steps in the [Arch Linux news](https://archlinux.org/news/).
 
 `apply` does not refresh the sync databases. `pacnix upgrade` runs `pacman -Syu`, builds the AUR packages again when necessary, and then applies.
+
+Each AUR user can change an AUR package, thus read the changes before you build them. Before `pacnix upgrade` builds new versions of AUR packages, it shows the changes since the last review and asks for a confirmation. `--yes` accepts them without a confirmation. If an AUR package has no review yet, pacnix shows all its files. pacnix keeps the reviewed revisions in the database of [aur-view](https://man.archlinux.org/man/aur-view.1).
 
 ### Files
 
@@ -155,7 +157,7 @@ pacnix does not manage these items:
 |---|---|
 | `pacnix plan` | Shows each change that `apply` will do. It does not change the system. |
 | `pacnix apply` | Makes the system agree with the configuration. Removals of packages need a confirmation, or `--yes`. |
-| `pacnix upgrade` | Upgrades the system, then applies. |
+| `pacnix upgrade` | Upgrades the system, then applies. New versions of AUR packages need a confirmation, or `--yes`. |
 | `pacnix rollback` | Applies the previous generation. Package versions do not go back. |
 | `pacnix audit` | Shows the state that the configuration does not explain, for example files without an owner, changed package files, `.pacnew` files, packages and units that are not declared, and paths in home directories. |
 
