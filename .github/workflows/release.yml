@@ -15,7 +15,7 @@ jobs:
     steps:
       - name: Install the build tools
         run: pacman -Syu --noconfirm --needed git cargo github-cli
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check that the tag, PKGBUILD and Cargo.toml have the same version
         run: |
           v=${GITHUB_REF_NAME#v}
