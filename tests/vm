@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# VM harness for pacnix scenarios. Usage: tests/vm <verb> [args]
+#   base [image] [date]   build the base disk from an Arch cloud image, with the
+#                         Arch Linux Archive of the given date (YYYY/MM/DD) as mirror
+#   up <name> [base]      start a VM from a fresh overlay of a base disk
+#   down <name>           delete a VM and its overlay
+#   ssh <name> [cmd...]   run a command in a VM as the user arch
+#   push <name>           copy the pacnix package and the test config into a VM. The
+#                         config builds pacnix from the source when PACNIX_SOURCE_BUILD
+#                         is set, else it repackages the host build (faster)
+#   snapshot <name> <out> save a bootstrapped VM as a base disk and delete the VM
+#   ip <name>             print the address of a VM
+#   wait <name>           wait for SSH after a reboot
+#   reset <name>          power a VM off without shutdown, start it and wait for SSH
+#   blank <name> <size>   attach a new empty disk to a VM as /dev/vdb
+#   boot <name> <disk>    start a VM from the disk that an install wrote, without cloud-init
+# PACNIX_VM_CPUS and PACNIX_VM_MEM (MiB) set the size of a new VM.
+set -euo pipefail
+export LIBVIRT_DEFAULT_URI=qemu:///system
+root=$(cd "$(dirname "$0")/.." && pwd)
+cache=${PACNIX_VM_CACHE:-$HOME/.cache/pacnix-vm}
+key=$cache/id_ed25519
+image=${PACNIX_VM_IMAGE:-$cache/cloud-20261101.620452.qcow2}
+sshopts=(-i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=15)
+
+ip() {
+	virsh domifaddr "pacnix-$1" 2>/dev/null | awk '/ipv4/ {split($4, a, "/"); print a[1]; exit}'
+}
+
+wait_ssh() {
+	local a
+	for _ in $(seq 300); do
+		a=$(ip "$1")
+		if [[ -n $a ]] && ssh "${sshopts[@]}" "arch@$a" true 2>/dev/null; then
+			return 0
+		fi
+		sleep 2
+	done
+	echo "pacnix-$1 is not reachable" >&2
+	return 1
+}
+
+userdata() {
+	cat <<EOF
+#cloud-config
+hostname: $1
+ssh_authorized_keys: [$(cat "$key.pub")]
+bootcmd: [systemctl stop systemd-time-wait-sync]
+write_files:
+  - path: /etc/pacman.d/mirrorlist
+    content: |
+$(for m in ${PACNIX_VM_MIRROR:-http://192.168.122.1:8090 https://fastly.mirror.pkgbuild.com https://mirror.rackspace.com/archlinux}; do printf '      Server = %s/$repo/os/$arch\n' "$m"; done)
+EOF
+}
+
+create() { # name disk
+	userdata "$1" >"$cache/pacnix-$1.user-data"
+	printf 'instance-id: %s-%s\nlocal-hostname: %s\n' "$1" "$(date +%s%N)" "$1" >"$cache/pacnix-$1.meta-data"
+	rm -f "$cache/pacnix-$1.seed.iso"
+	cloud-localds "$cache/pacnix-$1.seed.iso" "$cache/pacnix-$1.user-data" "$cache/pacnix-$1.meta-data"
+	rm "$cache/pacnix-$1.user-data" "$cache/pacnix-$1.meta-data"
+	virt-install --name "pacnix-$1" --osinfo archlinux --import --noautoconsole --vcpus "${PACNIX_VM_CPUS:-2}" --memory "${PACNIX_VM_MEM:-3072}" \
+		--disk "$2,bus=virtio,discard=unmap" --disk "$cache/pacnix-$1.seed.iso,device=cdrom" \
+		--network network=default,model=virtio --graphics none >/dev/null
+}
+
+case $1 in
+base)
+	src=${2:-$image} out=$cache/base-$(basename "$src" .qcow2 | sed 's/^cloud-//').qcow2
+	if [[ -n ${3:-} ]]; then
+		export PACNIX_VM_MIRROR=https://archive.archlinux.org/repos/$3
+	fi
+	qemu-img create -qf qcow2 -b "$src" -F qcow2 "$cache/pacnix-base.qcow2" 20G
+	create base "$cache/pacnix-base.qcow2"
+	wait_ssh base
+	"$0" ssh base 'sudo cloud-init status --wait >/dev/null; sudo pacman -Syu --noconfirm --needed nix devtools base-devel git rsync jq python &&
+		sudo systemctl enable --now nix-daemon.socket &&
+		sudo cloud-init clean --logs && sudo truncate -s0 /etc/machine-id && sudo fstrim -a'
+	"$0" ssh base 'sudo systemctl poweroff' || true
+	while virsh domstate pacnix-base | grep -q running; do sleep 2; done
+	virsh undefine pacnix-base --nvram >/dev/null 2>&1 || virsh undefine pacnix-base >/dev/null
+	qemu-img convert -O qcow2 -c "$cache/pacnix-base.qcow2" "$out.new"
+	mv -f "$out.new" "$out"
+	rm "$cache/pacnix-base.qcow2"
+	echo "$out"
+	;;
+up)
+	base=${3:-$cache/base-20261101.620452.qcow2}
+	"$0" down "$2" 2>/dev/null || true
+	qemu-img create -qf qcow2 -b "$base" -F qcow2 "$cache/pacnix-$2.qcow2" 30G
+	create "$2" "$cache/pacnix-$2.qcow2"
+	wait_ssh "$2"
+	"$0" ssh "$2" 'sudo cloud-init status --wait >/dev/null || true'
+	;;
+down)
+	virsh destroy "pacnix-$2" >/dev/null 2>&1 || true
+	virsh undefine "pacnix-$2" --nvram >/dev/null 2>&1 || virsh undefine "pacnix-$2" >/dev/null 2>&1 || true
+	rm -f "$cache/pacnix-$2.qcow2" "$cache/pacnix-$2.seed.iso" "$cache/pacnix-$2-blank.qcow2"
+	;;
+ssh)
+	n=$2
+	shift 2
+	exec ssh "${sshopts[@]}" "arch@$(ip "$n")" "$@"
+	;;
+push)
+	a=$(ip "$2")
+	rsync -a --delete --exclude scenario.nix --exclude /src --exclude /fixtures -e "ssh ${sshopts[*]}" "$root/tests/config/" "arch@$a:config/"
+	rsync -a --delete -e "ssh ${sshopts[*]}" "$root/fixtures/" "arch@$a:config/fixtures/"
+	src=$cache/src
+	rm -rf "$src"
+	if [[ -n ${PACNIX_SOURCE_BUILD:-} ]]; then
+		rsync -a --exclude /target --exclude /.git --exclude /tests "$root/" "$src/"
+	else
+		mkdir -p "$src"
+		cp "$cache"/pkg/pacnix-*.pkg.tar.zst "$src/"
+		cat "$root/PKGBUILD" - >"$src/PKGBUILD" <<-'EOF'
+			# Test build: repackage the package that the host built.
+			source=("$pkgname-$pkgver-$pkgrel-x86_64.pkg.tar.zst")
+			noextract=("${source[0]}")
+			sha256sums=(SKIP)
+			makedepends=()
+			build() { :; }
+			package() { bsdtar -xf "$srcdir/${source[0]}" -C "$pkgdir" --exclude .PKGINFO --exclude .BUILDINFO --exclude .MTREE; }
+		EOF
+	fi
+	rsync -a --delete -e "ssh ${sshopts[*]}" "$src/" "arch@$a:config/src/pacnix/" --rsync-path="mkdir -p config/src && rsync"
+	rsync -a -e "ssh ${sshopts[*]}" "$cache"/pkg/*.pkg.tar.zst "arch@$a:"
+	ssh "${sshopts[@]}" "arch@$a" 'sudo pacman -U --noconfirm ~/pacnix-*.pkg.tar.zst >/dev/null && sudo rsync -a --delete --exclude scenario.nix ~/config/ /etc/pacnix/'
+	;;
+snapshot)
+	"$0" ssh "$2" 'sudo cloud-init clean --logs && sudo truncate -s0 /etc/machine-id && sudo rm -f /etc/pacnix/scenario.nix /var/log/pacnix-test.log && sudo fstrim -a && sudo systemctl poweroff' || true
+	while virsh domstate "pacnix-$2" 2>/dev/null | grep -q running; do sleep 2; done
+	qemu-img convert -O qcow2 "$cache/pacnix-$2.qcow2" "$3.new"
+	mv -f "$3.new" "$3"
+	"$0" down "$2"
+	;;
+blank)
+	rm -f "$cache/pacnix-$2-blank.qcow2"
+	qemu-img create -qf qcow2 "$cache/pacnix-$2-blank.qcow2" "$3"
+	virsh attach-disk "pacnix-$2" "$cache/pacnix-$2-blank.qcow2" vdb --driver qemu --subdriver qcow2 --targetbus virtio >/dev/null
+	;;
+boot)
+	"$0" down "$2" 2>/dev/null || true
+	mv "$3" "$cache/pacnix-$2.qcow2"
+	virt-install --name "pacnix-$2" --osinfo archlinux --import --noautoconsole --vcpus "${PACNIX_VM_CPUS:-2}" --memory "${PACNIX_VM_MEM:-3072}" \
+		--disk "$cache/pacnix-$2.qcow2,bus=virtio,discard=unmap" --network network=default,model=virtio --graphics vnc,listen=127.0.0.1 >/dev/null
+	wait_ssh "$2"
+	;;
+ip) ip "$2" ;;
+wait) wait_ssh "$2" ;;
+reset)
+	virsh destroy "pacnix-$2" >/dev/null
+	virsh start "pacnix-$2" >/dev/null
+	wait_ssh "$2"
+	;;
+*)
+	sed -n '2,9p' "$0"
+	exit 2
+	;;
+esac

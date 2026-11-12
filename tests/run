@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Runs scenarios: tests/run [number...]. Without numbers it runs all of them.
+# It builds the pacnix package first. Scenario 1 runs first and alone, because
+# it saves the base disk of the others. The others run in parallel while the
+# size of their VMs fits in the free CPUs and memory of the host, less a
+# reserve for the host. The log of each scenario is in PACNIX_TEST_LOGS.
+set -uo pipefail
+cd "$(dirname "$0")"
+./package >/dev/null || exit 1
+logs=${PACNIX_TEST_LOGS:-${PACNIX_VM_CACHE:-$HOME/.cache/pacnix-vm}/logs}
+mkdir -p "$logs"
+cpus=$(($(nproc) - 4))
+mem=$(($(awk '/^MemAvailable/ { print int($2 / 1024) }' /proc/meminfo) - 8192))
+status=0
+queue=()
+for s in scenarios/*.sh; do
+	n=$(basename "$s" | cut -d- -f1)
+	if (($#)) && [[ " $* " != *" $n "* && " $* " != *" ${n#0} "* ]]; then continue; fi
+	queue+=("$s")
+done
+
+# Prints the vCPUs and MiB that the VMs of a scenario use together.
+cost() {
+	local size=(2 3072 1)
+	eval "$(grep -m1 '^size=' "$1")"
+	echo $((size[0] * size[2])) $((size[1] * size[2]))
+}
+declare -A running
+finish() {
+	local pid rc s c m
+	wait -n -p pid "${!running[@]}"
+	rc=$?
+	read -r s c m <<<"${running[$pid]}"
+	unset "running[$pid]"
+	cpus=$((cpus + c)) mem=$((mem + m))
+	tail -1 "$logs/$(basename "$s" .sh).log"
+	((rc == 0)) || status=1
+}
+start() {
+	local c m
+	read -r c m < <(cost "$1")
+	bash "$1" >"$logs/$(basename "$1" .sh).log" 2>&1 &
+	running[$!]="$1 $c $m"
+	cpus=$((cpus - c)) mem=$((mem - m))
+}
+
+if [[ ${queue[0]:-} == scenarios/01-* ]]; then
+	start "${queue[0]}"
+	finish
+	queue=("${queue[@]:1}")
+fi
+while ((${#queue[@]})); do
+	for i in "${!queue[@]}"; do
+		read -r c m < <(cost "${queue[$i]}")
+		# A scenario larger than the budget runs when nothing else runs.
+		if ((c <= cpus && m <= mem)) || ((${#running[@]} == 0)); then
+			start "${queue[$i]}"
+			unset "queue[$i]"
+		fi
+	done
+	queue=("${queue[@]}")
+	((${#running[@]} == 0)) || finish
+done
+while ((${#running[@]})); do finish; done
+exit $status

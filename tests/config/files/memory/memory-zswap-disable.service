@@ -1,0 +1,9 @@
+[Unit]
+Description=Disable zswap before activating swap
+DefaultDependencies=no
+Before=swap.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/sh -c 'echo N > /sys/module/zswap/parameters/enabled'
+RemainAfterExit=yes

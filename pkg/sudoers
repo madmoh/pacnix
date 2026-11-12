@@ -1,0 +1,2 @@
+# aurutils runs as pacnix and starts clean chroot builds through sudo.
+pacnix ALL=(root) NOPASSWD:SETENV: /usr/bin/makechrootpkg, /usr/bin/arch-nspawn, /usr/bin/mkarchroot, /usr/bin/install

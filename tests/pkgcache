@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+# Caching package proxy for the test VMs: tests/pkgcache [port]. VMs list it as
+# the first mirror. Package files are kept in the VM cache directory; databases
+# and signatures of databases pass through. Upstream mirrors are tried in order.
+# A package file that the mirrors no longer have, because the sync database of a
+# VM is older than the mirrors, comes from the Arch Linux Archive.
+import http.server
+import os
+import shutil
+import socketserver
+import sys
+import threading
+import urllib.request
+
+UPSTREAM = ["https://fastly.mirror.pkgbuild.com", "https://mirror.rackspace.com/archlinux"]
+CACHE = os.path.join(os.environ.get("PACNIX_VM_CACHE", os.path.expanduser("~/.cache/pacnix-vm")), "pkgcache")
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        name = os.path.basename(path)
+        cacheable = ".pkg.tar." in name and ".." not in path
+        local = os.path.join(CACHE, name)
+        if cacheable and os.path.exists(local):
+            return self.send(open(local, "rb"), os.path.getsize(local))
+        archive = "https://archive.archlinux.org/packages/%s/%s/%s" % (name[0], name.rsplit("-", 3)[0], name)
+        for url in [base + path for base in UPSTREAM] + ([archive] if cacheable else []):
+            try:
+                upstream = urllib.request.urlopen(url, timeout=8)
+            except Exception:
+                continue
+            if not cacheable:
+                return self.send(upstream, upstream.headers.get("Content-Length"))
+            # Streams to the client and to the cache at the same time, so that
+            # pacman sees progress from the first byte.
+            tmp = "%s.part%d" % (local, threading.get_ident())
+            self.send_response(200)
+            if upstream.headers.get("Content-Length"):
+                self.send_header("Content-Length", upstream.headers.get("Content-Length"))
+            self.end_headers()
+            with upstream, open(tmp, "wb") as f:
+                while chunk := upstream.read(65536):
+                    f.write(chunk)
+                    self.wfile.write(chunk)
+            os.replace(tmp, local)
+            return
+        self.send_error(404)
+
+    def send(self, stream, length):
+        self.send_response(200)
+        if length:
+            self.send_header("Content-Length", str(length))
+        self.end_headers()
+        with stream:
+            shutil.copyfileobj(stream, self.wfile)
+
+    def log_message(self, *args):
+        pass
+
+
+class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+
+
+os.makedirs(CACHE, exist_ok=True)
+Server(("192.168.122.1", int(sys.argv[1]) if len(sys.argv) > 1 else 8090), Handler).serve_forever()

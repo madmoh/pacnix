@@ -1,0 +1,17 @@
+[Unit]
+Description=Complete the pacnix configuration after an install from a chroot
+Wants=network-online.target
+After=network-online.target nss-lookup.target
+ConditionPathExists=/var/lib/pacnix/firstboot
+# Not every network stack delays network-online.target, so a failure, for
+# example of a download, starts the apply again.
+StartLimitIntervalSec=1h
+StartLimitBurst=10
+
+[Service]
+Type=exec
+EnvironmentFile=/var/lib/pacnix/firstboot
+Environment=HOME=/root
+ExecStart=/usr/bin/pacnix $ARGS apply --yes
+Restart=on-failure
+RestartSec=30s

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Builds the pacnix package on the host into the VM cache. No root is needed.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+out=${PACNIX_VM_CACHE:-$HOME/.cache/pacnix-vm}/pkg
+mkdir -p "$out"
+rm -f "$out"/pacnix-*.pkg.tar.zst
+cd "$root"
+BUILDDIR=$out/build PKGDEST=$out makepkg -df --noconfirm >/dev/null 2>&1
+rm -rf "$out/build"
+ls "$out"/pacnix-*.pkg.tar.zst

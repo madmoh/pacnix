@@ -1,0 +1,11 @@
+[Unit]
+Description=SSD swap file
+Requires=memory-zswap-disable.service
+After=memory-zswap-disable.service
+
+[Swap]
+What=/swapfile
+Priority=10
+
+[Install]
+WantedBy=swap.target
