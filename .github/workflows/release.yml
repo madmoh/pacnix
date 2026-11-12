@@ -15,7 +15,9 @@ jobs:
     steps:
       - name: Install the build tools
         run: pacman -Syu --noconfirm --needed git cargo github-cli
-      - uses: actions/checkout@v7
+      # A plain clone: actions/checkout is a JavaScript action that needs Node.js.
+      - name: Get the source of the tag
+        run: git clone --quiet --depth 1 --branch "$GITHUB_REF_NAME" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" .
       - name: Check that the tag, PKGBUILD and Cargo.toml have the same version
         run: |
           v=${GITHUB_REF_NAME#v}
