@@ -25,7 +25,8 @@ jobs:
         run: |
           useradd -m builder
           chown -R builder .
-          runuser -u builder -- makepkg --nodeps --noconfirm
+          # makepkg uses src/ and pkg/ of the checkout unless BUILDDIR is elsewhere.
+          runuser -u builder -- env BUILDDIR=/tmp/makepkg PKGDEST="$PWD" makepkg --nodeps --noconfirm
       - name: Sign the package and make the repository
         env:
           SIGNING_KEY: ${{ secrets.PACNIX_SIGNING_KEY }}
