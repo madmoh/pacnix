@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
-# Builds aurutils from its AUR package at a fixed commit, for the [pacnix]
-# repository: pkg/aurutils <directory>. A release changes the commit after a
-# test with the new aurutils.
+# Builds the latest aurutils release on GitHub with the PKGBUILD of the AUR
+# package, for the [pacnix] repository: pkg/aurutils <directory>. When the AUR
+# package is older, the build takes the version and checksum of the release.
+# A package of that version in the directory stays; older ones are deleted.
 set -euo pipefail
-commit=1a27721baab2d5b6fa5136ae4f8eb14d480b2a8a
 out=$(realpath "$1")
+version=$(git ls-remote --tags --refs https://github.com/aurutils/aurutils | sed -n 's|.*refs/tags/\([0-9][0-9.]*\)$|\1|p' | sort -V | tail -1)
+if compgen -G "$out/aurutils-$version-*.pkg.tar.zst" >/dev/null; then
+	exit 0
+fi
 build=$(mktemp -d)
 trap 'rm -rf "$build"' EXIT
 git clone -q https://aur.archlinux.org/aurutils.git "$build/aurutils"
-git -C "$build/aurutils" checkout -q "$commit"
 cd "$build/aurutils"
+if [[ $(sed -n 's/^pkgver=//p' PKGBUILD) != "$version" ]]; then
+	sed -i -e "s/^pkgver=.*/pkgver=$version/" -e "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+	sums=$(makepkg -g 2>/dev/null)
+	sed -i "/^sha256sums=/c\\$sums" PKGBUILD
+fi
+rm -f "$out"/aurutils-*.pkg.tar.zst "$out"/aurutils-*.pkg.tar.zst.sig
 BUILDDIR=$build/makepkg PKGDEST=$out makepkg -d --noconfirm >/dev/null

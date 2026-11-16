@@ -1,5 +1,5 @@
 pkgname=pacnix
-pkgver=0.3.0
+pkgver=0.4.0
 pkgrel=1
 pkgdesc='Declarative, reconciling management of an Arch Linux host from a Nix flake'
 arch=(x86_64)

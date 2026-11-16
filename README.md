@@ -6,7 +6,7 @@ pacnix is idempotent and it reconciles: when you remove a declaration, its packa
 
 ## Installation
 
-pacnix is in the signed pacman repository `[pacnix]`, which the releases of this project supply. Each release has the packages of pacnix and [aurutils](https://github.com/aurutils/aurutils), the repository database and the signing key `pacnix.asc`. pacnix uses aurutils for the AUR, thus aurutils is a dependency of pacnix and comes built from `[pacnix]`. To trust the key and add the repository, run these commands as root. During an Arch Linux installation, run them on the live system.
+pacnix is in the signed pacman repository `[pacnix]`, which the releases of this project supply. Each release has the packages of pacnix and [aurutils](https://github.com/aurutils/aurutils), the repository database and the signing key `pacnix.asc`. pacnix uses aurutils for the AUR, thus aurutils is a dependency of pacnix and comes built from `[pacnix]`. Each day, a job puts the latest aurutils release into the repository. To trust the key and add the repository, run these commands as root. During an Arch Linux installation, run them on the live system.
 
 ```sh
 curl -fLO https://github.com/madmoh/pacnix/releases/latest/download/pacnix.asc
