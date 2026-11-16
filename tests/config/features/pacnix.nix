@@ -1,11 +1,9 @@
-# pacnix itself: Nix, aurutils from the AUR and pacnix from its PKGBUILD.
+# pacnix itself from the test repository [pacnix].
 { config, lib, ... }:
 {
   options.features.pacnix.enable = lib.mkEnableOption "pacnix";
   config = lib.mkIf config.features.pacnix.enable {
-    packages.repo = [ "nix" "devtools" "base-devel" ];
-    packages.aur = [ "aurutils" ];
-    packages.local.pacnix = ../src/pacnix;
+    packages.repo = [ "pacnix" ];
     units.enable = [ "nix-daemon.socket" ];
   };
 }

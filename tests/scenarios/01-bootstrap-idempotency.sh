@@ -4,7 +4,6 @@
 # On success the VM becomes the base disk of the other scenarios.
 size=(6 6144 1)
 source "$(dirname "$0")/../lib.sh"
-export PACNIX_SOURCE_BUILD=1
 fresh $h "$cache/base-20261101.620452.qcow2"
 step "bootstrap with one command"
 apply $h || fail "apply failed"

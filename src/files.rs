@@ -279,7 +279,12 @@ pub fn apply(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<Vec<String>> {
             // arch-chroot bind-mounts /etc/resolv.conf from the live system.
             Err(e) if !crate::packages::booted() && e.root_cause().downcast_ref::<std::io::Error>().and_then(|e| e.raw_os_error()) == Some(libc::EBUSY) => {
                 let _ = std::fs::remove_file(temporary(path));
-                println!("pacnix: note: {path} is a mount point in this chroot; the first pacnix upgrade on the booted system writes it");
+                // The first pacnix upgrade needs it, for example /etc/resolv.conf for DNS.
+                let how = match &g.m.files[path].target {
+                    Some(t) => format!(", for example: ln -sf {t} /mnt{path}"),
+                    None => String::new(),
+                };
+                crate::report::last(format!("pacnix: {path} is a mount point in this chroot. Write it after you leave the chroot{how}"));
             }
             r => {
                 r.with_context(|| format!("write {path}"))?;

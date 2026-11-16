@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
-# Builds the pacnix package on the host into the VM cache. No root is needed.
+# Builds the pacnix package on the host, and aurutils once, into the test
+# repository [pacnix] of the VMs: the same packages as a release. No root is needed.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 out=${PACNIX_VM_CACHE:-$HOME/.cache/pacnix-vm}/pkg
 mkdir -p "$out"
-rm -f "$out"/pacnix-*.pkg.tar.zst
+rm -f "$out"/pacnix-*.pkg.tar.zst "$out"/pacnix.*
 cd "$root"
 BUILDDIR=$out/build PKGDEST=$out makepkg -df --noconfirm >/dev/null 2>&1
 rm -rf "$out/build"
-ls "$out"/pacnix-*.pkg.tar.zst
+commit=$(sed -n 's/^commit=//p' pkg/aurutils)
+if [[ ! -f $out/aurutils.commit || $(cat "$out/aurutils.commit") != "$commit" ]]; then
+	rm -f "$out"/aurutils-*.pkg.tar.zst
+	pkg/aurutils "$out" >/dev/null 2>&1
+	echo "$commit" >"$out/aurutils.commit"
+fi
+repo-add -q "$out/pacnix.db.tar.gz" "$out"/*.pkg.tar.zst
+ls "$out"/*.pkg.tar.zst

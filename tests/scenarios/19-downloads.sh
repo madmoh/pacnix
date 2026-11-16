@@ -22,6 +22,9 @@ check $h 'grep -qx "ParallelDownloads = 1" /var/lib/pacnix/pacman.conf' "the nex
 [[ $(on $h 'md5sum /etc/pacman.conf') == "$conf" ]] || fail "pacnix changed /etc/pacman.conf"
 
 step "the source host does not resolve for 25 s"
+# The first local build creates the clean chroot, which takes longer than 25 s.
+scenario $h '{ packages.repo = [ "cowsay" ]; packages.local.other = ./packages/other; }'
+apply $h >/dev/null || fail "the build that creates the clean chroot failed"
 on $h 'echo "127.0.0.1 fastly.mirror.pkgbuild.com" | sudo tee -a /etc/hosts >/dev/null &&
 	sudo systemd-run --quiet --on-active=25 sed -i "/fastly.mirror.pkgbuild.com/d" /etc/hosts'
 scenario $h '{ packages.repo = [ "cowsay" ]; packages.local.remote = ./packages/remote; }'

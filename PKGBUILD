@@ -4,7 +4,7 @@ pkgrel=1
 pkgdesc='Declarative, reconciling management of an Arch Linux host from a Nix flake'
 arch=(x86_64)
 license=(MIT)
-depends=(base-devel curl devtools gcc-libs git glibc libarchive nix pacman sudo systemd util-linux)
+depends=(aurutils base-devel curl devtools gcc-libs git glibc libarchive nix pacman sudo systemd util-linux)
 makedepends=(cargo)
 options=(!debug)
 
@@ -21,6 +21,4 @@ package() {
   cd "$startdir/pkg"
   install -Dm644 sysusers.conf "$pkgdir/usr/lib/sysusers.d/pacnix.conf"
   install -Dm644 tmpfiles.conf "$pkgdir/usr/lib/tmpfiles.d/pacnix.conf"
-  install -dm750 "$pkgdir/etc/sudoers.d"
-  install -m440 sudoers "$pkgdir/etc/sudoers.d/pacnix"
 }

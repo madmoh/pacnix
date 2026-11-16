@@ -17,7 +17,7 @@ check $h "$repo | grep -qx perl-ole-storage-lite" "the AUR dependency is not in 
 packages_match $h
 
 step "a new AUR dependency of a built AUR package needs a confirmation"
-on $h "sudo jq '.\"perl-email-outlook-message\".depends = []' /var/lib/pacnix/aur.json | sudo tee /var/lib/pacnix/aur.json.new >/dev/null && sudo mv /var/lib/pacnix/aur.json.new /var/lib/pacnix/aur.json && sudo -u pacnix repo-remove -q /var/lib/pacnix/repo/pacnix-local.db.tar.gz perl-email-outlook-message"
+on $h "sudo jq '.\"perl-email-outlook-message\".depends = []' /var/lib/pacnix/aur.json | sudo tee /var/lib/pacnix/aur.json.new >/dev/null && sudo mv /var/lib/pacnix/aur.json.new /var/lib/pacnix/aur.json && sudo GNUPGHOME=/var/lib/pacnix/gnupg repo-remove -s -q /var/lib/pacnix/repo/pacnix-local.db.tar.gz perl-email-outlook-message"
 out=$(pacnix $h apply 2>&1) && fail "apply built a package with a new AUR dependency without a confirmation"
 grep -qx 'The AUR package perl-email-outlook-message has new AUR dependencies: perl-ole-storage-lite.' <<<"$out" || { echo "$out" | tail -5; fail "apply does not show the new AUR dependency"; }
 apply $h >/dev/null || fail "apply --yes failed"
@@ -93,5 +93,7 @@ for f in pacman:/etc/pacman.conf glibc:/etc/locale.gen util-linux:/etc/pam.d/su;
 	check $h "bsdtar -xOf /var/cache/pacman/pkg/${f%%:*}-\$(pacman -Q ${f%%:*} | cut -d' ' -f2)-*.pkg.tar.zst ${f#*:/} | cmp - ${f#*:}" "${f#*:} is not pristine"
 done
 refute $h "locale -a | grep -q ar_AE" "the locale trigger did not run after the restore"
+# The pacman.conf of the package has no [pacnix] section: add the test repository again.
+"$vm" push $h >/dev/null
 empty_plan $h
 pass

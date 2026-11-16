@@ -5,9 +5,8 @@
 #   up <name> [base]      start a VM from a fresh overlay of a base disk
 #   down <name>           delete a VM and its overlay
 #   ssh <name> [cmd...]   run a command in a VM as the user arch
-#   push <name>           copy the pacnix package and the test config into a VM. The
-#                         config builds pacnix from the source when PACNIX_SOURCE_BUILD
-#                         is set, else it repackages the host build (faster)
+#   push <name>           copy the test repository [pacnix] and the test config into a
+#                         VM, and install pacnix from it
 #   snapshot <name> <out> save a bootstrapped VM as a base disk and delete the VM
 #   ip <name>             print the address of a VM
 #   wait <name>           wait for SSH after a reboot
@@ -107,28 +106,16 @@ ssh)
 	;;
 push)
 	a=$(ip "$2")
-	rsync -a --delete --exclude scenario.nix --exclude /src --exclude /fixtures -e "ssh ${sshopts[*]}" "$root/tests/config/" "arch@$a:config/"
+	rsync -a --delete --exclude scenario.nix --exclude /fixtures -e "ssh ${sshopts[*]}" "$root/tests/config/" "arch@$a:config/"
 	rsync -a --delete -e "ssh ${sshopts[*]}" "$root/fixtures/" "arch@$a:config/fixtures/"
-	src=$cache/src
-	rm -rf "$src"
-	if [[ -n ${PACNIX_SOURCE_BUILD:-} ]]; then
-		rsync -a --exclude /target --exclude /.git --exclude /tests "$root/" "$src/"
-	else
-		mkdir -p "$src"
-		cp "$cache"/pkg/pacnix-*.pkg.tar.zst "$src/"
-		cat "$root/PKGBUILD" - >"$src/PKGBUILD" <<-'EOF'
-			# Test build: repackage the package that the host built.
-			source=("$pkgname-$pkgver-$pkgrel-x86_64.pkg.tar.zst")
-			noextract=("${source[0]}")
-			sha256sums=(SKIP)
-			makedepends=()
-			build() { :; }
-			package() { bsdtar -xf "$srcdir/${source[0]}" -C "$pkgdir" --exclude .PKGINFO --exclude .BUILDINFO --exclude .MTREE; }
-		EOF
-	fi
-	rsync -a --delete -e "ssh ${sshopts[*]}" "$src/" "arch@$a:config/src/pacnix/" --rsync-path="mkdir -p config/src && rsync"
-	rsync -a -e "ssh ${sshopts[*]}" "$cache"/pkg/*.pkg.tar.zst "arch@$a:"
-	ssh "${sshopts[@]}" "arch@$a" 'sudo pacman -U --noconfirm ~/pacnix-*.pkg.tar.zst >/dev/null && sudo rsync -a --delete --exclude scenario.nix ~/config/ /etc/pacnix/'
+	rsync -a --delete -e "ssh ${sshopts[*]}" "$cache/pkg/" "arch@$a:repo/"
+	# The test repository [pacnix] has the packages that tests/package built.
+	# Only its database is refreshed, so that the system does not change.
+	ssh "${sshopts[@]}" "arch@$a" 'sudo rsync -a --delete ~/repo/ /srv/pacnix/ &&
+		{ grep -qx "\[pacnix\]" /etc/pacman.conf || printf "\n[pacnix]\nSigLevel = Optional TrustAll\nServer = file:///srv/pacnix\n" | sudo tee -a /etc/pacman.conf >/dev/null; } &&
+		printf "[options]\nArchitecture = auto\n[pacnix]\nSigLevel = Optional TrustAll\nServer = file:///srv/pacnix\n" >/tmp/pacnix.conf &&
+		sudo pacman -Sy --config /tmp/pacnix.conf >/dev/null && sudo pacman -U --noconfirm /srv/pacnix/pacnix-*.pkg.tar.zst >/dev/null &&
+		sudo rsync -a --delete --exclude scenario.nix ~/config/ /etc/pacnix/'
 	;;
 snapshot)
 	"$0" ssh "$2" 'sudo cloud-init clean --logs && sudo truncate -s0 /etc/machine-id && sudo rm -f /etc/pacnix/scenario.nix /var/log/pacnix-test.log && sudo fstrim -a && sudo systemctl poweroff' || true
@@ -157,7 +144,7 @@ reset)
 	wait_ssh "$2"
 	;;
 *)
-	sed -n '2,17p' "$0"
+	sed -n '2,16p' "$0"
 	exit 2
 	;;
 esac

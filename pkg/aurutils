@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Builds aurutils from its AUR package at a fixed commit, for the [pacnix]
+# repository: pkg/aurutils <directory>. A release changes the commit after a
+# test with the new aurutils.
+set -euo pipefail
+commit=1a27721baab2d5b6fa5136ae4f8eb14d480b2a8a
+out=$(realpath "$1")
+build=$(mktemp -d)
+trap 'rm -rf "$build"' EXIT
+git clone -q https://aur.archlinux.org/aurutils.git "$build/aurutils"
+git -C "$build/aurutils" checkout -q "$commit"
+cd "$build/aurutils"
+BUILDDIR=$build/makepkg PKGDEST=$out makepkg -d --noconfirm >/dev/null

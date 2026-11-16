@@ -1,5 +1,5 @@
 use crate::generation::{Generation, STATE};
-use crate::{Ctx, cmd, failed, forward, output, output_any, report, run_cmd, run_quiet, trust};
+use crate::{Ctx, cmd, failed, forward, output, output_any, report, run_cmd, run_quiet, run_silent, trust};
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -10,6 +10,10 @@ const BUILD: &str = "/var/lib/pacnix/build";
 const CONF: &str = "/var/lib/pacnix/pacman.conf";
 const LOCAL_CONF: &str = "/var/lib/pacnix/pacman-local.conf";
 const SOURCES: &str = "/var/lib/pacnix/local-sources.json";
+/// The signing key of the local repository, which only root reads. Hosts that
+/// install from this repository check the fingerprint of its public key.
+const GNUPG: &str = "/var/lib/pacnix/gnupg";
+const KEY: &str = "/var/lib/pacnix/repo/pacnix-local.asc";
 const PROTECTED: &[&str] = &["base", "pacman", "nix", "pacnix"];
 
 #[derive(Default)]
@@ -242,7 +246,13 @@ fn write_confs(g: &Generation) -> Result<()> {
         Some(url) => url.trim_end_matches('/').to_string(),
         None => format!("file://{REPO}"),
     };
-    let section = format!("\n[pacnix-local]\nSigLevel = Optional TrustAll\nServer = {server}\n");
+    // root writes the local repository; its signatures are for the other hosts.
+    let level = if g.m.packages.server.is_some() { "Required" } else { "Never" };
+    // A builder host without AUR and local packages has no local repository.
+    let section = match has_local(g) {
+        true => format!("\n[pacnix-local]\nSigLevel = {level}\nServer = {server}\n"),
+        false => String::new(),
+    };
     let mut system = std::fs::read_to_string("/etc/pacman.conf")?;
     if SERIAL.load(std::sync::atomic::Ordering::Relaxed) {
         system = system
@@ -255,6 +265,10 @@ fn write_confs(g: &Generation) -> Result<()> {
     std::fs::write(CONF, format!("{system}{section}"))?;
     std::fs::write(LOCAL_CONF, format!("[options]\nArchitecture = auto\n{section}"))?;
     Ok(())
+}
+
+fn has_local(g: &Generation) -> bool {
+    !is_builder(g) || Path::new(REPO).join("pacnix-local.db.tar.gz").exists()
 }
 
 /// Refreshes the database of the pacnix-local repository only. The sync databases of
@@ -332,9 +346,6 @@ pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
     let mut table = Vec::new();
     if defer_builds(g) {
         plan.notes.push(format!("the first pacnix upgrade on the booted system builds and installs: {}", deferred(g).join(" ")));
-    } else if is_builder(g) && !has_aurutils() {
-        plan.notes.push("AUR names and dependencies are checked after apply builds aurutils".to_string());
-        plan.build = missing_aur.clone();
     } else if is_builder(g) {
         table = aur_table(&missing_aur)?;
         let found: BTreeSet<&String> = table.iter().map(|t| &t.0).collect();
@@ -494,7 +505,7 @@ fn pin(g: &Generation, plan: &mut Plan, inst: &HashMap<String, Info>, sync: &BTr
             parse_info(&output_any(pacman(&["-Si"]).arg(name))?).into_iter().next().map(|i| i.version)
         } else if let Some(i) = repo.iter().find(|i| &i.name == name) {
             Some(i.version.clone())
-        } else if is_builder(g) && has_aurutils() {
+        } else if is_builder(g) {
             let info: serde_json::Value = serde_json::from_str(&output_any(cmd("aur", &["query", "-t", "info", name]))?).unwrap_or_default();
             info["results"][0]["Version"].as_str().map(String::from)
         } else {
@@ -540,7 +551,7 @@ fn wrong_providers(g: &Generation, repo: &[Info], sync: &BTreeSet<String>) -> Re
         provides.extend(parse_info(&output_any(pacman(&["-Si"]).args(&from_sync))?).into_iter().map(|i| (i.name, i.provides)));
     }
     let from_aur: Vec<&String> = chosen.values().filter(|v| !provides.contains_key(*v) && !local_dirs(g).contains_key(*v)).collect();
-    if !from_aur.is_empty() && is_builder(g) && has_aurutils() {
+    if !from_aur.is_empty() && is_builder(g) {
         let info: serde_json::Value = serde_json::from_str(&output_any(cmd("aur", &["query", "-t", "info"]).args(&from_aur))?).unwrap_or_default();
         for r in info["results"].as_array().into_iter().flatten() {
             let list = r["Provides"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from));
@@ -612,78 +623,123 @@ fn download(names: &[&str]) -> Result<()> {
 }
 
 fn as_builder(args: &[&str]) -> Command {
-    let mut c = cmd("runuser", &["-u", "pacnix", "--", "env", &format!("HOME={BUILD}"), "AUR_PACMAN_AUTH=sudo", "LC_ALL=C"]);
+    let mut c = cmd("runuser", &["-u", "pacnix", "--", "env", &format!("HOME={BUILD}"), "LC_ALL=C"]);
     c.args(args).current_dir(BUILD);
     c
 }
 
-const MAKEPKG_CONF: &str = "/usr/share/devtools/makepkg.conf.d/x86_64.conf";
+/// The makepkg configuration of the host. The clean chroot copies it at each update.
+const MAKEPKG_CONF: &str = "/etc/makepkg.conf";
 
 const AUR_ARGS: &[&str] = &[
     "--chroot",
     "--database=pacnix-local",
     "--root=/var/lib/pacnix/repo",
     "--pacman-conf=/var/lib/pacnix/pacman.conf",
-    "--makepkg-conf=/usr/share/devtools/makepkg.conf.d/x86_64.conf",
+    "--makepkg-conf=/etc/makepkg.conf",
     "--no-confirm",
     "--no-sync",
 ];
 
-fn has_aurutils() -> bool {
-    Path::new("/usr/bin/aur").exists()
-}
-
-/// Creates the local repository if it does not exist.
+/// Creates the local repository if it does not exist. A repository without
+/// signatures, for example a new one, gets them.
 fn ensure_repo() -> Result<()> {
-    if !Path::new(&format!("{REPO}/pacnix-local.db.tar.gz")).exists() {
-        run_cmd(as_builder(&["repo-add", "-q", &format!("{REPO}/pacnix-local.db.tar.gz")]))?;
+    if Path::new(&format!("{REPO}/pacnix-local.db.tar.gz.sig")).exists() {
+        return Ok(());
     }
-    Ok(())
+    let packages: Vec<std::path::PathBuf> = std::fs::read_dir(REPO)?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.to_string_lossy().contains(".pkg.tar") && !p.to_string_lossy().ends_with(".sig"))
+        .collect();
+    repo_add(&packages)
 }
 
-/// True on a new builder host, which has no aurutils yet.
-pub fn needs_bootstrap(g: &Generation) -> bool {
-    !defer_builds(g) && is_builder(g) && !has_aurutils() && g.m.packages.aur.contains(&"aurutils".to_string())
+fn gpg(args: &[&str]) -> Command {
+    let mut c = cmd("gpg", &["--homedir", GNUPG, "--batch"]);
+    c.args(args);
+    c
 }
 
-/// Builds aurutils from the AUR with makepkg into the local repository and
-/// installs it, because aurutils itself comes from the AUR and the plan needs
-/// it for the AUR graph.
-pub fn bootstrap(g: &Generation, record: &mut Builds) -> Result<()> {
-    report::progress("build aurutils from the AUR, because the plan needs it");
-    write_confs(g)?;
-    ensure_repo()?;
-    sync_pacnix_db()?;
-    let dir = format!("{BUILD}/aurutils");
-    let _ = std::fs::remove_dir_all(&dir);
-    run_cmd(as_builder(&["git", "clone", "-q", "--depth", "1", "https://aur.archlinux.org/aurutils.git", &dir]))?;
-    let (_, deps) = srcinfo(&dir)?;
-    download(&deps.iter().map(String::as_str).collect::<Vec<_>>())?;
-    transaction(&[&["-S", "--needed", "--asdeps", "--noconfirm"][..], &deps.iter().map(String::as_str).collect::<Vec<_>>()].concat())?;
-    run_cmd(as_builder(&["env", &format!("PKGDEST={REPO}"), "makepkg", "--noconfirm"]).current_dir(&dir))?;
-    let pkg = output(as_builder(&["env", &format!("PKGDEST={REPO}"), "makepkg", "--packagelist"]).current_dir(&dir))?;
-    let pkg = pkg.lines().next().context("makepkg gave no package of aurutils")?.to_string();
-    run_cmd(as_builder(&["repo-add", "-q", &format!("{REPO}/pacnix-local.db.tar.gz"), &pkg]))?;
-    transaction(&["-U", "--noconfirm", &pkg])?;
-    if let Some(mut r) = record.records.remove("aurutils") {
-        r.head = output(as_builder(&["git", "-C", &dir, "rev-parse", "HEAD"]))?.trim().to_string();
-        trust::save("aurutils", r)?;
+/// The fingerprints in the output of gpg --with-colons.
+fn fingerprints(text: &str) -> Vec<String> {
+    text.lines().filter(|l| l.starts_with("fpr:")).filter_map(|l| l.split(':').nth(9)).map(String::from).collect()
+}
+
+/// The fingerprint of the signing key of the local repository. The first call
+/// makes the key and its public file in the repository, and shows the fingerprint.
+fn signing_key() -> Result<String> {
+    if !Path::new(GNUPG).join("pubring.kbx").exists() {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(GNUPG)?;
+        let host = std::fs::read_to_string("/etc/hostname").unwrap_or_default();
+        run_quiet(gpg(&["--passphrase", "", "--quick-gen-key", &format!("pacnix-local of {}", host.trim()), "ed25519", "sign", "never"]))?;
     }
-    Ok(())
+    let key = fingerprints(&output(gpg(&["--with-colons", "--list-secret-keys"]))?).into_iter().next().context("the signing key of the local repository has no fingerprint")?;
+    if !Path::new(KEY).exists() {
+        run_quiet(gpg(&["--armor", "--output", KEY, "--export", &key]))?;
+        report::last(format!("pacnix: the key {key} signs the local repository. A host that installs from it declares packages.serverKey = \"{key}\";"));
+    }
+    Ok(key)
 }
 
-/// Creates the clean chroot. mkarchroot writes .arch-chroot at the end, thus a
-/// chroot without it is the remainder of a failed attempt.
+/// Signs packages and adds them to the local repository, which then has the
+/// new versions only.
+fn repo_add(files: &[std::path::PathBuf]) -> Result<()> {
+    let key = signing_key()?;
+    for f in files {
+        run_quiet(gpg(&["--yes", "--local-user", &key, "--detach-sign"]).arg(f))?;
+    }
+    let mut c = cmd("repo-add", &["-q", "-R", "-s", "-k", &key, &format!("{REPO}/pacnix-local.db.tar.gz")]);
+    run_cmd(c.args(files).env("GNUPGHOME", GNUPG))
+}
+
+/// Trusts the signing key of packages.server with pacman-key, after a check of
+/// its fingerprint against packages.serverKey.
+fn trust_server(g: &Generation) -> Result<()> {
+    let (Some(url), Some(key)) = (&g.m.packages.server, &g.m.packages.server_key) else { return Ok(()) };
+    let key = key.replace(' ', "").to_uppercase();
+    if run_silent(cmd("pacman-key", &["--list-keys", &key])).is_ok() {
+        return Ok(());
+    }
+    report::progress("trust the signing key of the server");
+    let url = format!("{}/pacnix-local.asc", url.trim_end_matches('/'));
+    let file = format!("/run/pacnix/server-{}.asc", std::process::id());
+    std::fs::create_dir_all("/run/pacnix")?;
+    output(cmd("curl", &["-fsSL", "--retry", "3", "-o", &file, &url])).with_context(|| format!("download {url}"))?;
+    let found = fingerprints(&output(cmd("gpg", &["--homedir", "/etc/pacman.d/gnupg", "--batch", "--with-colons", "--show-keys", &file]))?);
+    if found.first() != Some(&key) {
+        let _ = std::fs::remove_file(&file);
+        bail!("the key in {url} has the fingerprint {}, but packages.serverKey is {key}", found.first().map_or("none", |f| f.as_str()));
+    }
+    run_quiet(cmd("pacman-key", &["--add", &file]))?;
+    let _ = std::fs::remove_file(&file);
+    run_quiet(cmd("pacman-key", &["--lsign-key", &key]))
+}
+
+/// aur chroot as root. devtools needs root for the clean chroot, and the
+/// builder user has no way to root: a PKGBUILD that runs on the host as the
+/// builder user, for example to download its sources, cannot change the system.
+fn chroot(args: &[&str]) -> Command {
+    let mut c = cmd("aur", &["chroot", "--pacman-conf", CONF, "--makepkg-conf", MAKEPKG_CONF, "--user", "pacnix"]);
+    c.args(args).env("AUR_PACMAN_AUTH", "env").env("LC_ALL", "C");
+    c
+}
+
+/// Creates the clean chroot, or updates it and its copy of the makepkg
+/// configuration. mkarchroot writes .arch-chroot at the end, thus a chroot
+/// without it is the remainder of a failed attempt.
 fn ensure_chroot() -> Result<()> {
     let root = Path::new("/var/lib/aurbuild/x86_64/root");
     if root.join(".arch-chroot").exists() {
-        return Ok(());
+        report::progress("update the clean chroot");
+        return run_cmd(chroot(&["--update"]));
     }
     report::progress("create the clean chroot for the builds");
     if root.exists() {
         run_cmd(cmd("rm", &["-rf", "--one-file-system"]).arg(root))?;
     }
-    run_cmd(as_builder(&["aur", "chroot", "--create", "--pacman-conf", CONF, "--makepkg-conf", MAKEPKG_CONF]))
+    run_cmd(chroot(&["--create"]))
 }
 
 /// The packages to build, in build order, with a flag for local packages, the
@@ -708,14 +764,6 @@ fn base(dir: &str) -> String {
     Path::new(dir).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-/// The records of aurutils when apply builds it first, for the question.
-pub fn bootstrap_builds(g: &Generation) -> Result<Builds> {
-    match needs_bootstrap(g) {
-        true => Builds::of(vec![], &["aurutils"]),
-        false => Ok(Builds::default()),
-    }
-}
-
 /// Gets the PKGBUILDs of the AUR and local packages to build, before any
 /// change: aur sync --no-build gives the AUR packages with their AUR
 /// dependencies in build order.
@@ -723,8 +771,8 @@ pub fn fetch_builds(g: &Generation, plan: &Plan) -> Result<Builds> {
     if !is_builder(g) || defer_builds(g) || (plan.build.is_empty() && plan.local.is_empty()) {
         return Ok(Builds::default());
     }
-    write_confs(g)?;
     ensure_repo()?;
+    write_confs(g)?;
     sync_pacnix_db()?;
     let mut aur: Vec<String> = plan.build.clone();
     let mut dirs = Vec::new();
@@ -760,7 +808,7 @@ pub fn fetch_builds(g: &Generation, plan: &Plan) -> Result<Builds> {
 /// Builds AUR and local packages into the local repository and drops packages
 /// that no declaration needs.
 fn build(g: &Generation, plan: &Plan, builds: Builds) -> Result<()> {
-    build_dirs(builds)?;
+    build_dirs(g, builds)?;
     if !plan.local.is_empty() {
         let mut sources = local_sources();
         let dirs_of = local_dirs(g);
@@ -771,7 +819,8 @@ fn build(g: &Generation, plan: &Plan, builds: Builds) -> Result<()> {
     }
     if !plan.drop.is_empty() {
         let files: Vec<String> = repo_db(g)?.into_iter().filter(|i| plan.drop.contains(&i.name)).map(|i| i.filename).collect();
-        run_cmd(as_builder(&["repo-remove", "-q", &format!("{REPO}/pacnix-local.db.tar.gz")]).args(&plan.drop))?;
+        let key = signing_key()?;
+        run_cmd(cmd("repo-remove", &["-q", "-s", "-k", &key, &format!("{REPO}/pacnix-local.db.tar.gz")]).args(&plan.drop).env("GNUPGHOME", GNUPG))?;
         for f in files {
             let _ = std::fs::remove_file(format!("{REPO}/{f}"));
             let _ = std::fs::remove_file(format!("{REPO}/{f}.sig"));
@@ -791,13 +840,16 @@ fn fetch(mut c: impl std::borrow::BorrowMut<Command>) -> Result<Vec<String>> {
 }
 
 /// Builds package directories in their order, one by one, so that the
-/// progress shows each package. aur build skips an AUR package that the local
-/// repository already has, thus a new attempt continues after the last
-/// package that was built. Local packages build again each time. Before the
-/// build of an AUR package, the output shows the changes of its PKGBUILD since
-/// its last build; after the build, its record keeps the built revision.
-fn build_dirs(mut builds: Builds) -> Result<()> {
-    let list = format!("{BUILD}/build.queue");
+/// progress shows each package. An AUR package that the local repository has
+/// at the version of its .SRCINFO is skipped, thus a new attempt continues
+/// after the last package that was built. Local packages build again each
+/// time. Before the build of an AUR package, the output shows the changes of
+/// its PKGBUILD since its last build; after the build, its record keeps the
+/// built revision. root moves the packages into the local repository, which
+/// the builder user cannot change.
+fn build_dirs(g: &Generation, mut builds: Builds) -> Result<()> {
+    let out = format!("{BUILD}/out");
+    let built: HashMap<String, String> = repo_db(g)?.into_iter().map(|i| (i.name, i.version)).collect();
     let count = builds.queue.len();
     for (i, (dir, local)) in builds.queue.iter().enumerate() {
         let name = base(dir);
@@ -814,19 +866,50 @@ fn build_dirs(mut builds: Builds) -> Result<()> {
             println!("pacnix: changes of the AUR package {name} since its last build:");
             run_cmd(as_builder(&["git", "-C", dir, "--no-pager", "diff", "--stat", "--patch", &old, &head]))?;
         }
-        std::fs::write(&list, format!("{dir}\n"))?;
-        let mut c = as_builder(&["aur", "build", "--arg-file", &list]);
-        c.args(AUR_ARGS);
-        if *local {
-            c.arg("--force");
+        let (names, version) = srcinfo_file(dir);
+        if *local || !names.iter().all(|n| built.get(n) == Some(&version)) {
+            let _ = std::fs::remove_dir_all(&out);
+            run_cmd(as_builder(&["mkdir", &out]))?;
+            let mut c = chroot(&["--build"]);
+            c.current_dir(dir).env("PKGDEST", &out);
+            run_cmd(c).context(step)?;
+            // No process of the builder user stays to change the packages.
+            let _ = cmd("pkill", &["-KILL", "-u", "pacnix"]).status();
+            let mut files = Vec::new();
+            for e in std::fs::read_dir(&out)? {
+                let path = e?.path();
+                if path.to_string_lossy().contains(".pkg.tar") && !path.to_string_lossy().ends_with(".sig") {
+                    let target = Path::new(REPO).join(path.file_name().unwrap_or_default());
+                    std::os::unix::fs::chown(&path, Some(0), Some(0))?;
+                    std::fs::rename(&path, &target)?;
+                    files.push(target);
+                }
+            }
+            repo_add(&files)?;
         }
-        run_cmd(c).context(step)?;
         if let Some(mut r) = record {
             r.head = head;
             trust::save(&name, r)?;
         }
     }
     Ok(())
+}
+
+/// The package names and the version in the .SRCINFO of an AUR package.
+fn srcinfo_file(dir: &str) -> (Vec<String>, String) {
+    let text = std::fs::read_to_string(Path::new(dir).join(".SRCINFO")).unwrap_or_default();
+    let (mut names, mut fields) = (Vec::new(), BTreeMap::new());
+    for (k, v) in text.lines().filter_map(|l| l.trim().split_once(" = ")) {
+        match k {
+            "pkgname" => names.push(v.to_string()),
+            "epoch" | "pkgver" | "pkgrel" => {
+                fields.entry(k).or_insert(v);
+            }
+            _ => {}
+        }
+    }
+    let epoch = fields.get("epoch").filter(|e| **e != "0").map(|e| format!("{e}:")).unwrap_or_default();
+    (names, format!("{epoch}{}-{}", fields.get("pkgver").unwrap_or(&""), fields.get("pkgrel").unwrap_or(&"")))
 }
 
 /// Removes a stale pacman lock that a killed transaction left, and the local
@@ -886,8 +969,10 @@ fn transaction(args: &[&str]) -> Result<()> {
 /// nothing downloads.
 pub fn prepare(g: &Generation, plan: &Plan, builds: Builds) -> Result<()> {
     write_confs(g)?;
-    if is_builder(g) && (!g.m.packages.aur.is_empty() || !g.m.packages.local.is_empty() || Path::new(REPO).join("pacnix-local.db.tar.gz").exists()) {
+    trust_server(g)?;
+    if is_builder(g) && (!g.m.packages.aur.is_empty() || !g.m.packages.local.is_empty() || has_local(g)) {
         ensure_repo()?;
+        write_confs(g)?;
         if !defer_builds(g) {
             // The build asks pacman for the dependencies, which needs the
             // pacnix database also on a new host.
@@ -898,7 +983,9 @@ pub fn prepare(g: &Generation, plan: &Plan, builds: Builds) -> Result<()> {
             build(g, plan, builds)?;
         }
     }
-    sync_pacnix_db()?;
+    if has_local(g) {
+        sync_pacnix_db()?;
+    }
     download(&plan.targets())
 }
 
@@ -936,10 +1023,10 @@ pub fn apply(plan: &Plan) -> Result<()> {
 }
 
 /// The AUR packages that upgrade, before any change, with their records and the
-/// changes that need a confirmation. A host without aurutils or without a
-/// local repository has none yet: the apply after the upgrade builds them.
+/// changes that need a confirmation. A host without a local repository has
+/// none yet: the apply after the upgrade builds them.
 pub fn upgrade_builds(g: &Generation) -> Result<Builds> {
-    if !is_builder(g) || !has_aurutils() || !Path::new(REPO).join("pacnix-local.db.tar.gz").exists() {
+    if !is_builder(g) || !Path::new(REPO).join("pacnix-local.db.tar.gz").exists() {
         return Ok(Builds::default());
     }
     write_confs(g)?;
@@ -957,6 +1044,7 @@ pub fn upgrade_builds(g: &Generation) -> Result<Builds> {
 /// Full upgrade: all sync databases, the system packages, then changed AUR packages.
 pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
     write_confs(g)?;
+    trust_server(g)?;
     report::progress("upgrade the system with pacman -Syu");
     let pins = pinned(g);
     let pins: Vec<&str> = pins.iter().map(String::as_str).collect();
@@ -964,8 +1052,7 @@ pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
     transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
     if !builds.queue.is_empty() {
         ensure_chroot()?;
-        run_cmd(as_builder(&["aur", "chroot", "--update", "--pacman-conf", CONF, "--makepkg-conf", MAKEPKG_CONF]))?;
-        build_dirs(builds)?;
+        build_dirs(g, builds)?;
         sync_pacnix_db()?;
         transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
     }

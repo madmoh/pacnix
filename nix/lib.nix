@@ -39,6 +39,7 @@ let
       aur = lib.unique cfg.packages.aur;
       local = lib.mapAttrs (name: dir: "${builtins.path { path = dir; name = storeName name; }}") cfg.packages.local;
       server = cfg.packages.server;
+      serverKey = cfg.packages.serverKey;
       providers = cfg.packages.providers;
       versions = cfg.packages.versions;
       serve = {

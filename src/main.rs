@@ -12,6 +12,7 @@ use clap::{Args, Parser, Subcommand};
 use std::borrow::BorrowMut;
 use std::io::{BufRead, IsTerminal, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
@@ -74,8 +75,12 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    // Like paru, pacnix runs as the user and elevates one time, before any
+    // change, so that a long build cannot outlast the sudo timestamp.
     if unsafe { libc::geteuid() } != 0 {
-        bail!("run pacnix as root");
+        let exe = std::env::current_exe()?;
+        let e = Command::new("sudo").arg("--").arg(exe).args(std::env::args_os().skip(1)).exec();
+        return Err(e).context("run pacnix with sudo");
     }
     let host = match cli.host {
         Some(h) => h,
@@ -141,8 +146,9 @@ fn cause(e: &anyhow::Error) -> Cause {
         let message = pacman
             .or_else(|| l.starts_with("curl: (").then_some(l))
             .or_else(|| l.strip_prefix("fatal: unable to access '").and_then(|r| r.split_once("': ")).map(|x| x.1))
-            .or_else(|| l.strip_prefix("error: unable to download '").and_then(|r| r.split_once("': ")).map(|x| x.1))
-            .or_else(|| l.starts_with("error: RPC failed").then_some("Recv failure"));
+            .or_else(|| l.split_once("error: unable to download '").and_then(|(_, r)| r.split_once("': ")).map(|x| x.1))
+            .or_else(|| l.starts_with("error: RPC failed").then_some("Recv failure"))
+            .or_else(|| l.ends_with("Truncated tar archive detected while reading data").then_some("transfer closed with"));
         let Some(message) = message else { continue };
         if pacman.is_some() && message.contains("returned error: 404") {
             return Cause::Stale;
@@ -225,7 +231,7 @@ pub fn describe(cmd: &Command) -> String {
     if words[0] == "runuser" {
         start = words.iter().position(|w| w == "--").map_or(0, |i| i + 1);
         if words.get(start).is_some_and(|w| w == "env") {
-            start += 1 + words[start + 1..].iter().take_while(|w| w.contains('=')).count();
+            start += 1 + words[start + 1..].iter().take_while(|w| w.contains('=') || w.starts_with('-')).count();
         }
     }
     words[start..].join(" ")

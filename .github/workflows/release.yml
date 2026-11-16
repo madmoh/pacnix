@@ -1,5 +1,5 @@
-# A tag vX.Y.Z builds the pacnix package and publishes it as a release. The
-# release files are a signed pacman repository with the name pacnix:
+# A tag vX.Y.Z builds the pacnix and aurutils packages and publishes them as a
+# release. The release files are a signed pacman repository with the name pacnix:
 #   [pacnix]
 #   Server = https://github.com/OWNER/pacnix/releases/latest/download
 name: release
@@ -23,23 +23,26 @@ jobs:
           v=${GITHUB_REF_NAME#v}
           grep -qx "pkgver=$v" PKGBUILD
           grep -qx "version = \"$v\"" Cargo.toml
-      - name: Build the package
+      - name: Build the packages
         run: |
           useradd -m builder
           chown -R builder .
           # makepkg uses src/ and pkg/ of the checkout unless BUILDDIR is elsewhere.
           runuser -u builder -- env BUILDDIR=/tmp/makepkg PKGDEST="$PWD" makepkg --nodeps --noconfirm
-      - name: Sign the package and make the repository
+          runuser -u builder -- pkg/aurutils "$PWD"
+      - name: Sign the packages and make the repository
         env:
           SIGNING_KEY: ${{ secrets.PACNIX_SIGNING_KEY }}
         run: |
           gpg --batch --import <<<"$SIGNING_KEY"
           key=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/ { print $10; exit }')
-          pkg=$(ls pacnix-*.pkg.tar.zst)
-          gpg --batch --detach-sign --local-user "$key" "$pkg"
-          repo-add --sign --key "$key" pacnix.db.tar.gz "$pkg"
           mkdir release
-          cp -L "$pkg" "$pkg.sig" pacnix.db pacnix.db.sig pacnix.files pacnix.files.sig release/
+          for pkg in pacnix-*.pkg.tar.zst aurutils-*.pkg.tar.zst; do
+            gpg --batch --detach-sign --local-user "$key" "$pkg"
+            repo-add --sign --key "$key" pacnix.db.tar.gz "$pkg"
+            cp "$pkg" "$pkg.sig" release/
+          done
+          cp -L pacnix.db pacnix.db.sig pacnix.files pacnix.files.sig release/
           gpg --armor --export "$key" > release/pacnix.asc
       - name: Publish the release
         env:

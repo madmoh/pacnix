@@ -19,6 +19,10 @@
 
       [extra]
       Include = /etc/pacman.d/mirrorlist
+
+      [pacnix]
+      SigLevel = Optional TrustAll
+      Server = file:///srv/pacnix
     '';
     files."/etc/locale.gen".text = "en_US.UTF-8 UTF-8\nar_AE.UTF-8 UTF-8\n";
     triggers.locale = { paths = [ "/etc/locale.gen" ]; command = "locale-gen"; };

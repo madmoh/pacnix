@@ -14,6 +14,8 @@ refute $h 'pacman -Q darkhttpd' "darkhttpd is still installed"
 refute $h 'test -e /etc/systemd/system/demo-web.service' "the unit file of the feature remains"
 refute $h 'grep -qx Color /etc/pacman.conf' "the pacman.conf override remains"
 packages_match $h
+# The pacman.conf of the package has no [pacnix] section: add the test repository again.
+"$vm" push $h >/dev/null
 step "the plan returns to the configuration"
 plan $h | grep -qx 'install package darkhttpd' || fail "the plan does not restore the configuration"
 apply $h >/dev/null || fail "apply after rollback failed"

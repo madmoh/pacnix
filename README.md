@@ -6,7 +6,7 @@ pacnix is idempotent and it reconciles: when you remove a declaration, its packa
 
 ## Installation
 
-pacnix is in the signed pacman repository `[pacnix]`, which the releases of this project supply. Each release has the package, the repository database and the signing key `pacnix.asc`. To trust the key and add the repository, run these commands as root. During an Arch Linux installation, run them on the live system.
+pacnix is in the signed pacman repository `[pacnix]`, which the releases of this project supply. Each release has the packages of pacnix and [aurutils](https://github.com/aurutils/aurutils), the repository database and the signing key `pacnix.asc`. pacnix uses aurutils for the AUR, thus aurutils is a dependency of pacnix and comes built from `[pacnix]`. To trust the key and add the repository, run these commands as root. During an Arch Linux installation, run them on the live system.
 
 ```sh
 curl -fLO https://github.com/madmoh/pacnix/releases/latest/download/pacnix.asc
@@ -31,18 +31,18 @@ cp -a config /mnt/etc/pacnix
 arch-chroot /mnt pacnix apply --host myhost
 ```
 
-`pacstrap -K` gives the new system an empty keyring, thus the key is added again in the chroot. If `pacstrap` fails, for example because a mirror stops, run it again: the packages that it downloaded stay in the pacman cache of `/mnt`. The apply in the chroot does these steps:
+In the chroot, you are root. `pacstrap -K` gives the new system an empty keyring, thus the key is added again in the chroot. If `pacstrap` fails, for example because a mirror stops, run it again: the packages that it downloaded stay in the pacman cache of `/mnt`. The apply in the chroot does these steps:
 
 - It installs the packages from the repositories.
 - It writes the files and enables the services.
 - It runs the triggers, for example `locale-gen` and the installation of the boot loader.
 
-A chroot cannot build AUR packages or activate a home configuration. At the end, the apply in the chroot shows the packages and home configurations that wait for the booted system, and the next command. Set the passwords with `passwd` before you reboot. pacnix does not manage secrets.
+A chroot cannot build AUR packages or activate a home configuration. At the end, the apply in the chroot shows the packages and home configurations that wait for the booted system, and the next command. `arch-chroot` mounts `/etc/resolv.conf` of the live system, thus pacnix cannot write a declared `/etc/resolv.conf` in the chroot. Write it after you leave the chroot, as the output shows, for example `ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf` for [systemd-resolved](https://wiki.archlinux.org/title/Systemd-resolved). Set the passwords with `passwd` before you reboot. pacnix does not manage secrets.
 
 Reboot and log in. Connect to the network, for example to a WiFi network in the desktop. Then run:
 
 ```sh
-sudo pacnix upgrade
+pacnix upgrade
 ```
 
 The upgrade refreshes the sync databases, builds and installs the AUR and local packages, and activates the home configurations. The builds can take a long time. When a step gives no output for 60 s, pacnix writes a line that tells that the step continues. A new installation asks no question.
@@ -73,7 +73,7 @@ Each file in `modules` is a module of the [NixOS module system](https://nixos.or
 # /etc/pacnix/hosts/myhost.nix
 {
   packages.repo = [ "base" "linux" "linux-firmware" "pacnix" "grub" "networkmanager" "firefox" ];
-  packages.aur = [ "aurutils" "visual-studio-code-bin" ];
+  packages.aur = [ "visual-studio-code-bin" ];
   packages.local.my-tool = ../packages/my-tool;
 
   files."/etc/hostname".text = "myhost\n";
@@ -97,14 +97,19 @@ Each file in `modules` is a module of the [NixOS module system](https://nixos.or
 | Option | Function |
 |---|---|
 | `packages.repo` | Packages from the sync repositories. A [group](https://wiki.archlinux.org/title/Package_group) name, for example `gnome`, stands for all the members of the group. To select some members, declare the members. |
-| `packages.aur` | Packages from the [AUR](https://wiki.archlinux.org/title/Arch_User_Repository). This option needs `aurutils`. |
+| `packages.aur` | Packages from the [AUR](https://wiki.archlinux.org/title/Arch_User_Repository). |
 | `packages.local` | Directories that contain a [PKGBUILD](https://wiki.archlinux.org/title/PKGBUILD), by package name. |
 | `packages.providers` | The package that satisfies a dependency, for example `{ jack = "pipewire-jack"; }`. This option has the same function as the provider choice of pacman. |
 | `packages.versions` | An exact version for a declared package, for example `{ linux = "6.12.9.arch1-1"; }`. A repository package at a different version comes from the [Arch Linux Archive](https://wiki.archlinux.org/title/Arch_Linux_Archive). `pacnix upgrade` keeps the version. |
 | `packages.server` | The URL of the repository of a different host. With this option, the host builds nothing. |
+| `packages.serverKey` | The fingerprint of the key that signs the repository of `packages.server`. |
 | `packages.serve.aur`, `packages.serve.local` | Packages that this host builds only for other hosts. |
 
-After an apply, the explicitly installed packages are equal to the declared packages, and no orphan packages stay installed. pacnix uses [aurutils](https://github.com/aurutils/aurutils) to build AUR and local packages in a [clean chroot](https://wiki.archlinux.org/title/DeveloperWiki:Building_in_a_clean_chroot). The packages go into the local repository `/var/lib/pacnix/repo`. To give this repository to other hosts, serve it with an HTTP server.
+After an apply, the explicitly installed packages are equal to the declared packages, and no orphan packages stay installed. pacnix uses aurutils to build AUR and local packages in a [clean chroot](https://wiki.archlinux.org/title/DeveloperWiki:Building_in_a_clean_chroot) with the settings of `/etc/makepkg.conf`, for example the compression, `MAKEFLAGS` and debug packages. Declare this file to change them, see [makepkg](https://wiki.archlinux.org/title/Makepkg). The packages go into the local repository `/var/lib/pacnix/repo`.
+
+The PKGBUILD of a package runs on the host as the user `pacnix`, for example to download the sources, and in the clean chroot for the build. The user `pacnix` has no sudo rule: root starts the clean chroot and adds the packages to the repository, which the user `pacnix` cannot change.
+
+pacnix signs the local repository with a key that it makes at the first build and keeps in `/var/lib/pacnix/gnupg`. At that time, the output shows the fingerprint. To give the repository to other hosts, serve `/var/lib/pacnix/repo` with an HTTP server. On each of the other hosts, declare `packages.server` and the fingerprint in `packages.serverKey`. pacnix then downloads the public key `pacnix-local.asc` from the server, makes sure that it has the declared fingerprint, and trusts it with `pacman-key`. pacman installs only the packages that have a correct signature. To show the fingerprint again, run `gpg --show-keys /var/lib/pacnix/repo/pacnix-local.asc`.
 
 Arch Linux does not support [partial upgrades](https://wiki.archlinux.org/title/System_maintenance#Partial_upgrades_are_unsupported). A pinned library can break the packages that need a newer version. An AUR package keeps the version in the local repository. For a different version, declare its PKGBUILD in `packages.local`.
 
@@ -160,6 +165,8 @@ pacnix does not manage these items:
 - secrets and passwords
 
 ## Usage
+
+Run pacnix as your user. Before it changes the system, pacnix starts itself again with `sudo`, which asks for your password one time. pacnix evaluates the configuration as the owner of the flake directory, builds packages as the user `pacnix`, and activates each home configuration as its user. Thus no file in a home directory becomes the property of root.
 
 | Command | Function |
 |---|---|

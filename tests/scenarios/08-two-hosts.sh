@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
 # Scenario 8: one config repository with shared and host-specific features.
-# desktop builds the AUR repository and serves it, laptop installs from it,
-# then newpc joins as a new machine.
+# desktop builds the AUR repository, signs it and serves it, laptop installs
+# from it after a check of the declared key, then newpc joins as a new
+# machine. A wrong key and a changed package stop newpc before any change.
 size=(4 6144 2)
 source "$(dirname "$0")/../lib.sh"
 plain=$cache/base-20261101.620452.qcow2
 fresh desktop "$plain"
 fresh laptop "$plain"
 step "desktop builds and serves the repository"
-apply desktop || fail "apply on desktop failed"
+out=$(apply desktop) || { echo "$out" | tail -30; fail "apply on desktop failed"; }
 packages_match desktop
+key=$(on desktop "sudo gpg --homedir /var/lib/pacnix/gnupg --with-colons --list-keys | awk -F: '/^fpr/ { print \$10; exit }'")
+grep -qxF "pacnix: the key $key signs the local repository. A host that installs from it declares packages.serverKey = \"$key\";" <<<"$out" || fail "apply does not show the key of the new repository"
 served='curl -fsS http://localhost:8080/pacnix-local.db | bsdtar -xOf - | grep -A1 "^%NAME%" | grep -v "^%NAME%\|^--"'
-for p in downgrade perl-email-outlook-message perl-ole-storage-lite aurutils pacnix; do
+for p in downgrade perl-email-outlook-message perl-ole-storage-lite; do
 	check desktop "$served | grep -qx $p" "the repository of desktop does not serve $p"
 done
 refute desktop 'pacman -Q downgrade' "desktop installs the AUR package of laptop"
 check desktop 'grep -qx HandleLidSwitch=ignore /etc/systemd/logind.conf.d/50-lid.conf' "the host value of desktop is wrong"
 step "laptop installs from the repository of desktop"
+scenario laptop "{ packages.serverKey = \"$key\"; }"
 apply laptop || fail "apply on laptop failed"
 packages_match laptop
 check laptop 'pacman -Q downgrade zsh-antidote' "laptop lacks AUR packages"
@@ -29,6 +33,16 @@ empty_plan desktop
 "$vm" down laptop
 step "newpc joins as a new machine"
 fresh newpc "$plain"
+scenario newpc '{ packages.serverKey = "0000000000000000000000000000000000000000"; }'
+out=$(apply newpc) && fail "apply on newpc with a wrong key succeeded"
+grep -q "^pacnix: error: the key in http://desktop:8080/pacnix-local.asc has the fingerprint $key, but packages.serverKey is 0000" <<<"$out" || { echo "$out" | tail; fail "the error does not show the wrong key"; }
+refute newpc 'pacman -Q zsh-antidote' "newpc installed a package with a wrong key"
+scenario newpc "{ packages.serverKey = \"$key\"; }"
+on desktop 'f=$(ls /var/lib/pacnix/repo/trash-d-[0-9]*.pkg.tar.zst) && sudo cp "$f" /root/ && printf x | sudo dd of="$f" bs=1 seek=100 conv=notrunc status=none'
+out=$(apply newpc) && fail "apply on newpc with a changed package succeeded"
+grep -q 'error: failed to commit transaction (invalid or corrupted package)' <<<"$out" || { echo "$out" | tail; fail "pacman does not refuse the changed package"; }
+refute newpc 'pacman -Q zsh-antidote' "newpc installed packages with a changed package"
+on desktop "sudo sh -c 'cp /root/trash-d-[0-9]*.pkg.tar.zst /var/lib/pacnix/repo/'"
 apply newpc || fail "apply on newpc failed"
 packages_match newpc
 check newpc 'pacman -Q aurutils pacnix zsh-antidote trash-d' "newpc lacks AUR packages"

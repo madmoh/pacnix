@@ -52,15 +52,21 @@ in
       example = "http://desktop:8080";
       description = "URL of the pacnix-local repository of a different host. When set, this host installs AUR and local packages from that URL and builds nothing.";
     };
+    serverKey = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "3AA5C34371567BD2D3B5B1C8F5B4A8E1C2D3E4F5";
+      description = "Fingerprint of the key that signs the repository of packages.server. The builder host shows it after it makes the key.";
+    };
   };
   config.assertions = [
     {
-      assertion = duplicates == [ ];
-      message = "packages: these names are in more than one of repo, aur and local: ${toString duplicates}";
+      assertion = cfg.server == null || cfg.serverKey != null;
+      message = "packages.server: declare the fingerprint of the key of the server in packages.serverKey.";
     }
     {
-      assertion = cfg.server != null || (cfg.aur == [ ] && cfg.local == { } && cfg.serve.aur == [ ] && cfg.serve.local == { }) || lib.elem "aurutils" cfg.aur;
-      message = "packages: a host that builds AUR or local packages declares aurutils in packages.aur. pacnix builds it first on a new host.";
+      assertion = duplicates == [ ];
+      message = "packages: these names are in more than one of repo, aur and local: ${toString duplicates}";
     }
     {
       assertion = lib.all (n: lib.elem n (cfg.repo ++ cfg.aur)) (lib.attrNames cfg.versions);

@@ -8,6 +8,7 @@ pub const PROFILE: &str = "/nix/var/nix/profiles/pacnix";
 pub const STATE: &str = "/var/lib/pacnix";
 const PENDING: &str = "/var/lib/pacnix/pending";
 const MODULES: &str = "/usr/share/pacnix";
+const NIX: [&str; 3] = ["nix", "--extra-experimental-features", "nix-command flakes"];
 
 #[derive(Deserialize, Default, Clone)]
 #[serde(default)]
@@ -30,6 +31,8 @@ pub struct Packages {
     pub providers: BTreeMap<String, String>,
     pub versions: BTreeMap<String, String>,
     pub server: Option<String>,
+    #[serde(rename = "serverKey")]
+    pub server_key: Option<String>,
     pub serve: Serve,
 }
 
@@ -99,13 +102,24 @@ impl Generation {
 /// Evaluates the flake and writes the generation to the Nix store. The notes
 /// of Nix about a dirty Git tree and about the lock file are not shown: the
 /// override of the pacnix input always changes the lock file, and pacnix never
-/// writes it.
+/// writes it. Nix evaluates as the owner of the flake through the nix-daemon,
+/// thus the Nix cache and the Git checks of the flake are those of the owner.
 pub fn build(ctx: &Ctx) -> Result<Generation> {
     report::progress("evaluate the configuration");
     let attr = format!("{}#pacnixConfigurations.\"{}\".generation", ctx.flake, ctx.host);
-    let result = format!("/run/pacnix/eval-{}", std::process::id());
-    std::fs::create_dir_all("/run/pacnix")?;
-    let mut c = nix(&["eval", "--no-warn-dirty", "--write-to", &result, &attr]);
+    let dir = format!("/run/pacnix/eval-{}", std::process::id());
+    let result = format!("{dir}/generation");
+    std::fs::create_dir_all(&dir)?;
+    let mut c = match owner(&ctx.flake) {
+        Some((uid, gid, user, home)) => {
+            std::os::unix::fs::chown(&dir, Some(uid), Some(gid))?;
+            let mut c = cmd("runuser", &["-u", &user, "--", "env", "-i", &format!("HOME={home}"), "PATH=/usr/local/bin:/usr/bin"]);
+            c.args(NIX);
+            c
+        }
+        None => cmd(NIX[0], &NIX[1..]),
+    };
+    c.args(["eval", "--no-warn-dirty", "--write-to", &result, &attr]);
     if Path::new(MODULES).join("flake.nix").exists() {
         c.args(["--override-input", "pacnix", &format!("path:{MODULES}")]);
     }
@@ -115,17 +129,25 @@ pub fn build(ctx: &Ctx) -> Result<Generation> {
         !lock_note
     })?;
     let path = std::fs::read_to_string(&result);
-    let _ = std::fs::remove_file(&result);
+    let _ = std::fs::remove_dir_all(&dir);
     if !status.success() {
         return Err(failed(&c, status, &lines)).context("evaluate the configuration");
     }
     Generation::load(path?.trim())
 }
 
-pub fn nix(args: &[&str]) -> std::process::Command {
-    let mut c = cmd("nix", &["--extra-experimental-features", "nix-command flakes"]);
-    c.args(args);
-    c
+/// The user that owns the directory of the flake, when it is not root and the
+/// nix-daemon accepts connections. In a chroot, and before Nix makes its store,
+/// root evaluates.
+fn owner(flake: &str) -> Option<(u32, u32, String, String)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(flake).ok()?;
+    if meta.uid() == 0 || !packages::booted() || !Path::new("/nix/var/nix/daemon-socket/socket").exists() || !Path::new("/nix/store").exists() {
+        return None;
+    }
+    let entry = crate::output(cmd("getent", &["passwd", &meta.uid().to_string()])).ok()?;
+    let fields: Vec<&str> = entry.trim().split(':').collect();
+    Some((meta.uid(), fields.get(3)?.parse().ok()?, fields[0].to_string(), fields.get(5)?.to_string()))
 }
 
 /// The generation that the profile points to.
@@ -219,16 +241,7 @@ fn commit(target: &Generation) -> Result<()> {
 fn activate(ctx: &Ctx, target: Generation) -> Result<()> {
     println!("Generation {}", target.path);
     packages::recover_lock()?;
-    let mut plan = Plan::compute(ctx, target)?;
-    if packages::needs_bootstrap(&plan.target) {
-        // The checks that do not need aurutils run before it is built.
-        packages::check(ctx, &plan.packages)?;
-        files::check(ctx, &plan.target, &plan.files)?;
-        let mut builds = packages::bootstrap_builds(&plan.target)?;
-        ask(&[packages::removals(&plan.packages), builds.asks.clone()].concat(), &ctx.opts)?;
-        packages::bootstrap(&plan.target, &mut builds)?;
-        plan = Plan::compute(ctx, plan.target)?;
-    }
+    let plan = Plan::compute(ctx, target)?;
     plan.print();
     packages::check(ctx, &plan.packages)?;
     files::check(ctx, &plan.target, &plan.files)?;
@@ -257,7 +270,7 @@ fn activate(ctx: &Ctx, target: Generation) -> Result<()> {
         if !plan.target.m.home.is_empty() {
             report::last(format!("pacnix: these home configurations wait for the booted system: {}", plan.target.m.home.keys().cloned().collect::<Vec<_>>().join(" ")));
         }
-        report::last("pacnix: next step: reboot, log in, connect to the network, then run: sudo pacnix upgrade".to_string());
+        report::last("pacnix: next step: reboot, log in, connect to the network, then run: pacnix upgrade".to_string());
     }
     Ok(())
 }
