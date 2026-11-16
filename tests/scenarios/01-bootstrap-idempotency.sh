@@ -19,4 +19,5 @@ out=$(apply $h) || fail "second apply failed"
 grep -qx 'No changes.' <<<"$out" || { echo "$out"; fail "second apply has changes"; }
 empty_plan $h
 pass
+vmlog
 "$vm" snapshot $h "$cache/base-boot.qcow2"

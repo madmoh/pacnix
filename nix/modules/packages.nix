@@ -44,7 +44,7 @@ in
       type = types.attrsOf types.str;
       default = { };
       example = { linux = "6.12.9.arch1-1"; };
-      description = "Exact versions of declared repo and AUR packages, by name, as pacman -Q shows them. pacnix installs that version and pacnix upgrade keeps it. A repo package at a different version comes from the Arch Linux Archive. An AUR package keeps the version that the local repository has. Arch Linux does not support partial upgrades: a pinned library can break the packages that need a newer version.";
+      description = "Exact versions of declared repo and AUR packages, by name, as pacman -Q shows them. pacnix installs that version and pacnix apply keeps it. A repo package at a different version comes from the Arch Linux Archive. An AUR package keeps the version that the local repository has. Arch Linux does not support partial upgrades: a pinned library can break the packages that need a newer version.";
     };
     server = mkOption {
       type = types.nullOr types.str;

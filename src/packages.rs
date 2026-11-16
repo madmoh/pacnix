@@ -112,8 +112,13 @@ fn parse_info(text: &str) -> Vec<Info> {
     list
 }
 
+/// pacman with the configuration of pacnix, when it exists: the declared
+/// pacman.conf and the local repository.
 fn pacman(args: &[&str]) -> Command {
     let mut c = cmd("pacman", args);
+    if !args.contains(&"--config") && Path::new(CONF).exists() {
+        c.args(["--config", CONF]);
+    }
     c.env("LC_ALL", "C");
     c
 }
@@ -169,7 +174,7 @@ pub fn booted() -> bool {
 }
 
 /// A builder host in a chroot builds nothing: AUR and local packages wait for
-/// the first pacnix upgrade on the booted system.
+/// the first pacnix apply on the booted system.
 pub fn defer_builds(g: &Generation) -> bool {
     is_builder(g) && !booted()
 }
@@ -255,7 +260,10 @@ fn write_confs(g: &Generation) -> Result<()> {
         true => format!("\n[pacnix-local]\nSigLevel = {level}\nServer = {server}\n"),
         false => String::new(),
     };
-    let mut system = std::fs::read_to_string("/etc/pacman.conf")?;
+    // The declared pacman.conf applies from the start, also in the chroot of an
+    // installation, where /etc/pacman.conf is still the file of the package.
+    let declared = g.m.files.get("/etc/pacman.conf").filter(|f| f.target.is_none()).map_or("/etc/pacman.conf", |f| f.source.as_str());
+    let mut system = std::fs::read_to_string(declared)?;
     if SERIAL.load(std::sync::atomic::Ordering::Relaxed) {
         system = system
             .lines()
@@ -295,7 +303,9 @@ fn aur_table(names: &[String]) -> Result<Vec<(String, String, String)>> {
 }
 
 fn srcinfo(dir: &str) -> Result<(Vec<String>, Vec<String>)> {
-    let text = output(cmd("runuser", &["-u", "pacnix", "--", "makepkg", "--printsrcinfo"]).current_dir(dir))
+    let mut c = cmd("makepkg", &["--printsrcinfo"]);
+    c.env("HOME", BUILD).env("LC_ALL", "C").current_dir(dir);
+    let text = output(&mut sandboxed(c, Some("pacnix"), &[BUILD]))
         .with_context(|| format!("read the PKGBUILD in {dir}"))?;
     let (mut names, mut deps) = (vec![], vec![]);
     for line in text.lines() {
@@ -332,6 +342,7 @@ fn local_dirs(g: &Generation) -> BTreeMap<String, String> {
 pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
     let p = &g.m.packages;
     let mut plan = Plan::default();
+    write_confs(g)?;
     let sync = sync_names()?;
     let repo = repo_db(g)?;
     let repo_names: BTreeSet<String> = repo.iter().map(|i| i.name.clone()).collect();
@@ -347,7 +358,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
     let missing_aur: Vec<String> = built_aur.iter().filter(|n| !repo_names.contains(*n)).cloned().collect();
     let mut table = Vec::new();
     if defer_builds(g) {
-        plan.notes.push(format!("the first pacnix upgrade on the booted system builds and installs: {}", deferred(g).join(" ")));
+        plan.notes.push(format!("the first pacnix apply on the booted system builds and installs: {}", deferred(g).join(" ")));
     } else if is_builder(g) {
         table = aur_table(&missing_aur)?;
         let found: BTreeSet<&String> = table.iter().map(|t| &t.0).collect();
@@ -624,10 +635,33 @@ fn download(names: &[&str]) -> Result<()> {
     run_quiet(pacman(&["-Sw", "--noconfirm", "--ask=4", "--config", CONF]).args(names))
 }
 
+/// A command of the builder user in the sandbox, which can write only to the
+/// build directory.
 fn as_builder(args: &[&str]) -> Command {
-    let mut c = cmd("runuser", &["-u", "pacnix", "--", "env", &format!("HOME={BUILD}"), "LC_ALL=C"]);
-    c.args(args).current_dir(BUILD);
-    c
+    let mut c = cmd(args[0], &args[1..]);
+    c.env("HOME", BUILD).env("LC_ALL", "C").current_dir(BUILD);
+    sandboxed(c, Some("pacnix"), &[BUILD])
+}
+
+/// Runs a command as a transient systemd service in a sandbox: the file system
+/// is read-only apart from the writable paths, the home directories are not
+/// visible, and /tmp, /var/tmp and /dev/shm are private. A PKGBUILD runs on the host in it, as the
+/// builder user, for example to download its sources, and cannot get root.
+fn sandboxed(c: Command, user: Option<&str>, writable: &[&str]) -> Command {
+    let mut s = cmd("systemd-run", &["--quiet", "--wait", "--pipe", "--collect", "--service-type=exec"]);
+    s.args(["-p", "ProtectSystem=strict", "-p", "ProtectHome=yes", "-p", "PrivateTmp=yes", "-p", "TemporaryFileSystem=/dev/shm"]);
+    s.args(writable.iter().map(|w| format!("--property=ReadWritePaths={w}")));
+    if let Some(u) = user {
+        s.args(["-p", &format!("User={u}"), "-p", "NoNewPrivileges=yes"]);
+    }
+    if let Some(d) = c.get_current_dir() {
+        s.arg(format!("--working-directory={}", d.display()));
+    }
+    for (k, v) in c.get_envs() {
+        s.arg(format!("--setenv={}={}", k.to_string_lossy(), v.unwrap_or_default().to_string_lossy()));
+    }
+    s.arg("--").arg(c.get_program()).args(c.get_args());
+    s
 }
 
 /// The makepkg configuration of the host. The clean chroot copies it at each update.
@@ -748,7 +782,7 @@ fn ensure_chroot() -> Result<()> {
 /// new records of the AUR packages and the changes that need a confirmation.
 #[derive(Default)]
 pub struct Builds {
-    queue: Vec<(String, bool)>,
+    pub queue: Vec<(String, bool)>,
     records: BTreeMap<String, trust::Record>,
     pub asks: Vec<String>,
 }
@@ -874,7 +908,10 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<()> {
             run_cmd(as_builder(&["mkdir", &out]))?;
             let mut c = chroot(&["--build"]);
             c.current_dir(dir).env("PKGDEST", &out);
-            run_cmd(c).context(step)?;
+            // makechrootpkg downloads the sources on the host as the builder user, and
+            // systemd-nspawn locks the chroot in /run.
+            let writable = [BUILD, REPO, "/var/lib/aurbuild", "/var/cache/pacman/pkg", "/run"];
+            run_cmd(sandboxed(c, None, &writable)).context(step)?;
             // No process of the builder user stays to change the packages.
             let _ = cmd("pkill", &["-KILL", "-u", "pacnix"]).status();
             let mut files = Vec::new();
@@ -949,11 +986,9 @@ fn transaction(args: &[&str]) -> Result<()> {
     if status.success() {
         return Ok(());
     }
-    let conflicts: Vec<&str> = lines
-        .iter()
-        .filter_map(|l| l.split_once(": ")?.1.strip_suffix(" exists in filesystem"))
-        .filter(|f| output_any(&mut pacman(&["-Qqo", f])).is_ok_and(|o| o.trim().is_empty()))
-        .collect();
+    let files: Vec<&str> = lines.iter().filter_map(|l| l.split_once(": ")?.1.strip_suffix(" exists in filesystem")).collect();
+    let owned = crate::files::owners(&files);
+    let conflicts: Vec<&str> = files.into_iter().filter(|f| !owned.contains_key(*f)).collect();
     if conflicts.is_empty() {
         return Err(failed(&c, status, &lines));
     }
@@ -1028,12 +1063,15 @@ pub fn apply(plan: &Plan) -> Result<()> {
 /// changes that need a confirmation. A host without a local repository has
 /// none yet: the apply after the upgrade builds them.
 pub fn upgrade_builds(g: &Generation) -> Result<Builds> {
-    if !is_builder(g) || !Path::new(REPO).join("pacnix-local.db.tar.gz").exists() {
+    if !is_builder(g) || defer_builds(g) || !Path::new(REPO).join("pacnix-local.db.tar.gz").exists() {
         return Ok(Builds::default());
     }
     write_confs(g)?;
-    // aur sync keeps the pinned AUR packages and the dependencies with a chosen provider.
-    let ignore: Vec<&str> = g.m.packages.providers.keys().chain(g.m.packages.versions.keys()).map(String::as_str).collect();
+    // aur sync keeps the pinned AUR packages, the dependencies with a chosen
+    // provider and the local packages, which can have the name of an AUR package.
+    let (local, aur) = (local_dirs(g), built_aur(g));
+    let built: Vec<String> = local_sources().into_keys().filter(|n| !aur.contains(n)).collect();
+    let ignore: Vec<&str> = g.m.packages.providers.keys().chain(g.m.packages.versions.keys()).chain(local.keys()).chain(&built).map(String::as_str).collect();
     let mut c = as_builder(&["aur", "sync", "--no-view", "--upgrades", "--no-build"]);
     if !ignore.is_empty() {
         c.args(["--ignore", &ignore.join(",")]);
@@ -1043,11 +1081,21 @@ pub fn upgrade_builds(g: &Generation) -> Result<Builds> {
     Builds::of(dirs.into_iter().map(|d| (d, false)).collect(), &[])
 }
 
+/// The modification times of the local package database and of the sync
+/// databases: a transaction or a refresh changes them.
+pub fn databases() -> Vec<Option<std::time::SystemTime>> {
+    let mut paths: Vec<_> = std::fs::read_dir("/var/lib/pacman/sync").into_iter().flatten().flatten().map(|e| e.path()).collect();
+    paths.sort();
+    paths.push(Path::new("/var/lib/pacman/local").to_path_buf());
+    paths.iter().map(|p| p.metadata().and_then(|m| m.modified()).ok()).collect()
+}
+
 /// Full upgrade: all sync databases, the system packages, then changed AUR packages.
 pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
     write_confs(g)?;
     trust_server(g)?;
     report::progress("upgrade the system with pacman -Syu");
+    recover_lock()?;
     let pins = pinned(g);
     let pins: Vec<&str> = pins.iter().map(String::as_str).collect();
     run_quiet(pacman(&[&["-Syuw", "--noconfirm", "--config", CONF][..], &pins].concat()))?;
@@ -1066,7 +1114,7 @@ pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
 /// they need.
 pub fn uninstall_plan() -> Result<Vec<String>> {
     let inst = installed()?;
-    let mut targets: Vec<&str> = ["pacnix", "aurutils", "nix"].into_iter().filter(|n| inst.contains_key(*n)).collect();
+    let mut targets: Vec<&str> = ["pacnix", "pacnix-keyring", "aurutils", "nix"].into_iter().filter(|n| inst.contains_key(*n)).collect();
     while let Some(i) = targets.iter().position(|t| inst[*t].required.iter().any(|r| !targets.contains(&r.as_str()))) {
         targets.remove(i);
     }

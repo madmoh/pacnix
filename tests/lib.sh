@@ -11,10 +11,22 @@ h=s${name%%-*}
 export PACNIX_VM_CPUS=${size[0]} PACNIX_VM_MEM=${size[1]}
 # The VMs of a scenario are deleted when it exits, unless PACNIX_VM_KEEP is set.
 started=()
-trap '[[ -n ${PACNIX_VM_KEEP:-} ]] || for v in "${started[@]}"; do "$vm" down "$v"; done' EXIT
+# The log of pacnix in each VM, with times, goes to the end of the log of the scenario.
+vmlog() { for v in "${started[@]}"; do echo "== log of pacnix in $v"; "$vm" ssh "$v" 'sudo cat /var/log/pacnix-test.log' 2>/dev/null || true; done; }
+trap 'vmlog; [[ -n ${PACNIX_VM_KEEP:-} ]] || for v in "${started[@]}"; do "$vm" down "$v"; done' EXIT
+trap 'exit 143' TERM
 
-step() { printf '\n== %s: %s\n' "$name" "$*"; }
-on() { local h=$1; shift; "$vm" ssh "$h" "$@"; }
+# The profile of a scenario: each step shows the seconds since the start, and
+# each command in a VM that takes 5 s or more shows its time.
+step() { printf '\n== %s: %s (at %d s, %s)\n' "$name" "$*" "$SECONDS" "$(date +%T)"; }
+on() {
+	local h=$1 s=$SECONDS rc=0 c
+	shift
+	"$vm" ssh "$h" "$@" || rc=$?
+	c="$*"
+	((SECONDS - s < 5)) || printf 'time %d s: %s: %s\n' $((SECONDS - s)) "$h" "${c:0:120}" >&2
+	return $rc
+}
 # Writes /etc/pacnix/scenario.nix on a host. An empty argument removes it.
 scenario() {
 	if [[ -z $2 ]]; then on "$1" 'sudo rm -f /etc/pacnix/scenario.nix'; else on "$1" "sudo tee /etc/pacnix/scenario.nix >/dev/null" <<<"$2"; fi
@@ -22,7 +34,8 @@ scenario() {
 noise="^copying path"
 # Runs a pacnix verb on a host. Its exit status is the status of pacnix.
 # The login shell of a host can be bash or zsh: zsh keeps the statuses in pipestatus.
-pacnix() { local h=$1; shift; on "$h" "pacnix $* 2>&1 | sudo tee -a /var/log/pacnix-test.log | grep -v \"$noise\"; exit \${PIPESTATUS[0]:-\${pipestatus[1]}}"; }
+# The log in the VM has the time of each line.
+pacnix() { local h=$1; shift; on "$h" "pacnix $* 2>&1 | awk '{ print strftime(\"%T\"), \$0; fflush() }' | sudo tee -a /var/log/pacnix-test.log | cut -d' ' -f2- | grep -v \"$noise\"; exit \${PIPESTATUS[0]:-\${pipestatus[1]}}"; }
 plan() { pacnix "$1" plan; }
 apply() { local h=$1; shift; pacnix "$h" apply --yes "$@"; }
 # Declared packages of the active generation, sorted.
@@ -59,4 +72,12 @@ fresh() {
 	started+=("$1")
 	"$vm" up "$1" "$base" >/dev/null
 	"$vm" push "$1" >/dev/null
+}
+# Starts fresh VMs from one base disk at the same time: fresh_all <base> <name>...
+fresh_all() {
+	local base=$1 pids=() p
+	shift
+	started+=("$@")
+	for v in "$@"; do { "$vm" up "$v" "$base" >/dev/null && "$vm" push "$v" >/dev/null; } & pids+=($!); done
+	for p in "${pids[@]}"; do wait "$p" || fail "a VM did not start"; done
 }

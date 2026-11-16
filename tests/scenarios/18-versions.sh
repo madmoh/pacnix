@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Scenario 18: a pinned version. A repo package at an older version comes from
-# the Arch Linux Archive, pacnix upgrade keeps it, apply corrects a manual
+# the Arch Linux Archive, pacnix apply keeps it and corrects a manual
 # upgrade, and an AUR package at a version that the AUR does not have is refused.
-# pacnix upgrade shows the changes of an AUR package before the build, without
+# pacnix apply shows the changes of an AUR package before the build, without
 # a question. A new maintainer of a built AUR package needs a confirmation.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
@@ -15,8 +15,8 @@ plan $h | grep -q '^install package from the Arch Linux Archive https://archive.
 apply $h >/dev/null || fail "apply failed"
 check $h "test \"\$(pacman -Q tree)\" = 'tree $old'" "tree is not at the pinned version"
 empty_plan $h
-step "pacnix upgrade keeps the pinned version"
-pacnix $h upgrade --yes >/dev/null || fail "upgrade failed"
+step "pacnix apply keeps the pinned version"
+pacnix $h apply --yes >/dev/null || fail "upgrade failed"
 check $h "test \"\$(pacman -Q tree)\" = 'tree $old'" "the upgrade changed the pinned version"
 step "apply corrects a manual upgrade"
 on $h 'sudo pacman -S --noconfirm tree >/dev/null 2>&1'
@@ -28,17 +28,16 @@ step "an AUR version that the AUR does not have"
 scenario $h '{ packages.aur = [ "downgrade" ]; packages.versions.downgrade = "0.1-1"; }'
 out=$(apply $h 2>&1) && fail "apply accepted an AUR version that does not exist"
 grep -q 'downgrade 0.1-1 (the AUR or the local repository has' <<<"$out" || { echo "$out" | tail -3; fail "the refusal does not name the version"; }
-step "pacnix upgrade shows the changes of an AUR package before the build"
+step "pacnix apply shows the changes of an AUR package before the build"
 # An older revision of the AUR package downgrade, built as a local package.
 on $h 'sudo git clone -q https://aur.archlinux.org/downgrade.git /etc/pacnix/old-downgrade && cd /etc/pacnix/old-downgrade && v=$(sudo git show HEAD:.SRCINFO | grep -m1 pkgver) && for c in $(sudo git rev-list HEAD -- .SRCINFO); do sudo git show $c:.SRCINFO | grep -qx "$v" || { sudo git checkout -q $c; break; }; done && sudo rm -rf .git' || fail "no older revision of downgrade"
 scenario $h '{ packages.local.downgrade = ./old-downgrade; }'
 apply $h >/dev/null || fail "apply of the older downgrade failed"
 old=$(on $h 'pacman -Q downgrade')
-scenario $h '{ packages.aur = [ "downgrade" ]; }'
-apply $h >/dev/null || fail "apply of the AUR package failed"
 # The news of the time before the test are not part of it.
 on $h 'date +%s | sudo tee /var/lib/pacnix/news >/dev/null'
-out=$(pacnix $h upgrade 2>&1) || { echo "$out" | tail -5; fail "the upgrade of the AUR package failed or asked"; }
+scenario $h '{ packages.aur = [ "downgrade" ]; }'
+out=$(pacnix $h apply 2>&1) || { echo "$out" | tail -5; fail "the upgrade of the AUR package failed or asked"; }
 grep -qx 'pacnix: changes of the AUR package downgrade since its last build:' <<<"$out" || fail "the upgrade does not show the changes of the package"
 grep -q '^+pkgname=downgrade' <<<"$out" || { echo "$out" | tail -5; fail "the upgrade does not show the files of the package"; }
 check $h "test \"\$(pacman -Q downgrade)\" != '$old'" "the AUR package is not upgraded"

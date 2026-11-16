@@ -1,0 +1,13 @@
+# A package that needs libpdfium, which only the AUR has: from libpdfium, or
+# from a different AUR package that provides it.
+pkgname=pdf
+pkgver=1
+pkgrel=1
+pkgdesc='pacnix test package with a dependency from the AUR'
+arch=(any)
+license=(MIT)
+depends=(libpdfium)
+
+package() {
+  install -Dm644 /dev/null "$pkgdir/usr/share/pdf/done"
+}

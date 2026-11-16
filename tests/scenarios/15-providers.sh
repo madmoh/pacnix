@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Scenario 15: chosen providers of a dependency, from the repositories and from
-# the AUR. pacman would take jack2 for jack, and aurutils would build libpdfium.
+# the AUR. pacman would take jack2 for jack, and aurutils would build libpdfium
+# for the local package pdf.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 apply $h >/dev/null || fail "first apply failed"
 step "choose providers"
 scenario $h '{
   packages.repo = [ "a2jmidid" ];
-  packages.aur = [ "pdf-inspector-ocr" ];
+  packages.local.pdf = ./packages/pdf;
   packages.providers = { jack = "pipewire-jack"; libpdfium = "pdfium-binaries-v8-bin"; };
 }'
 apply $h >/dev/null || fail "apply failed"

@@ -197,35 +197,29 @@ fn fsync_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Writes a file with atomic replace: a temporary file in the same directory,
-/// fsync, rename, fsync of the directory.
+/// The temporary file of a declared file, in the same directory. apply writes
+/// all of them, syncs the disk one time and then renames each into place: a
+/// power loss leaves each file with its old or its new content.
 pub fn temporary(path: &str) -> std::path::PathBuf {
     let target = Path::new(path);
     target.with_file_name(format!(".{}.pacnix-new", target.file_name().unwrap().to_string_lossy()))
 }
 
-fn write_atomic(path: &str, spec: &FileSpec) -> Result<()> {
-    let target = Path::new(path);
-    let dir = target.parent().context("file has no directory")?;
-    std::fs::create_dir_all(dir)?;
+fn write_temporary(path: &str, spec: &FileSpec) -> Result<()> {
     let tmp = temporary(path);
+    std::fs::create_dir_all(tmp.parent().context("file has no directory")?)?;
     if let Some(link) = &spec.target {
         std::os::unix::fs::symlink(link, &tmp)?;
-        std::fs::rename(&tmp, target)?;
-        return fsync_dir(dir);
+        return Ok(());
     }
     let data = std::fs::read(&spec.source)?;
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(&data)?;
-        let uid = id(&spec.user, true).with_context(|| format!("user {} does not exist", spec.user))?;
-        let gid = id(&spec.group, false).with_context(|| format!("group {} does not exist", spec.group))?;
-        std::os::unix::fs::fchown(&f, Some(uid), Some(gid))?;
-        f.set_permissions(std::fs::Permissions::from_mode(mode(spec)))?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, target)?;
-    fsync_dir(dir)
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(&data)?;
+    let uid = id(&spec.user, true).with_context(|| format!("user {} does not exist", spec.user))?;
+    let gid = id(&spec.group, false).with_context(|| format!("group {} does not exist", spec.group))?;
+    std::os::unix::fs::fchown(&f, Some(uid), Some(gid))?;
+    f.set_permissions(std::fs::Permissions::from_mode(mode(spec)))?;
+    Ok(())
 }
 
 /// Replaces a file with the content from the package archive in the pacman cache.
@@ -261,7 +255,8 @@ pub fn prune_dirs(path: &str) {
     let mut dir = Path::new(path).parent();
     while let Some(d) = dir {
         let s = d.display().to_string();
-        if s.matches('/').count() < 2 || !owners(&[&s]).is_empty() || std::fs::remove_dir(d).is_err() {
+        let empty = std::fs::read_dir(d).is_ok_and(|mut e| e.next().is_none());
+        if s.matches('/').count() < 2 || !empty || !owners(&[&s]).is_empty() || std::fs::remove_dir(d).is_err() {
             break;
         }
         dir = d.parent();
@@ -275,11 +270,17 @@ pub fn apply(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<Vec<String>> {
         std::fs::remove_file(t)?;
     }
     for (path, _) in &plan.write {
-        match write_atomic(path, &g.m.files[path]) {
+        write_temporary(path, &g.m.files[path]).with_context(|| format!("write {path}"))?;
+    }
+    if !plan.write.is_empty() {
+        unsafe { libc::sync() };
+    }
+    for (path, _) in &plan.write {
+        match std::fs::rename(temporary(path), path) {
             // arch-chroot bind-mounts /etc/resolv.conf from the live system.
-            Err(e) if !crate::packages::booted() && e.root_cause().downcast_ref::<std::io::Error>().and_then(|e| e.raw_os_error()) == Some(libc::EBUSY) => {
+            Err(e) if !crate::packages::booted() && e.raw_os_error() == Some(libc::EBUSY) => {
                 let _ = std::fs::remove_file(temporary(path));
-                // The first pacnix upgrade needs it, for example /etc/resolv.conf for DNS.
+                // The first pacnix apply needs it, for example /etc/resolv.conf for DNS.
                 let how = match &g.m.files[path].target {
                     Some(t) => format!(", for example: ln -sf {t} /mnt{path}"),
                     None => String::new(),

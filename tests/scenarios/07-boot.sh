@@ -16,9 +16,7 @@ check $h 'sudo grep -q "pacnix.test=1" /boot/grub/grub.cfg' "grub.cfg does not h
 check $h 'sudo lsinitcpio -a /boot/initramfs-linux.img 2>/dev/null | grep -q "Compressed with: xz"' "the initramfs is not xz compressed"
 pacnix $h audit | grep -qx 'reboot necessary: /boot/initramfs-linux.img changed after the boot' || fail "the audit does not show that a reboot is necessary"
 step "reboot"
-on $h 'sudo systemctl reboot' || true
-sleep 10
-"$vm" wait $h
+"$vm" reboot $h
 check $h 'grep -q "pacnix.test=1" /proc/cmdline' "the booted kernel does not have the parameter"
 pacnix $h audit | grep -q '^reboot necessary' && fail "the audit shows a reboot after the reboot"
 check $h 'test "$(systemctl is-system-running)" = running' "the system is not healthy after the reboot"
@@ -28,9 +26,7 @@ scenario $h ''
 apply $h >/dev/null || fail "apply failed"
 refute $h 'sudo grep -q "pacnix.test=1" /boot/grub/grub.cfg' "grub.cfg still has the parameter"
 refute $h 'sudo lsinitcpio -a /boot/initramfs-linux.img 2>/dev/null | grep -q "Compressed with: xz"' "the initramfs is still xz compressed"
-on $h 'sudo systemctl reboot' || true
-sleep 10
-"$vm" wait $h
+"$vm" reboot $h
 refute $h 'grep -q "pacnix.test=1" /proc/cmdline' "the booted kernel still has the parameter"
 empty_plan $h
 pass

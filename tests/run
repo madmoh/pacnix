@@ -1,23 +1,54 @@
 #!/usr/bin/env bash
 # Runs scenarios: tests/run [number...]. Without numbers it runs all of them.
 # It builds the pacnix package first. Scenario 1 runs first and alone, because
-# it saves the base disk of the others. The others run in parallel while the
-# size of their VMs fits in the free CPUs and memory of the host, less a
-# reserve for the host. The log of each scenario is in PACNIX_TEST_LOGS.
+# it saves the base disk of the others. The others run in parallel, the
+# longest first by the times of the last run, while the size of their VMs fits
+# in the budget: two vCPUs for each CPU of the host, because a VM mostly waits
+# for one pacman, and 1.5 times the free memory, because a VM uses only the
+# memory that it touches. The log of each scenario is in PACNIX_TEST_LOGS.
 set -uo pipefail
 cd "$(dirname "$0")"
-./package >/dev/null || exit 1
+./package >/dev/null || { echo "FAIL tests/package"; exit 1; }
+# The package cache of the VMs runs on their network while the scenarios run.
+./vm network
+helpers=()
+trap 'kill "${helpers[@]}" 2>/dev/null' EXIT
+if ! (exec 3<>/dev/tcp/192.168.123.1/8090) 2>/dev/null; then
+	./pkgcache &
+	helpers+=($!)
+fi
 logs=${PACNIX_TEST_LOGS:-${PACNIX_VM_CACHE:-$HOME/.cache/pacnix-vm}/logs}
 mkdir -p "$logs"
-cpus=$(($(nproc) - 4))
-mem=$(($(awk '/^MemAvailable/ { print int($2 / 1024) }' /proc/meminfo) - 8192))
+# The profile: the CPU, disk and network counters of each VM every 2 s. At the
+# end, tests/profile shows the windows in which a VM waits or spins.
+rm -f "$logs/stats"
+while sleep 2; do
+	virsh -c qemu:///system domstats --list-running --cpu-total --block --interface 2>/dev/null | awk -v t="$(date +%s)" '
+		/^Domain/ { d = $2; gsub(/\047/, "", d) }
+		/cpu.time=/ { split($0, a, "="); c[d] = a[2] }
+		/block\.[0-9]+\.(rd|wr)\.bytes=/ { split($0, a, "="); io[d] += a[2] }
+		/net\.[0-9]+\.(rx|tx)\.bytes=/ { split($0, a, "="); n[d] += a[2] }
+		END { for (d in c) if (d ~ /^pacnix-/) print t, d, c[d], io[d] + 0, n[d] + 0 }'
+done >>"$logs/stats" &
+helpers+=($!)
+cpus=$((2 * $(nproc) - 4))
+mem=$(($(awk '/^MemAvailable/ { print int($2 / 1024 * 1.5) }' /proc/meminfo) - 8192))
+times=$logs/times
 status=0
+# A scenario that has no result after this time stops, for example at a hung download.
+limit=${PACNIX_TEST_LIMIT:-900}
 queue=()
 for s in scenarios/*.sh; do
 	n=$(basename "$s" | cut -d- -f1)
 	if (($#)) && [[ " $* " != *" $n "* && " $* " != *" ${n#0} "* ]]; then continue; fi
 	queue+=("$s")
 done
+# The longest scenarios first; a scenario without a time counts as long.
+mapfile -t queue < <(for s in "${queue[@]}"; do
+	t=$(awk -v n="$(basename "$s" .sh)" '$1 == n { print $2 }' "$times" 2>/dev/null)
+	[[ $s == scenarios/01-* ]] && t=999999
+	echo "${t:-99999} $s"
+done | sort -rn | cut -d' ' -f2)
 
 # Prints the vCPUs and MiB that the VMs of a scenario use together.
 cost() {
@@ -30,17 +61,19 @@ finish() {
 	local pid rc s c m
 	wait -n -p pid "${!running[@]}"
 	rc=$?
-	read -r s c m <<<"${running[$pid]}"
+	read -r s c m t <<<"${running[$pid]}"
 	unset "running[$pid]"
 	cpus=$((cpus + c)) mem=$((mem + m))
-	tail -1 "$logs/$(basename "$s" .sh).log"
+	echo "$(grep -E "^(PASS|FAIL) " "$logs/$(basename "$s" .sh).log" | tail -1) ($((SECONDS - t)) s)"
+	{ grep -v "^$(basename "$s" .sh) " "$times" 2>/dev/null; echo "$(basename "$s" .sh) $((SECONDS - t))"; } >"$times.new" && mv "$times.new" "$times"
+	((rc != 124)) || echo "FAIL $(basename "$s" .sh): no result after $limit s"
 	((rc == 0)) || status=1
 }
 start() {
 	local c m
 	read -r c m < <(cost "$1")
-	bash "$1" >"$logs/$(basename "$1" .sh).log" 2>&1 &
-	running[$!]="$1 $c $m"
+	timeout "$limit" bash "$1" >"$logs/$(basename "$1" .sh).log" 2>&1 &
+	running[$!]="$1 $c $m $SECONDS"
 	cpus=$((cpus - c)) mem=$((mem - m))
 }
 
@@ -62,4 +95,6 @@ while ((${#queue[@]})); do
 	((${#running[@]} == 0)) || finish
 done
 while ((${#running[@]})); do finish; done
+echo "== windows in which a VM waits or spins"
+./profile "$logs/stats"
 exit $status

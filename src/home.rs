@@ -12,7 +12,7 @@ pub struct Plan {
 impl Plan {
     pub fn print(&self, l: &mut Vec<String>) {
         l.extend(self.activate.iter().map(|(u, p)| format!("activate home configuration of {u}: {p}")));
-        l.extend(self.deferred.iter().map(|u| format!("note: the first pacnix upgrade on the booted system activates the home configuration of {u}")));
+        l.extend(self.deferred.iter().map(|u| format!("note: the first pacnix apply on the booted system activates the home configuration of {u}")));
     }
 }
 

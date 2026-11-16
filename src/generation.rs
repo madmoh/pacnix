@@ -226,26 +226,49 @@ pub fn plan(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-pub fn apply(ctx: &Ctx) -> Result<()> {
+/// Makes the system agree with the configuration: pacman -Syu, the rebuild
+/// of changed AUR packages, then the plan. The one question of the run comes
+/// before any change: the removals that the plan shows now, the changes of the
+/// AUR packages that upgrade, and the Arch Linux news since the last upgrade.
+/// Offline, the sync databases and the AUR packages stay as they are.
+pub fn apply(ctx: &Ctx, offline: bool) -> Result<()> {
     let target = build(ctx)?;
-    activate(ctx, target.clone())?;
+    let mut plan = None;
+    if !offline {
+        let news = std::thread::spawn(trust::news);
+        let before = Plan::compute(ctx, target.clone())?;
+        let builds = packages::upgrade_builds(&target)?;
+        let news = news.join().unwrap_or_default();
+        ask(&[packages::removals(&before.packages), builds.asks.clone(), news].concat(), &audit::asks(&before.data), &ctx.opts)?;
+        // When the upgrade changes no package and no sync database, the plan stays the same.
+        let (state, built) = (packages::databases(), builds.queue.is_empty());
+        packages::upgrade(&target, builds)?;
+        plan = (built && packages::databases() == state).then_some(before);
+    }
+    activate(ctx, target.clone(), plan)?;
     commit(&target)?;
-    trust::news_read(false);
+    trust::news_read(!offline);
     Ok(())
 }
 
 /// Makes the generation the active generation of the profile.
 fn commit(target: &Generation) -> Result<()> {
+    // The changes of the apply, for example deleted files, are on the disk
+    // before the profile records the generation, also after a power loss.
+    unsafe { libc::sync() };
     run_cmd(cmd("nix-env", &["--profile", PROFILE, "--set", &target.path]))?;
     let _ = std::fs::remove_file(PENDING);
     Ok(())
 }
 
 /// Brings the system to the target generation. The profile is not changed.
-fn activate(ctx: &Ctx, target: Generation) -> Result<()> {
+fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
     println!("Generation {}", target.path);
     packages::recover_lock()?;
-    let plan = Plan::compute(ctx, target)?;
+    let plan = match plan {
+        Some(plan) => plan,
+        None => Plan::compute(ctx, target)?,
+    };
     plan.print();
     packages::check(ctx, &plan.packages)?;
     files::check(ctx, &plan.target, &plan.files)?;
@@ -275,23 +298,8 @@ fn activate(ctx: &Ctx, target: Generation) -> Result<()> {
         if !plan.target.m.home.is_empty() {
             report::last(format!("pacnix: these home configurations wait for the booted system: {}", plan.target.m.home.keys().cloned().collect::<Vec<_>>().join(" ")));
         }
-        report::last("pacnix: next step: reboot, log in, connect to the network, then run: pacnix upgrade".to_string());
+        report::last("pacnix: next step: reboot, log in, connect to the network, then run: pacnix apply".to_string());
     }
-    Ok(())
-}
-
-/// Upgrades the system, then applies. The one question of the run comes
-/// before any change: the removals that the plan shows now, the changes of the
-/// AUR packages that upgrade, and the Arch Linux news since the last upgrade.
-pub fn upgrade(ctx: &Ctx) -> Result<()> {
-    let target = build(ctx)?;
-    let before = Plan::compute(ctx, target.clone())?;
-    let builds = packages::upgrade_builds(&target)?;
-    ask(&[packages::removals(&before.packages), builds.asks.clone(), trust::news()].concat(), &audit::asks(&before.data), &ctx.opts)?;
-    packages::upgrade(&target, builds)?;
-    activate(ctx, target.clone())?;
-    commit(&target)?;
-    trust::news_read(true);
     Ok(())
 }
 
@@ -307,7 +315,7 @@ pub fn rollback(ctx: &Ctx) -> Result<()> {
     }
     let (number, previous) = history[index - 1].clone();
     println!("Roll back to generation {number}");
-    activate(ctx, previous)?;
+    activate(ctx, previous, None)?;
     run_cmd(cmd("nix-env", &["--profile", PROFILE, "--switch-generation", &number.to_string()]))?;
     let _ = std::fs::remove_file(PENDING);
     Ok(())

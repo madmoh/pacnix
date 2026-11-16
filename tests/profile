@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Shows the windows of 10 s or more in which a VM waits (no CPU, disk or
+# network work) or spins (CPU work without disk or network work), from the
+# samples that tests/run writes: tests/profile [stats file]. Each line has the
+# clock time, so that the step of the scenario log at that time shows the cause.
+set -euo pipefail
+stats=${1:-${PACNIX_TEST_LOGS:-${PACNIX_VM_CACHE:-$HOME/.cache/pacnix-vm}/logs}/stats}
+sort -k2,2 -k1,1n "$stats" | awk '
+function report() {
+	if (kind != "" && last - from >= 10)
+		printf "%-16s %-6s %4d s from %s\n", pvm, kind, last - from, strftime("%T", from)
+}
+{
+	t = $1; vm = $2
+	if (vm != pvm) { report(); kind = ""; pvm = vm; pt = t; pc = $3; pio = $4; pnet = $5; next }
+	dt = t - pt; if (dt <= 0) next
+	cpu = ($3 - pc) / 1e9 / dt; io = ($4 - pio) / dt; net = ($5 - pnet) / dt
+	pt = t; pc = $3; pio = $4; pnet = $5
+	k = (io < 200000 && net < 20000) ? (cpu < 0.05 ? "waits" : (cpu > 0.5 ? "spins" : "")) : ""
+	if (k != kind) { report(); kind = k; from = t - dt }
+	last = t
+}
+END { report() }' | sort -k3,3nr

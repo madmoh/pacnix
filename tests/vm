@@ -2,6 +2,8 @@
 # VM harness for pacnix scenarios. Usage: tests/vm <verb> [args]
 #   base [image] [date]   build the base disk from an Arch cloud image, with the
 #                         Arch Linux Archive of the given date (YYYY/MM/DD) as mirror
+#   mirror [date]         print the mirrors of the VMs for a date of the archive
+#   network               make and start the libvirt network of the VMs
 #   up <name> [base]      start a VM from a fresh overlay of a base disk
 #   down <name>           delete a VM and its overlay
 #   ssh <name> [cmd...]   run a command in a VM as the user arch
@@ -10,6 +12,7 @@
 #   snapshot <name> <out> save a bootstrapped VM as a base disk and delete the VM
 #   ip <name>             print the address of a VM
 #   wait <name>           wait for SSH after a reboot
+#   reboot <name>         reboot a VM and wait until SSH answers from the new boot
 #   reset <name>          power a VM off without shutdown, start it and wait for SSH
 #   blank <name> <size>   attach a new empty disk to a VM as /dev/vdb
 #   boot <name> <disk>    start a VM from the disk that an install wrote, without cloud-init
@@ -20,20 +23,31 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cache=${PACNIX_VM_CACHE:-$HOME/.cache/pacnix-vm}
 key=$cache/id_ed25519
 image=${PACNIX_VM_IMAGE:-$cache/cloud-20261101.620452.qcow2}
-sshopts=(-i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=15)
+# The VMs use one date of the Arch Linux Archive through tests/pkgcache: pacman
+# -Syu has no change, and each file comes from the cache after the first download.
+snapshot=2026/11/12
+mirror() { echo "http://192.168.123.1:8090/repos/${1:-$snapshot} https://archive.archlinux.org/repos/${1:-$snapshot}"; }
+sshopts=(-i "$key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=5)
 
+# The address of a VM, from the file that wait_ssh writes or from libvirt.
 ip() {
-	virsh domifaddr "pacnix-$1" 2>/dev/null | awk '/ipv4/ {split($4, a, "/"); print a[1]; exit}'
+	cat "$cache/pacnix-$1.ip" 2>/dev/null || virsh domifaddr "pacnix-$1" 2>/dev/null | awk '/ipv4/ {split($4, a, "/"); print a[1]; exit}'
 }
 
+# The commands to a VM share one SSH connection. A power change closes it.
+mux() { echo -o ControlMaster=auto -o "ControlPath=$cache/pacnix-$1.ssh" -o ControlPersist=120; }
+close() { ssh -o "ControlPath=$cache/pacnix-$1.ssh" -O exit x 2>/dev/null || true; rm -f "$cache/pacnix-$1.ssh" "$cache/pacnix-$1.ip"; }
+
+# Waits about 2 min: a VM boots in 20 s.
 wait_ssh() {
 	local a
-	for _ in $(seq 300); do
-		a=$(ip "$1")
+	for _ in $(seq 240); do
+		a=$(virsh domifaddr "pacnix-$1" 2>/dev/null | awk '/ipv4/ {split($4, a, "/"); print a[1]; exit}')
 		if [[ -n $a ]] && ssh "${sshopts[@]}" "arch@$a" true 2>/dev/null; then
+			echo "$a" >"$cache/pacnix-$1.ip"
 			return 0
 		fi
-		sleep 2
+		sleep 0.5
 	done
 	echo "pacnix-$1 is not reachable" >&2
 	return 1
@@ -46,15 +60,38 @@ hostname: $1
 ssh_authorized_keys: [$(cat "$key.pub")]
 bootcmd: [systemctl stop systemd-time-wait-sync]
 write_files:
+  - path: /etc/xdg/nix/nix.conf
+    content: |
+      substituters = http://192.168.123.1:8090/nix https://cache.nixos.org/
   - path: /etc/pacman.d/mirrorlist
     content: |
-$(for m in ${PACNIX_VM_MIRROR:-http://192.168.122.1:8090 https://fastly.mirror.pkgbuild.com https://mirror.rackspace.com/archlinux}; do printf '      Server = %s/$repo/os/$arch\n' "$m"; done)
+$(for m in ${PACNIX_VM_MIRROR:-$(mirror)}; do printf '      Server = %s/$repo/os/$arch\n' "$m"; done)
 EOF
+}
+
+# The VMs have their own libvirt network, 192.168.123.0/24, made at first use.
+# Its dnsmasq does not ping an address before it offers it: the ping takes 3 s
+# for each new address, one at a time, and parallel boots wait for it.
+network() {
+	virsh net-info pacnix >/dev/null 2>&1 || virsh net-define /dev/stdin >/dev/null <<-EOF
+		<network xmlns:dnsmasq="http://libvirt.org/schemas/network/dnsmasq/1.0">
+		  <name>pacnix</name>
+		  <forward mode="nat"/>
+		  <bridge name="pacnix0" stp="off"/>
+		  <ip address="192.168.123.1" netmask="255.255.255.0">
+		    <dhcp><range start="192.168.123.2" end="192.168.123.254"/></dhcp>
+		  </ip>
+		  <dnsmasq:options><dnsmasq:option value="no-ping"/></dnsmasq:options>
+		</network>
+	EOF
+	virsh net-list --name | grep -x pacnix >/dev/null || virsh net-start pacnix >/dev/null
+	virsh net-autostart pacnix >/dev/null
 }
 
 create() { # name disk
 	# The NoCloud seed: an ISO 9660 image with the label cidata. xorriso comes with virt-install.
 	local seed=$cache/pacnix-$1.seed
+	network
 	mkdir -p "$seed"
 	userdata "$1" >"$seed/user-data"
 	printf 'instance-id: %s-%s\nlocal-hostname: %s\n' "$1" "$(date +%s%N)" "$1" >"$seed/meta-data"
@@ -63,20 +100,28 @@ create() { # name disk
 	rm -r "$seed"
 	virt-install --name "pacnix-$1" --osinfo archlinux --import --noautoconsole --vcpus "${PACNIX_VM_CPUS:-2}" --memory "${PACNIX_VM_MEM:-3072}" \
 		--disk "$2,bus=virtio,discard=unmap" --disk "$cache/pacnix-$1.seed.iso,device=cdrom" \
-		--network network=default,model=virtio --graphics none >/dev/null
+		--network network=pacnix,model=virtio --graphics none >/dev/null
 }
 
 case $1 in
+network) network ;;
+mirror)
+	mirror "${2:-}"
+	;;
 base)
 	src=${2:-$image} out=$cache/base-$(basename "$src" .qcow2 | sed 's/^cloud-//').qcow2
 	if [[ -n ${3:-} ]]; then
-		export PACNIX_VM_MIRROR=https://archive.archlinux.org/repos/$3
+		PACNIX_VM_MIRROR=$(mirror "$3")
+		export PACNIX_VM_MIRROR
 	fi
 	qemu-img create -qf qcow2 -b "$src" -F qcow2 "$cache/pacnix-base.qcow2" 20G
 	create base "$cache/pacnix-base.qcow2"
 	wait_ssh base
+	# The clean chroot of the builds is part of the base disk: scenarios 16 and
+	# 21 start without it, and show that pacnix creates it.
 	"$0" ssh base 'sudo cloud-init status --wait >/dev/null; sudo pacman -Syu --noconfirm --needed nix devtools base-devel git rsync jq python &&
 		sudo systemctl enable --now nix-daemon.socket &&
+		sudo mkdir -p /var/lib/aurbuild/x86_64 && sudo mkarchroot /var/lib/aurbuild/x86_64/root base-devel >/dev/null &&
 		sudo cloud-init clean --logs && sudo truncate -s0 /etc/machine-id && sudo fstrim -a'
 	"$0" ssh base 'sudo systemctl poweroff' || true
 	while virsh domstate pacnix-base | grep -q running; do sleep 2; done
@@ -88,13 +133,18 @@ base)
 	;;
 up)
 	base=${3:-$cache/base-20261101.620452.qcow2}
-	"$0" down "$2" 2>/dev/null || true
-	qemu-img create -qf qcow2 -b "$base" -F qcow2 "$cache/pacnix-$2.qcow2" 30G
-	create "$2" "$cache/pacnix-$2.qcow2"
-	wait_ssh "$2"
+	# A new VM sometimes does not boot: start it again one time.
+	for try in 1 2; do
+		"$0" down "$2" 2>/dev/null || true
+		qemu-img create -qf qcow2 -b "$base" -F qcow2 "$cache/pacnix-$2.qcow2" 30G
+		create "$2" "$cache/pacnix-$2.qcow2"
+		wait_ssh "$2" && break
+		((try == 1)) || exit 1
+	done
 	"$0" ssh "$2" 'sudo cloud-init status --wait >/dev/null || true'
 	;;
 down)
+	close "$2"
 	virsh destroy "pacnix-$2" >/dev/null 2>&1 || true
 	virsh undefine "pacnix-$2" --nvram >/dev/null 2>&1 || virsh undefine "pacnix-$2" >/dev/null 2>&1 || true
 	rm -f "$cache/pacnix-$2.qcow2" "$cache/pacnix-$2.seed.iso" "$cache/pacnix-$2-blank.qcow2"
@@ -102,18 +152,22 @@ down)
 ssh)
 	n=$2
 	shift 2
-	exec ssh "${sshopts[@]}" "arch@$(ip "$n")" "$@"
+	# shellcheck disable=SC2046
+	exec ssh "${sshopts[@]}" $(mux "$n") "arch@$(ip "$n")" "$@"
 	;;
 push)
 	a=$(ip "$2")
 	rsync -a --delete --exclude scenario.nix --exclude /fixtures -e "ssh ${sshopts[*]}" "$root/tests/config/" "arch@$a:config/"
 	rsync -a --delete -e "ssh ${sshopts[*]}" "$root/fixtures/" "arch@$a:config/fixtures/"
 	rsync -a --delete -e "ssh ${sshopts[*]}" "$cache/pkg/" "arch@$a:repo/"
-	# The test repository [pacnix] has the packages that tests/package built.
-	# Only its database is refreshed, so that the system does not change.
+	# The test repository [pacnix] has the packages that tests/package built and
+	# signed with the test key: the steps of the README for a live system. Only
+	# its database is refreshed, so that the system does not change.
 	ssh "${sshopts[@]}" "arch@$a" 'sudo rsync -a --delete ~/repo/ /srv/pacnix/ &&
-		{ grep -qx "\[pacnix\]" /etc/pacman.conf || printf "\n[pacnix]\nSigLevel = Optional TrustAll\nServer = file:///srv/pacnix\n" | sudo tee -a /etc/pacman.conf >/dev/null; } &&
-		printf "[options]\nArchitecture = auto\n[pacnix]\nSigLevel = Optional TrustAll\nServer = file:///srv/pacnix\n" >/tmp/pacnix.conf &&
+		sudo pacman-key --add /srv/pacnix/test-key.asc >/dev/null 2>&1 &&
+		sudo pacman-key --lsign-key '"$(gpg --with-colons --show-keys "$cache/pkg/test-key.asc" | awk -F: '/^fpr/ { print $10; exit }')"' >/dev/null 2>&1 &&
+		{ grep -qx "\[pacnix\]" /etc/pacman.conf || printf "\n[pacnix]\nServer = file:///srv/pacnix\n" | sudo tee -a /etc/pacman.conf >/dev/null; } &&
+		printf "[options]\nArchitecture = auto\n[pacnix]\nServer = file:///srv/pacnix\n" >/tmp/pacnix.conf &&
 		sudo pacman -Sy --config /tmp/pacnix.conf >/dev/null && sudo pacman -U --noconfirm /srv/pacnix/pacnix-*.pkg.tar.zst >/dev/null &&
 		sudo rsync -a --delete --exclude scenario.nix ~/config/ /etc/pacnix/'
 	;;
@@ -131,20 +185,35 @@ blank)
 	;;
 boot)
 	"$0" down "$2" 2>/dev/null || true
+	network
 	mv "$3" "$cache/pacnix-$2.qcow2"
 	virt-install --name "pacnix-$2" --osinfo archlinux --import --noautoconsole --vcpus "${PACNIX_VM_CPUS:-2}" --memory "${PACNIX_VM_MEM:-3072}" \
-		--disk "$cache/pacnix-$2.qcow2,bus=virtio,discard=unmap" --network network=default,model=virtio --graphics vnc,listen=127.0.0.1 >/dev/null
+		--disk "$cache/pacnix-$2.qcow2,bus=virtio,discard=unmap" --network network=pacnix,model=virtio --graphics vnc,listen=127.0.0.1 >/dev/null
 	wait_ssh "$2"
 	;;
 ip) ip "$2" ;;
-wait) wait_ssh "$2" ;;
+wait)
+	close "$2"
+	wait_ssh "$2"
+	;;
+reboot)
+	b=$("$0" ssh "$2" 'cat /proc/sys/kernel/random/boot_id')
+	"$0" ssh "$2" 'sudo systemctl reboot' || true
+	close "$2"
+	i=0
+	until n=$(ssh "${sshopts[@]}" "arch@$(ip "$2")" 'cat /proc/sys/kernel/random/boot_id' 2>/dev/null) && [[ -n $n && $n != "$b" ]]; do
+		((++i < 240)) || { echo "pacnix-$2 does not come back" >&2; exit 1; }
+		sleep 0.5
+	done
+	;;
 reset)
+	close "$2"
 	virsh destroy "pacnix-$2" >/dev/null
 	virsh start "pacnix-$2" >/dev/null
 	wait_ssh "$2"
 	;;
 *)
-	sed -n '2,16p' "$0"
+	sed -n '2,18p' "$0"
 	exit 2
 	;;
 esac

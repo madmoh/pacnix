@@ -3,11 +3,10 @@
 # desktop builds the AUR repository, signs it and serves it, laptop installs
 # from it after a check of the declared key, then newpc joins as a new
 # machine. A wrong key and a changed package stop newpc before any change.
-size=(4 6144 2)
+size=(4 4096 3)
 source "$(dirname "$0")/../lib.sh"
 plain=$cache/base-20261101.620452.qcow2
-fresh desktop "$plain"
-fresh laptop "$plain"
+fresh_all "$plain" desktop laptop newpc
 step "desktop builds and serves the repository"
 out=$(apply desktop) || { echo "$out" | tail -30; fail "apply on desktop failed"; }
 packages_match desktop
@@ -24,7 +23,7 @@ scenario laptop "{ packages.serverKey = \"$key\"; }"
 apply laptop || fail "apply on laptop failed"
 packages_match laptop
 check laptop 'pacman -Q downgrade zsh-antidote' "laptop lacks AUR packages"
-refute laptop 'test -e /var/lib/aurbuild/x86_64/root' "laptop built packages"
+refute laptop 'ls /var/lib/pacnix/repo/*.pkg.tar.zst' "laptop built packages"
 check laptop 'grep -qx HandleLidSwitch=suspend /etc/systemd/logind.conf.d/50-lid.conf' "the host value of laptop is wrong"
 check laptop 'swapon --show=NAME,SIZE --noheadings | grep -q "/swapfile *256M"' "the swap file of laptop has the wrong size"
 check laptop 'systemctl is-active tailscaled avahi-daemon' "shared units do not run on laptop"
@@ -32,7 +31,6 @@ empty_plan laptop
 empty_plan desktop
 "$vm" down laptop
 step "newpc joins as a new machine"
-fresh newpc "$plain"
 scenario newpc '{ packages.serverKey = "0000000000000000000000000000000000000000"; }'
 out=$(apply newpc) && fail "apply on newpc with a wrong key succeeded"
 grep -q "^pacnix: error: the key in http://desktop:8080/pacnix-local.asc has the fingerprint $key, but packages.serverKey is 0000" <<<"$out" || { echo "$out" | tail; fail "the error does not show the wrong key"; }

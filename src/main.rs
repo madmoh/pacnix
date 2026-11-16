@@ -37,10 +37,8 @@ struct Cli {
 enum Verb {
     /// Build the generation and show each change to the system. Change nothing.
     Plan,
-    /// Build the generation and do the plan. Do not refresh the sync databases.
-    Apply(Opts),
-    /// Upgrade with pacman -Syu, rebuild changed AUR packages, then apply.
-    Upgrade(Opts),
+    /// Upgrade with pacman -Syu, rebuild changed AUR packages, then do the plan.
+    Apply(ApplyOpts),
     /// Apply the previous generation.
     Rollback(Opts),
     /// Show state that no declaration explains. Change nothing.
@@ -60,6 +58,15 @@ pub struct Opts {
     /// Permit replacement of files that no package and no generation owns
     #[arg(long)]
     pub overwrite_unmanaged: bool,
+}
+
+#[derive(Args, Clone)]
+struct ApplyOpts {
+    #[command(flatten)]
+    opts: Opts,
+    /// Keep the sync databases and the AUR packages as they are: no pacman -Syu and no AUR rebuilds, for a change that needs no download
+    #[arg(long)]
+    offline: bool,
 }
 
 pub struct Ctx {
@@ -99,8 +106,7 @@ fn run() -> Result<()> {
     let ctx = |opts| Ctx { flake: flake.clone(), host: host.clone(), opts };
     match cli.verb {
         Verb::Plan => generation::plan(&ctx(Opts::default())),
-        Verb::Apply(o) => resilient(|| generation::apply(&ctx(o.clone()))),
-        Verb::Upgrade(o) => resilient(|| generation::upgrade(&ctx(o.clone()))),
+        Verb::Apply(a) => resilient(|| generation::apply(&ctx(a.opts.clone()), a.offline)),
         Verb::Rollback(o) => resilient(|| generation::rollback(&ctx(o.clone()))),
         Verb::Audit => audit::audit(&ctx(Opts::default())),
         Verb::Uninstall(o) => resilient(|| generation::uninstall(&ctx(o.clone()))),
@@ -183,7 +189,7 @@ fn resilient(f: impl Fn() -> Result<()>) -> Result<()> {
                     packages::SERIAL.store(true, std::sync::atomic::Ordering::Relaxed);
                     std::thread::sleep(Duration::from_secs(*pause));
                 }
-                Cause::Stale => return Err(e.context("the mirror does not have a package of the sync databases, thus the databases are old. Run pacnix upgrade")),
+                Cause::Stale => return Err(e.context("the mirror does not have a package of the sync databases, thus the databases or the mirror are old. Run pacnix apply without --offline, or use a different mirror")),
                 Cause::Other => return Err(e),
             },
         }
@@ -233,11 +239,11 @@ fn lock() -> Result<std::fs::File> {
     Ok(f)
 }
 
-/// The command line, without the runuser and env prefix of the builder commands.
+/// The command line, without the runuser, systemd-run and env prefix of the builder commands.
 pub fn describe(cmd: &Command) -> String {
     let words: Vec<String> = std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|w| w.to_string_lossy().into_owned()).collect();
     let mut start = 0;
-    if words[0] == "runuser" {
+    if words[0] == "runuser" || words[0] == "systemd-run" {
         start = words.iter().position(|w| w == "--").map_or(0, |i| i + 1);
         if words.get(start).is_some_and(|w| w == "env") {
             start += 1 + words[start + 1..].iter().take_while(|w| w.contains('=') || w.starts_with('-')).count();

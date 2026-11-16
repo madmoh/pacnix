@@ -1,0 +1,17 @@
+# A PKGBUILD that tries to write outside its build directory and to read a
+# home directory. Its global scope runs on the host when pacnix reads it and
+# when makechrootpkg downloads its sources.
+for f in /var/tmp /tmp /dev/shm /etc; do
+  touch "$f/pacnix-escape" 2>/dev/null
+done
+cat /home/arch/secret >"$startdir/leak" 2>/dev/null
+pkgname=escape
+pkgver=1
+pkgrel=1
+pkgdesc='pacnix test package that tries to leave its build directory'
+arch=(any)
+license=(MIT)
+
+package() {
+  install -Dm644 /dev/null "$pkgdir/usr/share/escape/done"
+}

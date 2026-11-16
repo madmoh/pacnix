@@ -1,9 +1,11 @@
-# A desktop environment with its display manager. Scenario 17 switches it.
+# A desktop with its display manager. Scenario 17 switches it. Small window
+# managers stand for the desktops: the switch of the packages and of the
+# display-manager.service alias is the same.
 { config, lib, ... }:
 let
   desktops = {
-    gnome = { packages = [ "gnome-shell" "gdm" ]; unit = "gdm.service"; };
-    plasma = { packages = [ "plasma-desktop" "sddm" ]; unit = "sddm.service"; };
+    fluxbox = { packages = [ "fluxbox" "greetd" ]; unit = "greetd.service"; };
+    i3 = { packages = [ "i3-wm" "lightdm" ]; unit = "lightdm.service"; };
   };
   d = config.features.desktop;
 in
