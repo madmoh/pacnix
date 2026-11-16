@@ -1,4 +1,4 @@
-use crate::{Ctx, ask, cmd, failed, files, forward, home, packages, report, run_cmd, run_quiet, trust, units};
+use crate::{Ctx, ask, audit, cmd, failed, files, forward, home, packages, report, run_cmd, run_quiet, trust, units};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -186,6 +186,8 @@ pub struct Plan {
     pub files: files::Plan,
     pub units: units::Plan,
     pub home: home::Plan,
+    /// The paths of the features that leave, by feature.
+    pub data: Vec<(String, Vec<String>)>,
 }
 
 impl Plan {
@@ -196,7 +198,8 @@ impl Plan {
         let files = files::plan(ctx, &target, &ledger)?;
         let units = units::plan(&target, &old)?;
         let home = home::plan(&target)?;
-        Ok(Plan { target, packages, files, units, home })
+        let data = audit::leftovers(&old, &target)?;
+        Ok(Plan { target, packages, files, units, home, data })
     }
 
     fn print(&self) {
@@ -206,6 +209,7 @@ impl Plan {
         files::print_triggers(&self.files, &mut lines);
         self.units.print(&mut lines);
         self.home.print(&mut lines);
+        lines.extend(self.data.iter().map(|(f, paths)| format!("delete the data of removed feature {f}: {}", paths.join(", "))));
         if lines.is_empty() {
             println!("No changes.");
         }
@@ -246,7 +250,7 @@ fn activate(ctx: &Ctx, target: Generation) -> Result<()> {
     packages::check(ctx, &plan.packages)?;
     files::check(ctx, &plan.target, &plan.files)?;
     let builds = packages::fetch_builds(&plan.target, &plan.packages)?;
-    ask(&[packages::removals(&plan.packages), builds.asks.clone()].concat(), &ctx.opts)?;
+    let delete = ask(&[packages::removals(&plan.packages), builds.asks.clone()].concat(), &audit::asks(&plan.data), &ctx.opts)?;
     let current = std::fs::canonicalize(PENDING).ok();
     if current.as_deref() != Some(Path::new(&plan.target.path)) {
         std::fs::create_dir_all(STATE)?;
@@ -261,6 +265,7 @@ fn activate(ctx: &Ctx, target: Generation) -> Result<()> {
     files::run_triggers(&plan.files, &changed)?;
     units::apply(&plan.units, &changed)?;
     home::apply(&plan.target, &plan.home)?;
+    keep_or_delete(&plan.target, &plan.data, delete)?;
     // A chroot cannot build packages or activate home configurations.
     if !packages::booted() {
         let deferred = packages::deferred(&plan.target);
@@ -282,7 +287,7 @@ pub fn upgrade(ctx: &Ctx) -> Result<()> {
     let target = build(ctx)?;
     let before = Plan::compute(ctx, target.clone())?;
     let builds = packages::upgrade_builds(&target)?;
-    ask(&[packages::removals(&before.packages), builds.asks.clone(), trust::news()].concat(), &ctx.opts)?;
+    ask(&[packages::removals(&before.packages), builds.asks.clone(), trust::news()].concat(), &audit::asks(&before.data), &ctx.opts)?;
     packages::upgrade(&target, builds)?;
     activate(ctx, target.clone())?;
     commit(&target)?;
@@ -305,5 +310,60 @@ pub fn rollback(ctx: &Ctx) -> Result<()> {
     activate(ctx, previous)?;
     run_cmd(cmd("nix-env", &["--profile", PROFILE, "--switch-generation", &number.to_string()]))?;
     let _ = std::fs::remove_file(PENDING);
+    Ok(())
+}
+
+fn keep_or_delete(target: &Generation, data: &[(String, Vec<String>)], delete: bool) -> Result<()> {
+    if delete {
+        return audit::delete(target, data);
+    }
+    if !data.is_empty() {
+        report::last("pacnix: the data of the removed features stays. pacnix audit shows it.".to_string());
+    }
+    Ok(())
+}
+
+/// Removes pacnix and keeps the system as configured: the declared files,
+/// units and packages stay, and the Home Manager files become copies outside
+/// the Nix store. The packages pacnix, aurutils and nix leave with pacman.
+/// Then the footprint of pacnix, the feature pacnix, goes as the data of a
+/// removed feature, with the users and groups of pacnix and Nix and the key of
+/// packages.server in the pacman keyring.
+pub fn uninstall(ctx: &Ctx) -> Result<()> {
+    let current = active()?.context("no active generation")?;
+    let mut target = current.clone();
+    target.m.claims.remove("pacnix");
+    let data = audit::leftovers(&current, &target)?;
+    let remove = packages::uninstall_plan()?;
+    // The users of pacnix and of the Nix builds have the group pacnix or nixbld as primary group.
+    let gid = |g: &str| crate::output_any(cmd("getent", &["group", g])).ok()?.split(':').nth(2)?.parse::<u32>().ok();
+    let groups: Vec<&str> = ["pacnix", "nixbld"].into_iter().filter(|g| gid(g).is_some()).collect();
+    let gids: Vec<u32> = groups.iter().filter_map(|g| gid(g)).collect();
+    let passwd = std::fs::read_to_string("/etc/passwd")?;
+    let users: Vec<&str> = passwd.lines().map(|l| l.split(':').collect::<Vec<_>>()).filter(|f| f.get(3).and_then(|g| g.parse().ok()).is_some_and(|g| gids.contains(&g))).map(|f| f[0]).collect();
+    let key = current.m.packages.server_key.clone().map(|k| k.replace(' ', "").to_uppercase()).filter(|k| run_quiet(cmd("pacman-key", &["--list-keys", k])).is_ok());
+    let mut asks = audit::asks(&data);
+    if !groups.is_empty() {
+        asks.push(format!("Delete the users {} and the groups {}.", users.join(" "), groups.join(" ")));
+    }
+    asks.extend(key.iter().map(|k| format!("Delete the key {k} of packages.server in the pacman keyring.")));
+    let removals = if remove.is_empty() { vec![] } else { vec![format!("Remove {} packages: {}.", remove.len(), remove.join(" "))] };
+    let delete = ask(&removals, &asks, &ctx.opts)?;
+    home::detach(&current)?;
+    packages::uninstall(&remove)?;
+    keep_or_delete(&target, &data, delete)?;
+    if delete {
+        for u in &users {
+            run_cmd(cmd("userdel", &[u]))?;
+        }
+        for g in groups {
+            if gid(g).is_some() {
+                run_cmd(cmd("groupdel", &[g]))?;
+            }
+        }
+        if let Some(k) = key {
+            run_quiet(cmd("pacman-key", &["--delete", &k]))?;
+        }
+    }
     Ok(())
 }

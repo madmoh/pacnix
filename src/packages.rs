@@ -66,6 +66,7 @@ struct Info {
     makedepends: Vec<String>,
     provides: Vec<String>,
     conflicts: Vec<String>,
+    required: Vec<String>,
     explicit: bool,
     filename: String,
 }
@@ -100,6 +101,7 @@ fn parse_info(text: &str) -> Vec<Info> {
             "Depends On" => cur.depends.extend(list_of(v)),
             "Provides" => cur.provides.extend(list_of(v)),
             "Conflicts With" => cur.conflicts.extend(list_of(v)),
+            "Required By" => cur.required.extend(list_of(v)),
             "Install Reason" => cur.explicit = v.starts_with("Explicitly"),
             _ => {}
         }
@@ -1057,4 +1059,33 @@ pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
         transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
     }
     Ok(())
+}
+
+/// The packages that pacnix uninstall removes: pacnix, aurutils and nix, less
+/// the ones that a different package needs, and the dependencies that only
+/// they need.
+pub fn uninstall_plan() -> Result<Vec<String>> {
+    let inst = installed()?;
+    let mut targets: Vec<&str> = ["pacnix", "aurutils", "nix"].into_iter().filter(|n| inst.contains_key(*n)).collect();
+    while let Some(i) = targets.iter().position(|t| inst[*t].required.iter().any(|r| !targets.contains(&r.as_str()))) {
+        targets.remove(i);
+    }
+    if targets.is_empty() {
+        return Ok(vec![]);
+    }
+    Ok(output(pacman(&["-Rsp", "--print-format", "%n"]).args(&targets))?.lines().map(String::from).collect())
+}
+
+/// Disables and stops the system units of the packages, then removes the packages.
+pub fn uninstall(remove: &[String]) -> Result<()> {
+    if remove.is_empty() {
+        return Ok(());
+    }
+    let files = output(pacman(&["-Qlq"]).args(remove))?;
+    let units: Vec<&str> = files.lines().filter_map(|l| l.strip_prefix("/usr/lib/systemd/system/")).filter(|u| u.contains('.') && !u.contains('/') && !u.contains("@.")).collect();
+    if !units.is_empty() {
+        run_cmd(cmd("systemctl", &["disable", "--now"]).args(&units))?;
+    }
+    report::progress(&format!("remove {} packages", remove.len()));
+    transaction(&[&["-Rns", "--noconfirm"][..], &remove.iter().map(String::as_str).collect::<Vec<_>>()].concat())
 }

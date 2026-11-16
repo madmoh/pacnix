@@ -25,7 +25,7 @@ cost() {
 	eval "$(grep -m1 '^size=' "$1")"
 	echo $((size[0] * size[2])) $((size[1] * size[2]))
 }
-declare -A running
+declare -A running=()
 finish() {
 	local pid rc s c m
 	wait -n -p pid "${!running[@]}"

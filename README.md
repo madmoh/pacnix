@@ -156,7 +156,7 @@ Declare the input that an application reads:
 - dconf keys
 - drop-ins
 
-Do not declare the data that an application writes, for example databases, tokens and caches. Add these paths to `claims` so that the audit does not show them.
+Do not declare the data that an application writes, for example databases, tokens and caches. Add these paths to `claims` so that the audit does not show them. When an apply, an upgrade or a rollback removes a feature from `claims`, the question of the run shows the paths of that feature that exist. Answer `y` to delete them, or `k` to keep them: the audit then shows them with their feature. pacnix does not delete a path that a package owns, or that a declared file or a different claim includes.
 
 pacnix does not manage these items:
 
@@ -174,9 +174,10 @@ Run pacnix as your user. Before it changes the system, pacnix starts itself agai
 | `pacnix apply` | Makes the system agree with the configuration. |
 | `pacnix upgrade` | Upgrades the system, then applies. It also shows the [Arch Linux news](https://archlinux.org/news/) since the last upgrade. |
 | `pacnix rollback` | Applies the previous generation. Package versions do not go back. |
+| `pacnix uninstall` | Removes pacnix, aurutils and Nix with pacman, and deletes the data, users and groups that they made. The declared files, units and packages stay. The Home Manager files become copies outside the Nix store. |
 | `pacnix audit` | Shows the state that the configuration does not explain, for example files without an owner, changed package files, `.pacnew` files, packages and units that are not declared, and paths in home directories. It also shows if a reboot is necessary and the install notes of the last change. |
 
-`apply`, `upgrade` and `rollback` ask one question at most, before they change the system, and only for items that the configuration does not show: package removals, new maintainers or new AUR dependencies of AUR packages, and the Arch Linux news. `--yes` accepts the items. Without a terminal, pacnix stops if there is a question and you do not give `--yes`.
+`apply`, `upgrade` and `rollback` ask one question at most, before they change the system, and only for items that the configuration does not show: package removals, new maintainers or new AUR dependencies of AUR packages, the Arch Linux news and the data of removed features. `--yes` accepts the items. Without a terminal, pacnix stops if there is a question and you do not give `--yes`.
 
 At the end, `apply` and `upgrade` show the items that you must know: if a reboot is necessary (the kernel that runs is not installed, a boot image changed, or a DKMS module was built for a kernel that does not run), new or changed install notes of packages, and new `.pacnew` files.
 

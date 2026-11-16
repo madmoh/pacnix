@@ -199,7 +199,7 @@ fn fsync_dir(dir: &Path) -> Result<()> {
 
 /// Writes a file with atomic replace: a temporary file in the same directory,
 /// fsync, rename, fsync of the directory.
-fn temporary(path: &str) -> std::path::PathBuf {
+pub fn temporary(path: &str) -> std::path::PathBuf {
     let target = Path::new(path);
     target.with_file_name(format!(".{}.pacnix-new", target.file_name().unwrap().to_string_lossy()))
 }
@@ -257,7 +257,7 @@ fn restore(path: &str, pkg: &str) -> Result<()> {
 }
 
 /// Removes empty directories above a deleted file that no package owns.
-fn prune_dirs(path: &str) {
+pub fn prune_dirs(path: &str) {
     let mut dir = Path::new(path).parent();
     while let Some(d) = dir {
         let s = d.display().to_string();

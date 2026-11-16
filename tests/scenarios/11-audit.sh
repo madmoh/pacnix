@@ -1,20 +1,34 @@
 #!/usr/bin/env bash
-# Scenario 11: a feature creates state, the feature goes, the audit lists the
-# leftovers with the feature that claimed them.
+# Scenario 11: a feature creates state, then the feature goes. The one question
+# of the run offers to delete the data of the feature. The answer k keeps it,
+# and the audit lists it with the feature that claimed it. --yes deletes it,
+# except a declared file and a path that a feature of the configuration claims.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
-scenario $h '{ features.demo.enable = true; }'
+demo='{ features.demo.enable = true; }'
+scenario $h "$demo"
 apply $h >/dev/null || fail "apply failed"
-on $h 'mkdir -p ~/.cache/demo && curl -fs -o ~/.cache/demo/page localhost:8081'
+on $h 'mkdir -p ~/.cache/demo/keep && curl -fs -o ~/.cache/demo/page localhost:8081'
 step "the audit of a configured system"
 out=$(pacnix $h audit) || fail "audit failed"
 echo "$out"
 grep -q '/srv/demo\|\.cache/demo' <<<"$out" && fail "the audit lists claimed paths"
-step "remove the feature"
+step "remove the feature and keep its data"
 scenario $h ''
-apply $h >/dev/null || fail "apply failed"
+out=$(on $h "printf 'k\n' | script -qec 'pacnix apply' /dev/null" 2>&1) || { echo "$out" | tail; fail "apply with the answer k failed"; }
+grep -q '^Delete the data of removed feature demo: /srv/demo, /home/arch/.cache/demo\.' <<<"$out" || { echo "$out" | tail; fail "the question does not show the data of the feature"; }
+grep -qF 'Continue? [y/N] (k: continue and keep the data)' <<<"$out" || fail "the question does not offer to keep the data"
+grep -q '^pacnix: the data of the removed features stays. pacnix audit shows it.' <<<"$out" || fail "the summary does not tell that the data stays"
+check $h 'test -e /srv/demo/index.html && test -e ~/.cache/demo/page' "the answer k deleted the data"
 out=$(pacnix $h audit) || fail "audit failed"
 echo "$out"
 grep -qE '^unowned directory: /srv/demo \(claimed by feature demo in generation [0-9]+; the feature is no longer enabled\)$' <<<"$out" || fail "the audit does not list /srv/demo with its origin"
 grep -qE '^unclaimed home path: /home/arch/.cache/demo \(claimed by feature demo in generation [0-9]+; the feature is no longer enabled\)$' <<<"$out" || fail "the audit does not list ~/.cache/demo with its origin"
+step "remove the feature again and delete its data"
+scenario $h "$demo"
+apply $h >/dev/null || fail "apply failed"
+scenario $h '{ files."/srv/demo/keep.txt".text = "kept\n"; claims.other.home = [ ".cache/demo/keep" ]; }'
+apply $h || fail "apply --yes failed"
+refute $h 'test -e /srv/demo/index.html || test -e ~/.cache/demo/page' "the data of the removed feature remains"
+check $h 'test "$(cat /srv/demo/keep.txt)" = kept && test -d ~/.cache/demo/keep' "a declared file or a claimed path is deleted"
 pass

@@ -45,11 +45,13 @@ enum Verb {
     Rollback(Opts),
     /// Show state that no declaration explains. Change nothing.
     Audit,
+    /// Remove pacnix, Nix and their data. The declared files, units and packages stay.
+    Uninstall(Opts),
 }
 
 #[derive(Args, Clone, Default)]
 pub struct Opts {
-    /// Accept package removals, new maintainers or AUR dependencies of AUR packages, and the Arch Linux news without a question
+    /// Accept package removals, new maintainers or AUR dependencies of AUR packages, the Arch Linux news and the deletion of the data of removed features without a question
     #[arg(long, short)]
     pub yes: bool,
     /// Permit removal of base, pacman, nix, pacnix and the booted kernel
@@ -101,6 +103,7 @@ fn run() -> Result<()> {
         Verb::Upgrade(o) => resilient(|| generation::upgrade(&ctx(o.clone()))),
         Verb::Rollback(o) => resilient(|| generation::rollback(&ctx(o.clone()))),
         Verb::Audit => audit::audit(&ctx(Opts::default())),
+        Verb::Uninstall(o) => resilient(|| generation::uninstall(&ctx(o.clone()))),
     }
 }
 
@@ -189,31 +192,37 @@ fn resilient(f: impl Fn() -> Result<()>) -> Result<()> {
 }
 
 static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static DELETE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The one question of a run: it shows each item that the user must accept and
 /// asks one time. --yes accepts. Without a terminal and without --yes, pacnix
-/// stops. Later calls in the same run do not ask again.
-pub fn ask(items: &[String], opts: &Opts) -> Result<()> {
-    if items.is_empty() || ASKED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        return Ok(());
+/// stops. The answer k continues and keeps the data of `data`. Returns true
+/// when the user accepts the deletion of the data. Later calls in the same run
+/// do not ask again and return the same answer.
+pub fn ask(items: &[String], data: &[String], opts: &Opts) -> Result<bool> {
+    use std::sync::atomic::Ordering::Relaxed;
+    if (items.is_empty() && data.is_empty()) || ASKED.swap(true, Relaxed) {
+        return Ok(DELETE.load(Relaxed));
     }
-    for i in items {
+    for i in items.iter().chain(data) {
         println!("{i}");
     }
-    if opts.yes {
-        return Ok(());
-    }
-    if !std::io::stdin().is_terminal() {
+    if !opts.yes && !std::io::stdin().is_terminal() {
         bail!("these items need a confirmation. Give --yes to continue without a terminal");
     }
-    print!("Continue? [y/N] ");
-    std::io::stdout().flush()?;
-    let mut answer = String::new();
-    std::io::stdin().lock().read_line(&mut answer)?;
-    if !matches!(answer.trim(), "y" | "Y" | "yes") {
-        bail!("stopped by the user");
+    let mut answer = String::from("y");
+    if !opts.yes {
+        print!("Continue? [y/N]{} ", if data.is_empty() { "" } else { " (k: continue and keep the data)" });
+        std::io::stdout().flush()?;
+        answer.clear();
+        std::io::stdin().lock().read_line(&mut answer)?;
     }
-    Ok(())
+    match answer.trim() {
+        "y" | "Y" | "yes" => DELETE.store(!data.is_empty(), Relaxed),
+        "k" if !data.is_empty() => {}
+        _ => bail!("stopped by the user"),
+    }
+    Ok(DELETE.load(Relaxed))
 }
 
 fn lock() -> Result<std::fs::File> {

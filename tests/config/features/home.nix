@@ -15,7 +15,7 @@ in
   };
   config = lib.mkIf cfg.enable {
     packages.repo = [ "dconf" ];
-    claims.home.home = [ ".config/Code" ".config/dconf" ".local/state" ".cache/nix" ];
+    claims.home.home = [ ".config/Code" ".config/dconf" ];
     home.users.${config.user} = { lib, ... }: {
       home.file.".config/demo/settings.conf".text = "theme = dark\n";
       dconf.settings."org/gnome/desktop/interface" = {
