@@ -129,14 +129,67 @@ pub fn plan(ctx: &Ctx, g: &Generation, ledger: &[Generation]) -> Result<Plan> {
     Ok(plan)
 }
 
-pub fn check(_ctx: &Ctx, plan: &Plan) -> Result<()> {
+pub fn check(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<()> {
     if !plan.conflicts.is_empty() {
         bail!(
             "these files exist, and no package or generation owns them: {}. Give --overwrite-unmanaged to replace them",
             plan.conflicts.join(", ")
         );
     }
+    let mut probed = BTreeSet::new();
+    for (path, _) in &plan.write {
+        let spec = &g.m.files[path];
+        if probed.insert((Path::new(path).parent(), &spec.mode, &spec.user, &spec.group)) {
+            probe(path, spec)?;
+        }
+    }
     Ok(())
+}
+
+/// Writes a test file in the directory of a file to write, with the declared
+/// mode and owner, and fails if the file system does not keep them. Else each
+/// apply corrects the same drift again, for example on a vfat file system,
+/// where the mount options set the mode and owner of all files. An owner that
+/// does not exist yet is not tested.
+fn probe(path: &str, spec: &FileSpec) -> Result<()> {
+    let Some(dir) = Path::new(path).ancestors().skip(1).find(|d| d.is_dir()) else { return Ok(()) };
+    if spec.target.is_some() {
+        return Ok(());
+    }
+    let test = dir.join(".pacnix-probe");
+    let f = std::fs::File::create(&test).with_context(|| format!("write {}", test.display()))?;
+    let (uid, gid) = (id(&spec.user, true), id(&spec.group, false));
+    let set = std::os::unix::fs::fchown(&f, uid, gid).and_then(|_| f.set_permissions(std::fs::Permissions::from_mode(mode(spec))));
+    let meta = f.metadata();
+    std::fs::remove_file(&test)?;
+    let meta = meta?;
+    if set.is_ok() && meta.mode() & 0o7777 == mode(spec) && uid.is_none_or(|u| u == meta.uid()) && gid.is_none_or(|g| g == meta.gid()) {
+        return Ok(());
+    }
+    let (fs, target, options) = mount(dir);
+    bail!(
+        "the {fs} file system on {target} cannot keep the mode {} and the owner {}:{} of {path}: a new file gets the mode {:04o} and the owner {}:{} (mount options {options}). Change the mount options in /etc/fstab, or declare the mode and owner that the file system gives",
+        spec.mode,
+        spec.user,
+        spec.group,
+        meta.mode() & 0o7777,
+        meta.uid(),
+        meta.gid()
+    )
+}
+
+/// The file system type, mount point and options of the mount that holds a path.
+fn mount(path: &Path) -> (String, String, String) {
+    let info = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    let mut best = (String::new(), String::new(), String::new());
+    for line in info.lines() {
+        let f: Vec<&str> = line.split(' ').collect();
+        let Some(sep) = f.iter().position(|x| *x == "-") else { continue };
+        if f.len() > sep + 3 && path.starts_with(f[4]) && f[4].len() >= best.1.len() {
+            best = (f[sep + 1].to_string(), f[4].to_string(), format!("{},{}", f[5], f[sep + 3]));
+        }
+    }
+    best
 }
 
 fn fsync_dir(dir: &Path) -> Result<()> {
@@ -226,7 +279,7 @@ pub fn apply(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<Vec<String>> {
             // arch-chroot bind-mounts /etc/resolv.conf from the live system.
             Err(e) if !crate::packages::booted() && e.root_cause().downcast_ref::<std::io::Error>().and_then(|e| e.raw_os_error()) == Some(libc::EBUSY) => {
                 let _ = std::fs::remove_file(temporary(path));
-                println!("pacnix: note: {path} is a mount point in this chroot; the first boot writes it");
+                println!("pacnix: note: {path} is a mount point in this chroot; the first pacnix upgrade on the booted system writes it");
             }
             r => {
                 r.with_context(|| format!("write {path}"))?;
@@ -273,7 +326,7 @@ pub fn print_triggers(plan: &Plan, l: &mut Vec<String>) {
 
 pub fn run_triggers(plan: &Plan, changed: &[String]) -> Result<()> {
     for (name, command) in triggered(plan, changed) {
-        println!("pacnix: run trigger {name}: {command}");
+        crate::report::progress(&format!("run trigger {name}: {command}"));
         run_cmd(cmd("sh", &["-ec", command])).with_context(|| format!("trigger {name}"))?;
     }
     Ok(())

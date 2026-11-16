@@ -107,6 +107,7 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
     report.extend(units.enable.iter().map(|u| format!("declared unit not enabled: {u}")));
 
     home(&g, &origins, &mut report)?;
+    crate::report::audit(&mut report);
     if report.is_empty() {
         println!("The configuration explains the state of the system.");
     }

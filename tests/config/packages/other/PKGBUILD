@@ -1,0 +1,12 @@
+# A second package with an install note, in the same transaction as notes.
+pkgname=other
+pkgver=1
+pkgrel=1
+pkgdesc='pacnix test package with an install note'
+arch=(any)
+license=(MIT)
+install=other.install
+
+package() {
+  install -Dm644 /dev/null "$pkgdir/usr/share/other/done"
+}

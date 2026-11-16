@@ -31,15 +31,21 @@ cp -a config /mnt/etc/pacnix
 arch-chroot /mnt pacnix apply --host myhost
 ```
 
-`pacstrap -K` gives the new system an empty keyring, thus the key is added again in the chroot. The apply in the chroot does these steps:
+`pacstrap -K` gives the new system an empty keyring, thus the key is added again in the chroot. If `pacstrap` fails, for example because a mirror stops, run it again: the packages that it downloaded stay in the pacman cache of `/mnt`. The apply in the chroot does these steps:
 
 - It installs the packages from the repositories.
 - It writes the files and enables the services.
 - It runs the triggers, for example `locale-gen` and the installation of the boot loader.
 
-A chroot cannot build AUR packages or activate a home configuration. On the first boot, `pacnix-firstboot.service` runs `pacnix apply` and does these two steps. To monitor it, run `journalctl -fu pacnix-firstboot`.
+A chroot cannot build AUR packages or activate a home configuration. At the end, the apply in the chroot shows the packages and home configurations that wait for the booted system, and the next command. Set the passwords with `passwd` before you reboot. pacnix does not manage secrets.
 
-Set the passwords with `passwd` before you reboot. pacnix does not manage secrets.
+Reboot and log in. Connect to the network, for example to a WiFi network in the desktop. Then run:
+
+```sh
+sudo pacnix upgrade
+```
+
+The upgrade refreshes the sync databases, builds and installs the AUR and local packages, and activates the home configurations. The builds can take a long time. When a step gives no output for 60 s, pacnix writes a line that tells that the step continues. A new installation asks no question.
 
 ### On an installed system
 
@@ -106,7 +112,9 @@ When two declared packages conflict, pacnix refuses the plan. `pacnix upgrade` d
 
 `apply` does not refresh the sync databases. `pacnix upgrade` runs `pacman -Syu`, builds the AUR packages again when necessary, and then applies.
 
-Each AUR user can change an AUR package, thus read the changes before you build them. Before `pacnix upgrade` builds new versions of AUR packages, it shows the changes since the last review and asks for a confirmation. `--yes` accepts them without a confirmation. If an AUR package has no review yet, pacnix shows all its files. pacnix keeps the reviewed revisions in the database of [aur-view](https://man.archlinux.org/man/aur-view.1).
+Each AUR user can change an AUR package. At the first build of an AUR package, pacnix records its maintainer, its co-maintainers and its AUR dependencies in `/var/lib/pacnix`, without a question. When a later build shows a different maintainer or co-maintainer, or a new AUR dependency, pacnix asks before it changes the system. Before each new build of an AUR package, the output shows the changes of its PKGBUILD since the last build.
+
+pacnix downloads the packages into the pacman cache before the transaction. If a mirror does not have a package version of the sync databases, the databases are old: run `pacnix upgrade`.
 
 ### Files
 
@@ -116,7 +124,7 @@ Each AUR user can change an AUR package, thus read the changes before you build 
 - `source`: a file that has the content.
 - `target`: the target of a symbolic link.
 
-`mode`, `user` and `group` set the permissions. pacnix writes regular files with an atomic replace. When you remove a declaration of a file, pacnix deletes the file. If a package owns the file, pacnix restores the file of the package. pacnix does not replace a file that no package and no generation owns, unless you give `--overwrite-unmanaged`.
+`mode`, `user` and `group` set the permissions. pacnix writes regular files with an atomic replace. Some file systems, for example vfat, cannot keep a mode or an owner, because the mount options set them for all files. In this condition, pacnix refuses the apply before it changes the system, and the error shows the mount options. Declare the mode and the owner that the mount options give, or change the mount options in [fstab](https://wiki.archlinux.org/title/Fstab). When you remove a declaration of a file, pacnix deletes the file. If a package owns the file, pacnix restores the file of the package. pacnix does not replace a file that no package and no generation owns, unless you give `--overwrite-unmanaged`.
 
 When possible, use the drop-in directories, for example `/etc/sysctl.d`, `/etc/systemd/system/*.d` and `/etc/default/grub.d`. Do not replace the complete file of a package.
 
@@ -156,10 +164,16 @@ pacnix does not manage these items:
 | Command | Function |
 |---|---|
 | `pacnix plan` | Shows each change that `apply` will do. It does not change the system. |
-| `pacnix apply` | Makes the system agree with the configuration. Removals of packages need a confirmation, or `--yes`. |
-| `pacnix upgrade` | Upgrades the system, then applies. New versions of AUR packages need a confirmation, or `--yes`. |
+| `pacnix apply` | Makes the system agree with the configuration. |
+| `pacnix upgrade` | Upgrades the system, then applies. It also shows the [Arch Linux news](https://archlinux.org/news/) since the last upgrade. |
 | `pacnix rollback` | Applies the previous generation. Package versions do not go back. |
-| `pacnix audit` | Shows the state that the configuration does not explain, for example files without an owner, changed package files, `.pacnew` files, packages and units that are not declared, and paths in home directories. |
+| `pacnix audit` | Shows the state that the configuration does not explain, for example files without an owner, changed package files, `.pacnew` files, packages and units that are not declared, and paths in home directories. It also shows if a reboot is necessary and the install notes of the last change. |
+
+`apply`, `upgrade` and `rollback` ask one question at most, before they change the system, and only for items that the configuration does not show: package removals, new maintainers or new AUR dependencies of AUR packages, and the Arch Linux news. `--yes` accepts the items. Without a terminal, pacnix stops if there is a question and you do not give `--yes`.
+
+At the end, `apply` and `upgrade` show the items that you must know: if a reboot is necessary (the kernel that runs is not installed, a boot image changed, or a DKMS module was built for a kernel that does not run), new or changed install notes of packages, and new `.pacnew` files.
+
+When a download fails because of the network, for example no connection, a DNS timeout or a mirror that stops, pacnix tries again after 10 s, 30 s and 60 s, with one download at a time. Your `ParallelDownloads` setting in `/etc/pacman.conf` does not change. The next attempt uses the packages that are already in the pacman cache and in the local repository. Each other failure, for example an error in the configuration or a package that does not build, stops pacnix with the reason.
 
 pacnix refuses to remove `base`, `pacman`, `nix`, `pacnix` and the kernel that runs, unless you give `--allow-protected-removal`. Each apply keeps a generation in the Nix profile `/nix/var/nix/profiles/pacnix`.
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Scenario 7: kernel command line and mkinitcpio settings through drop-ins and
-# triggers, a reboot, and the reverse when the feature goes.
+# triggers, a reboot, and the reverse when the feature goes. The summary of
+# apply and the audit show that a reboot is necessary until the reboot.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 apply $h >/dev/null || fail "first apply failed"
@@ -9,14 +10,17 @@ scenario $h '{ features.boot = { enable = true; cmdline = "pacnix.test=1 mitigat
 out=$(plan $h)
 grep -qx 'run trigger grub: grub-mkconfig -o /boot/grub/grub.cfg' <<<"$out" || { echo "$out"; fail "the plan does not run grub-mkconfig"; }
 grep -qx 'run trigger mkinitcpio: mkinitcpio -P' <<<"$out" || fail "the plan does not run mkinitcpio"
-apply $h >/dev/null || fail "apply failed"
+out=$(apply $h) || fail "apply failed"
+grep -qx 'pacnix: reboot to use the changes: /boot/initramfs-linux.img changed after the boot' <<<"$out" || { echo "$out"; fail "apply does not tell to reboot"; }
 check $h 'sudo grep -q "pacnix.test=1" /boot/grub/grub.cfg' "grub.cfg does not have the parameter"
 check $h 'sudo lsinitcpio -a /boot/initramfs-linux.img 2>/dev/null | grep -q "Compressed with: xz"' "the initramfs is not xz compressed"
+pacnix $h audit | grep -qx 'reboot necessary: /boot/initramfs-linux.img changed after the boot' || fail "the audit does not show that a reboot is necessary"
 step "reboot"
 on $h 'sudo systemctl reboot' || true
 sleep 10
 "$vm" wait $h
 check $h 'grep -q "pacnix.test=1" /proc/cmdline' "the booted kernel does not have the parameter"
+pacnix $h audit | grep -q '^reboot necessary' && fail "the audit shows a reboot after the reboot"
 check $h 'test "$(systemctl is-system-running)" = running' "the system is not healthy after the reboot"
 empty_plan $h
 step "remove the drop-ins"

@@ -1,0 +1,10 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = notes
+
+[Action]
+Description = pacnix test hook with output
+When = PostTransaction
+Exec = /usr/bin/echo hook output of notes

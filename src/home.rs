@@ -1,5 +1,5 @@
 use crate::generation::Generation;
-use crate::{cmd, output, run_cmd};
+use crate::{cmd, output, run_cmd, run_quiet};
 use anyhow::{Context, Result};
 use std::path::Path;
 
@@ -12,7 +12,7 @@ pub struct Plan {
 impl Plan {
     pub fn print(&self, l: &mut Vec<String>) {
         l.extend(self.activate.iter().map(|(u, p)| format!("activate home configuration of {u}: {p}")));
-        l.extend(self.deferred.iter().map(|u| format!("note: the first boot activates the home configuration of {u}")));
+        l.extend(self.deferred.iter().map(|u| format!("note: the first pacnix upgrade on the booted system activates the home configuration of {u}")));
     }
 }
 
@@ -45,8 +45,10 @@ pub fn plan(g: &Generation) -> Result<Plan> {
 /// the user's systemd manager and session bus.
 pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
     for (user, _) in &plan.activate {
+        crate::report::progress(&format!("activate the home configuration of {user}"));
         let h = &g.m.home[user];
-        let out = output(cmd("nix-store", &["--realise", &h.drv]))?.trim().to_string();
+        run_quiet(cmd("nix-store", &["--realise", &h.drv]))?;
+        let out = out_path(&h.drv)?;
         let uid = output(cmd("id", &["-u", user]))?.trim().to_string();
         run_cmd(cmd("systemctl", &["start", &format!("user@{uid}.service")]))?;
         let runtime = format!("/run/user/{uid}");

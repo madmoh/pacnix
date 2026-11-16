@@ -2,7 +2,8 @@
 # Scenario 18: a pinned version. A repo package at an older version comes from
 # the Arch Linux Archive, pacnix upgrade keeps it, apply corrects a manual
 # upgrade, and an AUR package at a version that the AUR does not have is refused.
-# pacnix upgrade shows the changes of an AUR package and asks before the build.
+# pacnix upgrade shows the changes of an AUR package before the build, without
+# a question. A new maintainer of a built AUR package needs a confirmation.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 now=$(on $h "pacman -Si tree | awk '/^Version/ { print \$3 }'")
@@ -35,10 +36,17 @@ apply $h >/dev/null || fail "apply of the older downgrade failed"
 old=$(on $h 'pacman -Q downgrade')
 scenario $h '{ packages.aur = [ "downgrade" ]; }'
 apply $h >/dev/null || fail "apply of the AUR package failed"
-out=$(pacnix $h upgrade 2>&1) && fail "upgrade built the changes without a confirmation"
+# The news of the time before the test are not part of it.
+on $h 'date +%s | sudo tee /var/lib/pacnix/news >/dev/null'
+out=$(pacnix $h upgrade 2>&1) || { echo "$out" | tail -5; fail "the upgrade of the AUR package failed or asked"; }
+grep -qx 'pacnix: changes of the AUR package downgrade since its last build:' <<<"$out" || fail "the upgrade does not show the changes of the package"
 grep -q '^+pkgname=downgrade' <<<"$out" || { echo "$out" | tail -5; fail "the upgrade does not show the files of the package"; }
-grep -q 'Build 1 AUR packages with these changes?' <<<"$out" || { echo "$out" | tail -3; fail "the upgrade does not ask for a confirmation"; }
-pacnix $h upgrade --yes >/dev/null || fail "upgrade --yes failed"
 check $h "test \"\$(pacman -Q downgrade)\" != '$old'" "the AUR package is not upgraded"
-pacnix $h upgrade >/dev/null || fail "the upgrade asks again for reviewed changes"
+step "a new maintainer of a built AUR package needs a confirmation"
+on $h "sudo jq '.downgrade.maintainer = \"someone-else\"' /var/lib/pacnix/aur.json | sudo tee /var/lib/pacnix/aur.json.new >/dev/null && sudo mv /var/lib/pacnix/aur.json.new /var/lib/pacnix/aur.json && sudo -u pacnix repo-remove -q /var/lib/pacnix/repo/pacnix-local.db.tar.gz downgrade"
+out=$(pacnix $h apply 2>&1) && fail "apply built a package with a new maintainer without a confirmation"
+grep -q '^The AUR package downgrade has new maintainers: .*, before: someone-else (co-maintainers: .*).$' <<<"$out" || { echo "$out" | tail -5; fail "apply does not show the new maintainer"; }
+grep -qx 'pacnix: error: these items need a confirmation. Give --yes to continue without a terminal' <<<"$out" || fail "apply without a terminal does not ask for --yes"
+apply $h >/dev/null || fail "apply --yes failed"
+out=$(pacnix $h apply 2>&1) || { echo "$out" | tail -5; fail "apply asks again after the confirmation"; }
 pass

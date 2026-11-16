@@ -7,7 +7,7 @@
 - When pacman or systemd already lets a user choose something (providers, presets, drop-ins), expose that choice instead of a new concept.
 - Call the pacman and systemctl commands, not libalpm, so that upstream releases do not break pacnix.
 - Changing the system means editing the config: one obvious place per change. An imperative front end can come later if it adds value.
-- Install to an empty mounted partition with the Arch guide's disk steps and nothing else; the first boot completes the deferred work.
+- Install to an empty mounted partition with the Arch guide's disk steps and nothing else; the first `pacnix upgrade` on the booted system completes the deferred work.
 - Declare what applications read; claim what they write, for the audit.
 - Out of scope: partitions, file systems, firmware, secrets, generating config from a live system.
 - Upstream failures and bad configurations are not pacnix's to fix or block. Refuse only what breaks pacnix's own guarantees, before any change.

@@ -1,5 +1,5 @@
 use crate::generation::{Generation, STATE};
-use crate::{Ctx, cmd, confirm, output, output_any, run_cmd};
+use crate::{Ctx, cmd, failed, forward, output, output_any, report, run_cmd, run_quiet, trust};
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -30,6 +30,15 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// The packages of the transaction: the packages to install and the local
+    /// packages that build again, which pacman -S --needed upgrades.
+    fn targets(&self) -> Vec<&str> {
+        let mut t: Vec<&str> = self.install.iter().chain(&self.local).map(String::as_str).collect();
+        t.sort();
+        t.dedup();
+        t
+    }
+
     pub fn print(&self, l: &mut Vec<String>) {
         let mut add = |prefix: &str, list: &[String]| l.extend(list.iter().map(|p| format!("{prefix} {p}")));
         add("note:", &self.notes);
@@ -57,7 +66,7 @@ struct Info {
     filename: String,
 }
 
-fn dep_name(d: &str) -> &str {
+pub fn dep_name(d: &str) -> &str {
     d.split(['<', '>', '=', ':']).next().unwrap_or(d).trim()
 }
 
@@ -154,9 +163,14 @@ pub fn booted() -> bool {
 }
 
 /// A builder host in a chroot builds nothing: AUR and local packages wait for
-/// the first boot.
-fn defer_builds(g: &Generation) -> bool {
+/// the first pacnix upgrade on the booted system.
+pub fn defer_builds(g: &Generation) -> bool {
     is_builder(g) && !booted()
+}
+
+/// The AUR and local packages that wait for the booted system.
+pub fn deferred(g: &Generation) -> Vec<String> {
+    built_aur(g).into_iter().chain(local_dirs(g).into_keys()).collect()
 }
 
 /// Reads the pacnix-local database from the local repository or from the server.
@@ -229,7 +243,14 @@ fn write_confs(g: &Generation) -> Result<()> {
         None => format!("file://{REPO}"),
     };
     let section = format!("\n[pacnix-local]\nSigLevel = Optional TrustAll\nServer = {server}\n");
-    let system = std::fs::read_to_string("/etc/pacman.conf")?;
+    let mut system = std::fs::read_to_string("/etc/pacman.conf")?;
+    if SERIAL.load(std::sync::atomic::Ordering::Relaxed) {
+        system = system
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("ParallelDownloads"))
+            .map(|l| if l.trim() == "[options]" { format!("{l}\nParallelDownloads = 1\n") } else { format!("{l}\n") })
+            .collect();
+    }
     std::fs::create_dir_all(STATE)?;
     std::fs::write(CONF, format!("{system}{section}"))?;
     std::fs::write(LOCAL_CONF, format!("[options]\nArchitecture = auto\n{section}"))?;
@@ -240,7 +261,7 @@ fn write_confs(g: &Generation) -> Result<()> {
 /// the Arch repositories stay as they are.
 fn sync_pacnix_db() -> Result<()> {
     recover_lock()?;
-    run_cmd(pacman(&["-Sy", "--config", LOCAL_CONF]).stdout(std::process::Stdio::null()))
+    run_quiet(pacman(&["-Sy", "--config", LOCAL_CONF]))
 }
 
 fn aur_table(names: &[String]) -> Result<Vec<(String, String, String)>> {
@@ -310,8 +331,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
     let missing_aur: Vec<String> = built_aur.iter().filter(|n| !repo_names.contains(*n)).cloned().collect();
     let mut table = Vec::new();
     if defer_builds(g) {
-        let all: Vec<String> = built_aur.iter().cloned().chain(local_dirs(g).into_keys()).collect();
-        plan.notes.push(format!("the first boot builds and installs: {}", all.join(" ")));
+        plan.notes.push(format!("the first pacnix upgrade on the booted system builds and installs: {}", deferred(g).join(" ")));
     } else if is_builder(g) && !has_aurutils() {
         plan.notes.push("AUR names and dependencies are checked after apply builds aurutils".to_string());
         plan.build = missing_aur.clone();
@@ -564,10 +584,31 @@ pub fn check(ctx: &Ctx, plan: &Plan) -> Result<()> {
             plan.protected.join(", ")
         );
     }
-    if !plan.remove.is_empty() {
-        confirm(&format!("Remove {} packages?", plan.remove.len()), &ctx.opts)?;
-    }
     Ok(())
+}
+
+/// The item of the question for the packages that the plan removes.
+pub fn removals(plan: &Plan) -> Vec<String> {
+    match plan.remove.is_empty() {
+        true => vec![],
+        false => vec![format!("Remove {} packages: {}.", plan.remove.len(), plan.remove.join(" "))],
+    }
+}
+
+/// Set after a network failure: the pacman configuration of pacnix then
+/// downloads one file at a time, because pacman stops the transaction when
+/// one of the parallel downloads stalls. The configuration of the user stays
+/// as it is.
+pub static SERIAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Downloads packages into the pacman cache before the transaction. pacman
+/// -Sw keeps the complete files, thus a new attempt continues.
+fn download(names: &[&str]) -> Result<()> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    report::progress(&format!("download {} packages", names.len()));
+    run_quiet(pacman(&["-Sw", "--noconfirm", "--ask=4", "--config", CONF]).args(names))
 }
 
 fn as_builder(args: &[&str]) -> Command {
@@ -575,6 +616,8 @@ fn as_builder(args: &[&str]) -> Command {
     c.args(args).current_dir(BUILD);
     c
 }
+
+const MAKEPKG_CONF: &str = "/usr/share/devtools/makepkg.conf.d/x86_64.conf";
 
 const AUR_ARGS: &[&str] = &[
     "--chroot",
@@ -606,32 +649,83 @@ pub fn needs_bootstrap(g: &Generation) -> bool {
 /// Builds aurutils from the AUR with makepkg into the local repository and
 /// installs it, because aurutils itself comes from the AUR and the plan needs
 /// it for the AUR graph.
-pub fn bootstrap() -> Result<()> {
-    println!("pacnix: build aurutils from the AUR, because the plan needs it");
+pub fn bootstrap(g: &Generation, record: &mut Builds) -> Result<()> {
+    report::progress("build aurutils from the AUR, because the plan needs it");
+    write_confs(g)?;
     ensure_repo()?;
+    sync_pacnix_db()?;
     let dir = format!("{BUILD}/aurutils");
     let _ = std::fs::remove_dir_all(&dir);
     run_cmd(as_builder(&["git", "clone", "-q", "--depth", "1", "https://aur.archlinux.org/aurutils.git", &dir]))?;
     let (_, deps) = srcinfo(&dir)?;
+    download(&deps.iter().map(String::as_str).collect::<Vec<_>>())?;
     transaction(&[&["-S", "--needed", "--asdeps", "--noconfirm"][..], &deps.iter().map(String::as_str).collect::<Vec<_>>()].concat())?;
     run_cmd(as_builder(&["env", &format!("PKGDEST={REPO}"), "makepkg", "--noconfirm"]).current_dir(&dir))?;
     let pkg = output(as_builder(&["env", &format!("PKGDEST={REPO}"), "makepkg", "--packagelist"]).current_dir(&dir))?;
     let pkg = pkg.lines().next().context("makepkg gave no package of aurutils")?.to_string();
     run_cmd(as_builder(&["repo-add", "-q", &format!("{REPO}/pacnix-local.db.tar.gz"), &pkg]))?;
-    transaction(&["-U", "--noconfirm", &pkg])
-}
-
-fn ensure_chroot() -> Result<()> {
-    if !Path::new("/var/lib/aurbuild/x86_64/root").exists() {
-        run_cmd(as_builder(&["aur", "chroot", "--create", "--pacman-conf", CONF, "--makepkg-conf", AUR_ARGS[4].trim_start_matches("--makepkg-conf=")]))?;
+    transaction(&["-U", "--noconfirm", &pkg])?;
+    if let Some(mut r) = record.records.remove("aurutils") {
+        r.head = output(as_builder(&["git", "-C", &dir, "rev-parse", "HEAD"]))?.trim().to_string();
+        trust::save("aurutils", r)?;
     }
     Ok(())
 }
 
-/// Builds AUR and local packages into the local repository and drops packages
-/// that no declaration needs.
-fn build(g: &Generation, plan: &Plan) -> Result<()> {
-    let mut sources = local_sources();
+/// Creates the clean chroot. mkarchroot writes .arch-chroot at the end, thus a
+/// chroot without it is the remainder of a failed attempt.
+fn ensure_chroot() -> Result<()> {
+    let root = Path::new("/var/lib/aurbuild/x86_64/root");
+    if root.join(".arch-chroot").exists() {
+        return Ok(());
+    }
+    report::progress("create the clean chroot for the builds");
+    if root.exists() {
+        run_cmd(cmd("rm", &["-rf", "--one-file-system"]).arg(root))?;
+    }
+    run_cmd(as_builder(&["aur", "chroot", "--create", "--pacman-conf", CONF, "--makepkg-conf", MAKEPKG_CONF]))
+}
+
+/// The packages to build, in build order, with a flag for local packages, the
+/// new records of the AUR packages and the changes that need a confirmation.
+#[derive(Default)]
+pub struct Builds {
+    queue: Vec<(String, bool)>,
+    records: BTreeMap<String, trust::Record>,
+    pub asks: Vec<String>,
+}
+
+impl Builds {
+    /// The records and the changes of AUR packages, from the AUR RPC.
+    fn of(queue: Vec<(String, bool)>, extra: &[&str]) -> Result<Builds> {
+        let names: Vec<String> = queue.iter().filter(|q| !q.1).map(|q| base(&q.0)).chain(extra.iter().map(|e| e.to_string())).collect();
+        let (asks, records) = trust::changes(&names)?;
+        Ok(Builds { queue, records, asks })
+    }
+}
+
+fn base(dir: &str) -> String {
+    Path::new(dir).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// The records of aurutils when apply builds it first, for the question.
+pub fn bootstrap_builds(g: &Generation) -> Result<Builds> {
+    match needs_bootstrap(g) {
+        true => Builds::of(vec![], &["aurutils"]),
+        false => Ok(Builds::default()),
+    }
+}
+
+/// Gets the PKGBUILDs of the AUR and local packages to build, before any
+/// change: aur sync --no-build gives the AUR packages with their AUR
+/// dependencies in build order.
+pub fn fetch_builds(g: &Generation, plan: &Plan) -> Result<Builds> {
+    if !is_builder(g) || defer_builds(g) || (plan.build.is_empty() && plan.local.is_empty()) {
+        return Ok(Builds::default());
+    }
+    write_confs(g)?;
+    ensure_repo()?;
+    sync_pacnix_db()?;
     let mut aur: Vec<String> = plan.build.clone();
     let mut dirs = Vec::new();
     let sync = sync_names()?;
@@ -653,13 +747,23 @@ fn build(g: &Generation, plan: &Plan) -> Result<()> {
     }
     aur.sort();
     aur.dedup();
+    let mut queue = Vec::new();
     if !aur.is_empty() {
-        run_cmd(as_builder(&["aur", "sync", "--no-view"]).args(AUR_ARGS).args(ignored(g)).args(&aur))?;
+        report::progress(&format!("download {} AUR packages and their AUR dependencies", aur.len()));
+        let fetched = fetch(as_builder(&["aur", "sync", "--no-view", "--no-build"]).args(AUR_ARGS).args(ignored(g)).args(&aur))?;
+        queue.extend(fetched.into_iter().map(|d| (d, false)));
     }
-    if !dirs.is_empty() {
-        let queue = format!("{BUILD}/local.queue");
-        std::fs::write(&queue, dirs.join("\n") + "\n")?;
-        run_cmd(as_builder(&["aur", "build", "--force", "--arg-file", &queue]).args(AUR_ARGS))?;
+    queue.extend(dirs.into_iter().map(|d| (d, true)));
+    Builds::of(queue, &[])
+}
+
+/// Builds AUR and local packages into the local repository and drops packages
+/// that no declaration needs.
+fn build(g: &Generation, plan: &Plan, builds: Builds) -> Result<()> {
+    build_dirs(builds)?;
+    if !plan.local.is_empty() {
+        let mut sources = local_sources();
+        let dirs_of = local_dirs(g);
         for name in &plan.local {
             sources.insert(name.clone(), dirs_of[name].clone());
         }
@@ -671,6 +775,55 @@ fn build(g: &Generation, plan: &Plan) -> Result<()> {
         for f in files {
             let _ = std::fs::remove_file(format!("{REPO}/{f}"));
             let _ = std::fs::remove_file(format!("{REPO}/{f}.sig"));
+        }
+    }
+    Ok(())
+}
+
+/// Runs aur sync --no-build and returns the package directories in build
+/// order. The list goes to a file, so that all the output of aur sync goes
+/// through run_cmd and a network failure is visible in it.
+fn fetch(mut c: impl std::borrow::BorrowMut<Command>) -> Result<Vec<String>> {
+    let list = format!("{BUILD}/sync.queue");
+    let _ = std::fs::remove_file(&list);
+    run_cmd(c.borrow_mut().args(["--save", &list]))?;
+    Ok(std::fs::read_to_string(&list).unwrap_or_default().lines().map(String::from).collect())
+}
+
+/// Builds package directories in their order, one by one, so that the
+/// progress shows each package. aur build skips an AUR package that the local
+/// repository already has, thus a new attempt continues after the last
+/// package that was built. Local packages build again each time. Before the
+/// build of an AUR package, the output shows the changes of its PKGBUILD since
+/// its last build; after the build, its record keeps the built revision.
+fn build_dirs(mut builds: Builds) -> Result<()> {
+    let list = format!("{BUILD}/build.queue");
+    let count = builds.queue.len();
+    for (i, (dir, local)) in builds.queue.iter().enumerate() {
+        let name = base(dir);
+        let step = format!("build {} package {}/{count}: {name}", if *local { "local" } else { "AUR" }, i + 1);
+        report::progress(&step);
+        let record = builds.records.remove(&name);
+        let head = match local {
+            true => String::new(),
+            false => output(as_builder(&["git", "-C", dir, "rev-parse", "HEAD"]))?.trim().to_string(),
+        };
+        // Without a record of a build, the changes start at the empty tree of Git: all files.
+        let old = record.as_ref().map(|r| r.head.clone()).filter(|h| !h.is_empty()).unwrap_or("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string());
+        if !local && old != head {
+            println!("pacnix: changes of the AUR package {name} since its last build:");
+            run_cmd(as_builder(&["git", "-C", dir, "--no-pager", "diff", "--stat", "--patch", &old, &head]))?;
+        }
+        std::fs::write(&list, format!("{dir}\n"))?;
+        let mut c = as_builder(&["aur", "build", "--arg-file", &list]);
+        c.args(AUR_ARGS);
+        if *local {
+            c.arg("--force");
+        }
+        run_cmd(c).context(step)?;
+        if let Some(mut r) = record {
+            r.head = head;
+            trust::save(&name, r)?;
         }
     }
     Ok(())
@@ -706,19 +859,18 @@ pub fn recover_lock() -> Result<()> {
 /// when no installed package owns them.
 fn transaction(args: &[&str]) -> Result<()> {
     recover_lock()?;
-    let out = pacman(args).stderr(std::process::Stdio::piped()).spawn()?.wait_with_output()?;
-    let err = String::from_utf8_lossy(&out.stderr);
-    eprint!("{err}");
-    if out.status.success() {
+    let mut c = pacman(args);
+    let (status, lines) = forward(&mut c, usize::MAX, true, |_| true)?;
+    if status.success() {
         return Ok(());
     }
-    let conflicts: Vec<&str> = err
-        .lines()
+    let conflicts: Vec<&str> = lines
+        .iter()
         .filter_map(|l| l.split_once(": ")?.1.strip_suffix(" exists in filesystem"))
         .filter(|f| output_any(&mut pacman(&["-Qqo", f])).is_ok_and(|o| o.trim().is_empty()))
         .collect();
     if conflicts.is_empty() {
-        bail!("pacman {} failed", args.join(" "));
+        return Err(failed(&c, status, &lines));
     }
     eprintln!("pacnix: replace {} files that no installed package owns, left by an interrupted transaction", conflicts.len());
     let mut c = pacman(args);
@@ -728,11 +880,11 @@ fn transaction(args: &[&str]) -> Result<()> {
     run_cmd(&mut c)
 }
 
-/// Builds packages and, when units stop before the transaction, downloads the
-/// packages to install, so that a change of the network service still
-/// downloads. A download costs about 2 s even from the cache, so it is skipped
-/// when no unit stops.
-pub fn prepare(g: &Generation, plan: &Plan, download: bool) -> Result<()> {
+/// Builds packages and downloads the packages to install, before units stop,
+/// so that a change of the network service still downloads, and the
+/// transaction then installs from the cache. Without packages to install,
+/// nothing downloads.
+pub fn prepare(g: &Generation, plan: &Plan, builds: Builds) -> Result<()> {
     write_confs(g)?;
     if is_builder(g) && (!g.m.packages.aur.is_empty() || !g.m.packages.local.is_empty() || Path::new(REPO).join("pacnix-local.db.tar.gz").exists()) {
         ensure_repo()?;
@@ -740,26 +892,28 @@ pub fn prepare(g: &Generation, plan: &Plan, download: bool) -> Result<()> {
             // The build asks pacman for the dependencies, which needs the
             // pacnix database also on a new host.
             sync_pacnix_db()?;
-            ensure_chroot()?;
-            build(g, plan)?;
+            if !builds.queue.is_empty() {
+                ensure_chroot()?;
+            }
+            build(g, plan, builds)?;
         }
     }
     sync_pacnix_db()?;
-    if download && !plan.install.is_empty() {
-        run_cmd(pacman(&["-Sw", "--noconfirm", "--ask=4", "--config", CONF]).args(&plan.install).stdout(std::process::Stdio::null()))?;
-    }
-    Ok(())
+    download(&plan.targets())
 }
 
 pub fn apply(plan: &Plan) -> Result<()> {
-    if !plan.install.is_empty() {
+    if !plan.targets().is_empty() {
+        report::progress(&format!("install {} packages", plan.targets().len()));
         let mut args = vec!["-S", "--needed", "--noconfirm", "--ask=4", "--config", CONF];
-        args.extend(plan.install.iter().map(String::as_str));
+        args.extend(plan.targets());
         transaction(&args)?;
     }
     if !plan.archive.is_empty() {
+        report::progress(&format!("install {} packages from the Arch Linux Archive", plan.archive.len()));
         let mut args = vec!["-U", "--noconfirm", "--ask=4", "--config", CONF];
         args.extend(plan.archive.iter().map(String::as_str));
+        // pacman downloads the files of -U first and stops before a change when a download fails.
         transaction(&args)?;
     }
     if !plan.explicit.is_empty() {
@@ -769,6 +923,7 @@ pub fn apply(plan: &Plan) -> Result<()> {
         run_cmd(pacman(&["-D", "--asdeps"]).args(&plan.deps))?;
     }
     if !plan.remove.is_empty() {
+        report::progress(&format!("remove {} packages", plan.remove.len()));
         transaction(&[&["-Rns", "--noconfirm"][..], &plan.remove.iter().map(String::as_str).collect::<Vec<_>>()].concat())?;
     }
     let orphans = output_any(&mut pacman(&["-Qqdtt"]))?;
@@ -780,58 +935,39 @@ pub fn apply(plan: &Plan) -> Result<()> {
     Ok(())
 }
 
-/// Full upgrade: all sync databases, the system packages, then changed AUR packages.
-pub fn upgrade(ctx: &Ctx, g: &Generation) -> Result<()> {
-    write_confs(g)?;
-    transaction(&[&["-Syu", "--noconfirm", "--config", CONF][..], &pinned(g).iter().map(String::as_str).collect::<Vec<_>>()].concat())?;
-    if is_builder(g) && Path::new(REPO).join("pacnix-local.db.tar.gz").exists() {
-        ensure_repo()?;
-        ensure_chroot()?;
-        run_cmd(as_builder(&["aur", "chroot", "--update", "--pacman-conf", CONF, "--makepkg-conf", AUR_ARGS[4].trim_start_matches("--makepkg-conf=")]))?;
-        // aur sync keeps the pinned AUR packages and the dependencies with a chosen provider.
-        let ignore: Vec<&str> = g.m.packages.providers.keys().chain(g.m.packages.versions.keys()).map(String::as_str).collect();
-        let sync = |args: &[&str]| {
-            let mut c = as_builder(&["aur", "sync", "--no-view", "--upgrades"]);
-            if !ignore.is_empty() {
-                c.args(["--ignore", &ignore.join(",")]);
-            }
-            c.args(args).args(AUR_ARGS);
-            c
-        };
-        let dirs = output(sync(&["--no-build"]))?;
-        review(ctx, &dirs.lines().collect::<Vec<_>>())?;
-        run_cmd(sync(&[]))?;
-        sync_pacnix_db()?;
-        transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pinned(g).iter().map(String::as_str).collect::<Vec<_>>()].concat())?;
+/// The AUR packages that upgrade, before any change, with their records and the
+/// changes that need a confirmation. A host without aurutils or without a
+/// local repository has none yet: the apply after the upgrade builds them.
+pub fn upgrade_builds(g: &Generation) -> Result<Builds> {
+    if !is_builder(g) || !has_aurutils() || !Path::new(REPO).join("pacnix-local.db.tar.gz").exists() {
+        return Ok(Builds::default());
     }
-    Ok(())
+    write_confs(g)?;
+    // aur sync keeps the pinned AUR packages and the dependencies with a chosen provider.
+    let ignore: Vec<&str> = g.m.packages.providers.keys().chain(g.m.packages.versions.keys()).map(String::as_str).collect();
+    let mut c = as_builder(&["aur", "sync", "--no-view", "--upgrades", "--no-build"]);
+    if !ignore.is_empty() {
+        c.args(["--ignore", &ignore.join(",")]);
+    }
+    report::progress("download the changes of the AUR packages");
+    let dirs = fetch(c.args(AUR_ARGS))?;
+    Builds::of(dirs.into_iter().map(|d| (d, false)).collect(), &[])
 }
 
-/// Shows the changes of the AUR packages since their last review, and asks
-/// before the build, because an AUR package is code from any AUR user. The
-/// reviewed revisions go into the database of aur-view(1). A package without a
-/// review shows all of its files.
-fn review(ctx: &Ctx, dirs: &[&str]) -> Result<()> {
-    let db = format!("{BUILD}/.local/share/aurutils/view");
-    let mut heads = Vec::new();
-    for dir in dirs {
-        let pkg = Path::new(dir).file_name().context("aur sync gave no package directory")?.to_string_lossy().into_owned();
-        let head = output(as_builder(&["git", "-C", dir, "rev-parse", "HEAD"]))?.trim().to_string();
-        // The hash of the empty tree of git.
-        let seen = std::fs::read_to_string(format!("{db}/{pkg}")).unwrap_or("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string());
-        if seen.trim() != head {
-            println!("pacnix: changes of the AUR package {pkg}:");
-            run_cmd(as_builder(&["git", "-C", dir, "--no-pager", "diff", "--stat", "--patch", seen.trim(), &head]))?;
-            heads.push((pkg, head));
-        }
-    }
-    if heads.is_empty() {
-        return Ok(());
-    }
-    confirm(&format!("Build {} AUR packages with these changes?", heads.len()), &ctx.opts)?;
-    std::fs::create_dir_all(&db)?;
-    for (pkg, head) in heads {
-        std::fs::write(format!("{db}/{pkg}"), head + "\n")?;
+/// Full upgrade: all sync databases, the system packages, then changed AUR packages.
+pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
+    write_confs(g)?;
+    report::progress("upgrade the system with pacman -Syu");
+    let pins = pinned(g);
+    let pins: Vec<&str> = pins.iter().map(String::as_str).collect();
+    run_quiet(pacman(&[&["-Syuw", "--noconfirm", "--config", CONF][..], &pins].concat()))?;
+    transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
+    if !builds.queue.is_empty() {
+        ensure_chroot()?;
+        run_cmd(as_builder(&["aur", "chroot", "--update", "--pacman-conf", CONF, "--makepkg-conf", MAKEPKG_CONF]))?;
+        build_dirs(builds)?;
+        sync_pacnix_db()?;
+        transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
     }
     Ok(())
 }

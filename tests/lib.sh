@@ -19,9 +19,10 @@ on() { local h=$1; shift; "$vm" ssh "$h" "$@"; }
 scenario() {
 	if [[ -z $2 ]]; then on "$1" 'sudo rm -f /etc/pacnix/scenario.nix'; else on "$1" "sudo tee /etc/pacnix/scenario.nix >/dev/null" <<<"$2"; fi
 }
-noise="^warning: not writing modified lock\\|^• \\|^    '\\(path\\|github\\):\\|^    follows \\|^copying path"
+noise="^copying path"
 # Runs a pacnix verb on a host. Its exit status is the status of pacnix.
-pacnix() { local h=$1; shift; on "$h" "sudo pacnix $* 2>&1 | sudo tee -a /var/log/pacnix-test.log | grep -v \"$noise\"; exit \${PIPESTATUS[0]}"; }
+# The login shell of a host can be bash or zsh: zsh keeps the statuses in pipestatus.
+pacnix() { local h=$1; shift; on "$h" "sudo pacnix $* 2>&1 | sudo tee -a /var/log/pacnix-test.log | grep -v \"$noise\"; exit \${PIPESTATUS[0]:-\${pipestatus[1]}}"; }
 plan() { pacnix "$1" plan; }
 apply() { local h=$1; shift; pacnix "$h" apply --yes "$@"; }
 # Declared packages of the active generation, sorted.

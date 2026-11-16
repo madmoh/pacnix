@@ -1,5 +1,5 @@
 pkgname=pacnix
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc='Declarative, reconciling management of an Arch Linux host from a Nix flake'
 arch=(x86_64)
@@ -21,9 +21,6 @@ package() {
   cd "$startdir/pkg"
   install -Dm644 sysusers.conf "$pkgdir/usr/lib/sysusers.d/pacnix.conf"
   install -Dm644 tmpfiles.conf "$pkgdir/usr/lib/tmpfiles.d/pacnix.conf"
-  install -Dm644 pacnix-firstboot.service "$pkgdir/usr/lib/systemd/system/pacnix-firstboot.service"
-  install -dm755 "$pkgdir/usr/lib/systemd/system/multi-user.target.wants"
-  ln -s ../pacnix-firstboot.service "$pkgdir/usr/lib/systemd/system/multi-user.target.wants/pacnix-firstboot.service"
   install -dm750 "$pkgdir/etc/sudoers.d"
   install -m440 sudoers "$pkgdir/etc/sudoers.d/pacnix"
 }

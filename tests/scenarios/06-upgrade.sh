@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Scenario 6: pacnix upgrade of a host from the image of 2026-10-01, with a
 # kernel update, DKMS builds from the repositories and the AUR, .pacnew files
-# and a reboot.
+# and a reboot. The summary of the upgrade tells to reboot for the new kernel.
 size=(4 6144 1)
 source "$(dirname "$0")/../lib.sh"
 old=$cache/base-20261001.604814.qcow2
@@ -18,10 +18,13 @@ on old 'echo "# local change" | sudo tee -a /etc/makepkg.conf >/dev/null'
 step "switch to current mirrors and upgrade"
 scenario old '{ files."/etc/pacman.d/mirrorlist".text = "Server = https://fastly.mirror.pkgbuild.com/$repo/os/$arch\nServer = https://mirror.rackspace.com/archlinux/$repo/os/$arch\n"; features.overrides.enable = true; }'
 apply old >/dev/null || fail "apply of the mirrors failed"
-pacnix old upgrade --yes || fail "upgrade failed"
+out=$(pacnix old upgrade --yes) || { echo "$out" | tail -20; fail "upgrade failed"; }
 new=$(on old 'pacman -Q linux | cut -d" " -f2')
 [[ $new != "$kernel" ]] || fail "the kernel did not change ($kernel)"
 echo "kernel $kernel -> $new"
+running=$(on old uname -r)
+grep -qx "pacnix: reboot to use the changes: the running kernel $running is not installed" <<<"$out" || { grep '^pacnix: reboot' <<<"$out"; fail "the summary does not tell to reboot for the kernel"; }
+grep -q "^pacnix: reboot to use the changes: the module v4l2loopback was built for the kernel .*, which does not run$" <<<"$out" || fail "the summary does not name the DKMS module for the new kernel"
 check old "dkms status | grep -q 'v4l2loopback.*${new%.arch*}.*installed' || dkms status | grep v4l2loopback | grep -q '$(echo $new | sed 's/\.arch/-arch/')'" "the DKMS module is not built for the new kernel"
 # The backup files did not change upstream in this period. A changed backup
 # checksum in the local database makes the reinstall of pacman act as if they did.

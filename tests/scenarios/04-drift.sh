@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Scenario 4: manual changes. Plan and audit show each one. Apply corrects what
-# pacnix owns.
+# pacnix owns. A file system that cannot keep the declared mode stops the apply
+# before any change, instead of a drift that each apply corrects again.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 scenario $h '{ features.demo.enable = true; }'
@@ -27,4 +28,19 @@ refute $h "systemctl is-enabled systemd-time-wait-sync.service" "the undeclared 
 check $h "test \$(sysctl -n net.core.somaxconn) = 8192" "the trigger did not reapply sysctl"
 empty_plan $h
 pacnix $h audit | grep -qxF 'unowned file: /etc/stray.conf' || fail "the audit does not show the stray file after apply"
+
+step "a vfat file system with a umask cannot keep the mode 0600"
+scenario $h '{ features.demo.enable = true; packages.repo = [ "dosfstools" ]; }'
+apply $h >/dev/null || fail "apply of dosfstools failed"
+on $h 'sudo truncate -s 32M /var/tmp/esp.img && sudo mkfs.fat -F 32 /var/tmp/esp.img >/dev/null && sudo mkdir -p /mnt/esp && sudo mount -o umask=0077 /var/tmp/esp.img /mnt/esp'
+esp() { scenario $h "{ features.demo.enable = true; packages.repo = [ \"dosfstools\" ]; files.\"/mnt/esp/loader/loader.conf\" = { text = \"timeout 3\\n\"; mode = \"$1\"; }; }"; }
+esp 0600
+out=$(apply $h) && { echo "$out"; fail "apply wrote a file that the file system cannot keep"; }
+echo "$out" | tail -1
+grep -qF 'pacnix: error: the vfat file system on /mnt/esp cannot keep the mode 0600 and the owner root:root of /mnt/esp/loader/loader.conf: a new file gets the mode 0700' <<<"$out" || fail "the error does not name the file system and the mode"
+grep -q 'fmask=0077' <<<"$out" || fail "the error does not show the mount options"
+refute $h 'test -e /mnt/esp/loader' "apply changed the file system before the refusal"
+esp 0700
+apply $h >/dev/null || fail "apply of the mode that the file system gives failed"
+empty_plan $h
 pass

@@ -3,4 +3,5 @@
   features.machine.enable = true;
   features.pacnix.enable = true;
   features.home.enable = true;
+  packages.local.slow = ../packages/slow;
 }

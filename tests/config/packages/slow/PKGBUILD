@@ -1,0 +1,29 @@
+# A build that behaves like a large download: colored
+# output, a progress meter that redraws its line, then no output for 65 s.
+# It fails while its source file mode has the word fail.
+pkgname=slow
+pkgver=1
+pkgrel=1
+pkgdesc='pacnix test package with slow, silent build steps'
+arch=(any)
+license=(MIT)
+source=(mode)
+sha256sums=(SKIP)
+
+build() {
+  if [[ $(<"$srcdir/mode") == fail ]]; then
+    echo "error: the test build timed out while the file mode has the word fail" >&2
+    return 1
+  fi
+  printf '\e[1;32m==>\e[0m colored line\n'
+  for i in 10 50 90; do
+    printf '\rprogress %d%%' "$i"
+    sleep 1
+  done
+  printf '\rprogress done\n'
+  sleep 65
+}
+
+package() {
+  install -Dm644 /dev/null "$pkgdir/usr/share/slow/done"
+}

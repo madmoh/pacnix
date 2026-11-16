@@ -1,5 +1,5 @@
 use crate::generation::Generation;
-use crate::{cmd, output, run_cmd};
+use crate::{cmd, output, run_cmd, run_silent};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -105,8 +105,7 @@ fn simulate(g: &Generation, old: &Generation, preset: &str) -> Result<BTreeSet<S
         }
     }
     std::fs::write(root.join(PRESET.trim_start_matches('/')), preset)?;
-    let mut c = cmd("systemctl", &["--root", SCRATCH, "preset-all"]);
-    run_cmd(c.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()))?;
+    run_silent(cmd("systemctl", &["--root", SCRATCH, "preset-all"]))?;
     let enabled = unit_states(Some(SCRATCH)).map(|s| in_state(&s, "enabled"));
     std::fs::remove_dir_all(root)?;
     enabled
@@ -154,7 +153,7 @@ pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
         run_cmd(cmd("systemctl", &["mask", "--now", u]))?;
     }
     let before = &plan.now;
-    run_cmd(cmd("systemctl", &["preset-all"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()))?;
+    run_silent(cmd("systemctl", &["preset-all"]))?;
     let states = unit_states(None)?;
     let after = in_state(&states, "enabled");
     // The list from the plan is older than the package transaction: skip the

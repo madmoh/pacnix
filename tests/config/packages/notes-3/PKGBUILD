@@ -1,0 +1,17 @@
+# A package with an install note, a backup file and a pacman hook with output,
+# for the summary of pacnix. Version 3.
+pkgname=notes
+pkgver=3
+pkgrel=1
+pkgdesc='pacnix test package with an install note'
+arch=(any)
+license=(MIT)
+backup=(etc/notes.conf)
+install=notes.install
+source=(zz-notes.hook)
+sha256sums=(SKIP)
+
+package() {
+  echo "version 3" | install -Dm644 /dev/stdin "$pkgdir/etc/notes.conf"
+  install -Dm644 zz-notes.hook "$pkgdir/usr/share/libalpm/hooks/zz-notes.hook"
+}

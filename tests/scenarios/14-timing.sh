@@ -6,7 +6,7 @@ size=(4 4096 1)
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 apply $h >/dev/null || fail "first apply failed"
-t() { local s; s=$(date +%s.%N); "$@" >/dev/null || fail "$*"; echo "$(date +%s.%N) - $s" | bc; }
+t() { local s; s=$(date +%s.%N); "$@" >/dev/null || fail "$*"; awk -v s="$s" -v e="$(date +%s.%N)" 'BEGIN { print e - s }'; }
 on $h 'sudo pacman -Sw --noconfirm gimp >/dev/null'
 step "measure"
 noop=$(t apply $h)

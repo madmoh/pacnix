@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Scenario 3: add and remove a repo package, a group and AUR packages, remove a whole
-# feature, and restore pristine files after an override is dropped.
+# feature, and restore pristine files after an override is dropped. A new AUR
+# dependency of a built AUR package and package removals are in the one
+# question of a run, which needs --yes without a terminal.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 apply $h >/dev/null || fail "first apply failed"
@@ -14,8 +16,18 @@ check $h "pacman -Qqd perl-ole-storage-lite" "the AUR dependency is not installe
 check $h "$repo | grep -qx perl-ole-storage-lite" "the AUR dependency is not in the local repository"
 packages_match $h
 
+step "a new AUR dependency of a built AUR package needs a confirmation"
+on $h "sudo jq '.\"perl-email-outlook-message\".depends = []' /var/lib/pacnix/aur.json | sudo tee /var/lib/pacnix/aur.json.new >/dev/null && sudo mv /var/lib/pacnix/aur.json.new /var/lib/pacnix/aur.json && sudo -u pacnix repo-remove -q /var/lib/pacnix/repo/pacnix-local.db.tar.gz perl-email-outlook-message"
+out=$(pacnix $h apply 2>&1) && fail "apply built a package with a new AUR dependency without a confirmation"
+grep -qx 'The AUR package perl-email-outlook-message has new AUR dependencies: perl-ole-storage-lite.' <<<"$out" || { echo "$out" | tail -5; fail "apply does not show the new AUR dependency"; }
+apply $h >/dev/null || fail "apply --yes failed"
+
 step "remove them"
 scenario $h ''
+out=$(pacnix $h apply 2>&1) && fail "apply removed packages without a confirmation"
+grep -q '^Remove [0-9]* packages: .*downgrade .*htop' <<<"$out" || { echo "$out" | tail -5; fail "apply does not list the removals in the question"; }
+grep -qx 'pacnix: error: these items need a confirmation. Give --yes to continue without a terminal' <<<"$out" || fail "apply without a terminal does not ask for --yes"
+check $h "pacman -Q htop" "apply changed the system before the confirmation"
 apply $h || fail "apply failed"
 for p in htop downgrade perl-email-outlook-message perl-ole-storage-lite; do
 	refute $h "pacman -Q $p" "$p is still installed"

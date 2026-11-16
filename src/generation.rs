@@ -1,4 +1,4 @@
-use crate::{Ctx, cmd, files, home, output, packages, run_cmd, units};
+use crate::{Ctx, ask, cmd, failed, files, forward, home, packages, report, run_cmd, run_quiet, trust, units};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -7,7 +7,6 @@ use std::path::Path;
 pub const PROFILE: &str = "/nix/var/nix/profiles/pacnix";
 pub const STATE: &str = "/var/lib/pacnix";
 const PENDING: &str = "/var/lib/pacnix/pending";
-const FIRSTBOOT: &str = "/var/lib/pacnix/firstboot";
 const MODULES: &str = "/usr/share/pacnix";
 
 #[derive(Deserialize, Default, Clone)]
@@ -97,15 +96,30 @@ impl Generation {
     }
 }
 
-/// Evaluates the flake and writes the generation to the Nix store.
+/// Evaluates the flake and writes the generation to the Nix store. The notes
+/// of Nix about a dirty Git tree and about the lock file are not shown: the
+/// override of the pacnix input always changes the lock file, and pacnix never
+/// writes it.
 pub fn build(ctx: &Ctx) -> Result<Generation> {
+    report::progress("evaluate the configuration");
     let attr = format!("{}#pacnixConfigurations.\"{}\".generation", ctx.flake, ctx.host);
-    let mut c = nix(&["eval", "--raw", &attr]);
+    let result = format!("/run/pacnix/eval-{}", std::process::id());
+    std::fs::create_dir_all("/run/pacnix")?;
+    let mut c = nix(&["eval", "--no-warn-dirty", "--write-to", &result, &attr]);
     if Path::new(MODULES).join("flake.nix").exists() {
         c.args(["--override-input", "pacnix", &format!("path:{MODULES}")]);
     }
-    let path = output(&mut c).context("evaluate the configuration")?;
-    Generation::load(path.trim())
+    let mut lock_note = false;
+    let (status, lines) = forward(&mut c, 20, true, |l| {
+        lock_note = l.starts_with("warning: not writing modified lock file") || (lock_note && (l.starts_with("• ") || l.starts_with("    ")));
+        !lock_note
+    })?;
+    let path = std::fs::read_to_string(&result);
+    let _ = std::fs::remove_file(&result);
+    if !status.success() {
+        return Err(failed(&c, status, &lines)).context("evaluate the configuration");
+    }
+    Generation::load(path?.trim())
 }
 
 pub fn nix(args: &[&str]) -> std::process::Command {
@@ -189,7 +203,9 @@ pub fn plan(ctx: &Ctx) -> Result<()> {
 pub fn apply(ctx: &Ctx) -> Result<()> {
     let target = build(ctx)?;
     activate(ctx, target.clone())?;
-    commit(&target)
+    commit(&target)?;
+    trust::news_read(false);
+    Ok(())
 }
 
 /// Makes the generation the active generation of the profile.
@@ -207,43 +223,58 @@ fn activate(ctx: &Ctx, target: Generation) -> Result<()> {
     if packages::needs_bootstrap(&plan.target) {
         // The checks that do not need aurutils run before it is built.
         packages::check(ctx, &plan.packages)?;
-        files::check(ctx, &plan.files)?;
-        packages::bootstrap()?;
+        files::check(ctx, &plan.target, &plan.files)?;
+        let mut builds = packages::bootstrap_builds(&plan.target)?;
+        ask(&[packages::removals(&plan.packages), builds.asks.clone()].concat(), &ctx.opts)?;
+        packages::bootstrap(&plan.target, &mut builds)?;
         plan = Plan::compute(ctx, plan.target)?;
     }
     plan.print();
     packages::check(ctx, &plan.packages)?;
-    files::check(ctx, &plan.files)?;
+    files::check(ctx, &plan.target, &plan.files)?;
+    let builds = packages::fetch_builds(&plan.target, &plan.packages)?;
+    ask(&[packages::removals(&plan.packages), builds.asks.clone()].concat(), &ctx.opts)?;
     let current = std::fs::canonicalize(PENDING).ok();
     if current.as_deref() != Some(Path::new(&plan.target.path)) {
         std::fs::create_dir_all(STATE)?;
         let _ = std::fs::remove_file(PENDING);
-        run_cmd(cmd("nix-store", &["--add-root", PENDING, "--realise", &plan.target.path]).stdout(std::process::Stdio::null()))?;
+        run_quiet(cmd("nix-store", &["--add-root", PENDING, "--realise", &plan.target.path]))?;
     }
     let leaving = units::leaving(&plan.units, &plan.files.deleted());
-    packages::prepare(&plan.target, &plan.packages, !leaving.is_empty())?;
+    packages::prepare(&plan.target, &plan.packages, builds)?;
     units::stop(&leaving)?;
     packages::apply(&plan.packages)?;
     let changed = files::apply(ctx, &plan.target, &plan.files)?;
     files::run_triggers(&plan.files, &changed)?;
     units::apply(&plan.units, &changed)?;
     home::apply(&plan.target, &plan.home)?;
-    // In a chroot, pacnix-firstboot.service applies again on the first boot
-    // to do the deferred work. An apply on the running system completes it.
-    if packages::booted() {
-        let _ = std::fs::remove_file(FIRSTBOOT);
-    } else {
-        std::fs::write(FIRSTBOOT, format!("ARGS=--flake {} --host {}\n", ctx.flake, ctx.host))?;
-        println!("pacnix: note: pacnix-firstboot.service completes the configuration on the first boot");
+    // A chroot cannot build packages or activate home configurations.
+    if !packages::booted() {
+        let deferred = packages::deferred(&plan.target);
+        if !deferred.is_empty() {
+            report::last(format!("pacnix: these packages wait for the booted system: {}", deferred.join(" ")));
+        }
+        if !plan.target.m.home.is_empty() {
+            report::last(format!("pacnix: these home configurations wait for the booted system: {}", plan.target.m.home.keys().cloned().collect::<Vec<_>>().join(" ")));
+        }
+        report::last("pacnix: next step: reboot, log in, connect to the network, then run: sudo pacnix upgrade".to_string());
     }
     Ok(())
 }
 
+/// Upgrades the system, then applies. The one question of the run comes
+/// before any change: the removals that the plan shows now, the changes of the
+/// AUR packages that upgrade, and the Arch Linux news since the last upgrade.
 pub fn upgrade(ctx: &Ctx) -> Result<()> {
     let target = build(ctx)?;
-    packages::upgrade(ctx, &target)?;
+    let before = Plan::compute(ctx, target.clone())?;
+    let builds = packages::upgrade_builds(&target)?;
+    ask(&[packages::removals(&before.packages), builds.asks.clone(), trust::news()].concat(), &ctx.opts)?;
+    packages::upgrade(&target, builds)?;
     activate(ctx, target.clone())?;
-    commit(&target)
+    commit(&target)?;
+    trust::news_read(true);
+    Ok(())
 }
 
 pub fn rollback(ctx: &Ctx) -> Result<()> {
