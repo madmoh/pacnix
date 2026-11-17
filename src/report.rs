@@ -86,6 +86,15 @@ pub fn failure(step: &str, reason: &str) -> bool {
     false
 }
 
+/// Records a step that the next attempt or apply does again, and returns its error.
+pub fn remember(step: &str, e: anyhow::Error) -> anyhow::Error {
+    let mut steps = retries();
+    if steps.insert(step.to_string()) {
+        store(&steps);
+    }
+    e
+}
+
 /// Starts a new attempt without failed steps.
 pub fn reset() {
     FAILED.lock().unwrap().clear();

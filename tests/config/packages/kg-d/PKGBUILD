@@ -1,0 +1,13 @@
+# A package with a source host that does not resolve.
+pkgname=kg-d
+pkgver=1
+pkgrel=1
+pkgdesc='pacnix test package with a source that does not download'
+arch=(any)
+license=(MIT)
+source=("file::https://kg.invalid/file")
+sha256sums=(SKIP)
+
+package() {
+  install -Dm644 file "$pkgdir/usr/share/kg-d/file"
+}

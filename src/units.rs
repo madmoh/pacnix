@@ -137,9 +137,22 @@ pub fn plan(g: &Generation, old: &Generation) -> Result<Plan> {
     plan.mask = g.m.units.mask.iter().filter(|u| !masked.contains(*u)).cloned().collect();
     let masks: BTreeSet<&String> = g.m.units.mask.iter().collect();
     plan.unmask = old.m.units.mask.iter().filter(|u| !masks.contains(u) && masked.contains(*u)).cloned().collect();
-    // A unit that left has nothing to do again.
-    let exists = |c: &String| c.rsplit(' ').next().is_some_and(|u| states.contains_key(u) || states.contains_key(&template(u)));
-    plan.retry = report::retries().into_iter().filter(|c| c.starts_with("systemctl ") && exists(c)).collect();
+    // A command runs again only when the configuration still wants its result.
+    let wanted = |c: &String| {
+        let words: Vec<&str> = c.split(' ').collect();
+        let u = words[words.len() - 1].to_string();
+        let enabled = after.contains(&u) || after.contains(&template(&u));
+        let exists = states.contains_key(&u) || states.contains_key(&template(&u));
+        exists && match words[1] {
+            "start" => enabled,
+            "restart" => !masks.contains(&u) && !g.m.units.disable.contains(&u),
+            "stop" | "disable" => !enabled,
+            "mask" => masks.contains(&u),
+            "unmask" => !masks.contains(&u),
+            _ => false,
+        }
+    };
+    plan.retry = report::retries().into_iter().filter(|c| c.starts_with("systemctl ") && wanted(c)).collect();
     plan.now = now;
     Ok(plan)
 }

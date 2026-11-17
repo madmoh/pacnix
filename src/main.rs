@@ -225,8 +225,9 @@ pub fn isolated(step: &str, f: impl FnOnce() -> Result<()>) -> Result<bool> {
         Err(e) => e,
     };
     match cause(&e) {
-        Cause::Stale => Err(e),
-        Cause::Network(_) if !FINAL.load(std::sync::atomic::Ordering::Relaxed) => Err(e),
+        // The next attempt can find the step done, for example a written file without its trigger.
+        Cause::Stale => Err(report::remember(step, e)),
+        Cause::Network(_) if !FINAL.load(std::sync::atomic::Ordering::Relaxed) => Err(report::remember(step, e)),
         _ => Ok(report::failure(step, &format!("{e:#}"))),
     }
 }
