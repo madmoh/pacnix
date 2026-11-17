@@ -78,6 +78,10 @@ fn main() {
         eprintln!("pacnix: error: {e:#}");
         std::process::exit(1);
     }
+    // As switch-to-configuration of NixOS: the change is done, but some steps failed.
+    if report::failed() {
+        std::process::exit(4);
+    }
 }
 
 fn run() -> Result<()> {
@@ -174,15 +178,21 @@ fn cause(e: &anyhow::Error) -> Cause {
 /// The pauses before the next attempts after a failure in the network.
 const PAUSES: [u64; 3] = [10, 30, 60];
 
+/// Set for the last attempt of a verb: then `isolated` also continues after a
+/// failure in the network.
+static FINAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The retry policy of pacnix. A failure in the network repeats the verb up to
 /// three times in about two minutes, with one download at a time. The next
 /// attempt continues from the work that is done: the packages in the pacman
-/// cache and in the local repository. Each other failure, for example an
-/// evaluation error, a refused plan, a build or a trigger that fails, stops
+/// cache and in the local repository. A failure of an isolated step does not
+/// stop the verb, see `isolated`. Each other failure, for example an
+/// evaluation error, a refused plan or a pacman transaction that fails, stops
 /// pacnix one time with the reason.
 fn resilient(f: impl Fn() -> Result<()>) -> Result<()> {
     report::begin();
     for (attempt, pause) in PAUSES.iter().enumerate() {
+        report::reset();
         match f() {
             Ok(()) => return Ok(report::summary()),
             Err(e) => match cause(&e) {
@@ -196,7 +206,29 @@ fn resilient(f: impl Fn() -> Result<()>) -> Result<()> {
             },
         }
     }
+    report::reset();
+    FINAL.store(true, std::sync::atomic::Ordering::Relaxed);
     f().map(|_| report::summary())
+}
+
+/// Runs a step that changes one element and whose result no later step reads,
+/// apart from the steps that the caller skips: a package build, a trigger, a
+/// unit action or a home activation. As with nix build --keep-going and
+/// switch-to-configuration of NixOS, a failure of the step does not stop the
+/// verb: the summary shows it, the exit status is 4, and the next apply does
+/// the step again. A failure in the network stops the attempt, so that the
+/// retry policy applies, until the last attempt. Returns true when the step
+/// succeeds.
+pub fn isolated(step: &str, f: impl FnOnce() -> Result<()>) -> Result<bool> {
+    let e = match f() {
+        Ok(()) => return Ok(report::passed(step)),
+        Err(e) => e,
+    };
+    match cause(&e) {
+        Cause::Stale => Err(e),
+        Cause::Network(_) if !FINAL.load(std::sync::atomic::Ordering::Relaxed) => Err(e),
+        _ => Ok(report::failure(step, &format!("{e:#}"))),
+    }
 }
 
 static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -316,7 +348,8 @@ fn execute(cmd: &mut Command, stdout: bool) -> Result<()> {
 /// line feed starts the line again, thus the redraws of progress meters do not
 /// go to the journal. Terminal escape sequences are removed, because journalctl
 /// shows a line with control characters as a blob. When the command writes no
-/// line for 60 s, pacnix writes one. Without `stdout`, the standard output of
+/// line for 60 s, pacnix writes one, with the last redraw of a progress meter,
+/// for example of a large download. Without `stdout`, the standard output of
 /// the command is dropped. Lines that `show` refuses are dropped too.
 /// Returns the exit status and the last `keep` lines.
 pub fn forward(cmd: &mut Command, keep: usize, stdout: bool, mut show: impl FnMut(&str) -> bool) -> Result<(ExitStatus, Vec<String>)> {
@@ -347,15 +380,16 @@ pub fn forward(cmd: &mut Command, keep: usize, stdout: bool, mut show: impl FnMu
     let (start, mut quiet, mut buf) = (Instant::now(), Instant::now(), [0u8; 8192]);
     loop {
         let mut fd = libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-        if unsafe { libc::poll(&mut fd, 1, 1000) } == 0 {
-            // A daemon that the command started can keep the pipe open.
-            if child.try_wait()?.is_some() {
-                break;
-            }
-            if quiet.elapsed() >= Duration::from_secs(60) {
-                report::heartbeat(&describe(cmd), start.elapsed().as_secs() / 60);
-                quiet = Instant::now();
-            }
+        let ready = unsafe { libc::poll(&mut fd, 1, 1000) } != 0;
+        // A daemon that the command started can keep the pipe open.
+        if !ready && child.try_wait()?.is_some() {
+            break;
+        }
+        if quiet.elapsed() >= Duration::from_secs(60) {
+            report::heartbeat(&describe(cmd), start.elapsed().as_secs() / 60, &strip_escapes(&line));
+            quiet = Instant::now();
+        }
+        if !ready {
             continue;
         }
         let n = match pipe.read(&mut buf) {

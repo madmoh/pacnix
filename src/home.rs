@@ -43,6 +43,11 @@ pub fn current(home: &str) -> Option<String> {
     Some(p.display().to_string())
 }
 
+/// The step of the activation of a home configuration.
+fn step(user: &str) -> String {
+    format!("activate the home configuration of {user}")
+}
+
 fn out_path(drv: &str) -> Result<String> {
     Ok(output(cmd("nix-store", &["--query", "--outputs", drv]))?.trim().to_string())
 }
@@ -52,7 +57,7 @@ pub fn plan(g: &Generation) -> Result<Plan> {
     for (user, h) in &g.m.home {
         let out = out_path(&h.drv).with_context(|| format!("home configuration of {user}"))?;
         let old = current(&h.directory);
-        if old.as_deref() == Some(out.as_str()) {
+        if old.as_deref() == Some(out.as_str()) && !crate::report::retry(&step(user)) {
             continue;
         }
         run_quiet(cmd("nix-store", &["--realise", &h.drv]))?;
@@ -85,8 +90,9 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
         let path = Path::new(path);
         if *kept { std::fs::remove_file(path) } else { std::fs::rename(path, backup(path)) }.with_context(|| format!("replace {}", path.display()))?;
     }
+    // An activation is an isolated step: a failure does not stop the other users and the apply.
     for (user, out) in &plan.activate {
-        crate::report::progress(&format!("activate the home configuration of {user}"));
+        crate::report::progress(&step(user));
         let h = &g.m.home[user];
         let uid = output(cmd("id", &["-u", user]))?.trim().to_string();
         run_cmd(cmd("systemctl", &["start", &format!("user@{uid}.service")]))?;
@@ -103,7 +109,7 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
             c.arg(format!("DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus"));
         }
         c.arg(format!("{out}/activate")).current_dir(&h.directory);
-        run_cmd(&mut c).with_context(|| format!("activate the home configuration of {user}"))?;
+        crate::isolated(&step(user), || run_cmd(&mut c))?;
     }
     for path in &plan.originals {
         let path = Path::new(path);

@@ -1,5 +1,5 @@
 use crate::generation::{Generation, STATE};
-use crate::{Ctx, cmd, failed, forward, output, output_any, report, run_cmd, run_quiet, run_silent, trust};
+use crate::{Ctx, cmd, failed, forward, isolated, output, output_any, report, run_cmd, run_quiet, run_silent, trust};
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -31,16 +31,31 @@ pub struct Plan {
     remove: Vec<String>,
     protected: Vec<String>,
     declared: usize,
+    /// The dependencies of the packages that are not installed.
+    depends: HashMap<String, Vec<String>>,
 }
 
 impl Plan {
     /// The packages of the transaction: the packages to install and the local
-    /// packages that build again, which pacman -S --needed upgrades.
-    fn targets(&self) -> Vec<&str> {
-        let mut t: Vec<&str> = self.install.iter().chain(&self.local).map(String::as_str).collect();
+    /// packages that build again, which pacman -S --needed upgrades, less the
+    /// skipped packages.
+    fn targets(&self, skip: &BTreeSet<String>) -> Vec<&str> {
+        let mut t: Vec<&str> = self.install.iter().chain(&self.local).map(String::as_str).filter(|n| !skip.contains(*n)).collect();
         t.sort();
         t.dedup();
         t
+    }
+
+    /// The packages that did not build and the targets that need one of them,
+    /// also through other targets.
+    fn skipped(&self, failed: BTreeSet<String>) -> BTreeSet<String> {
+        let mut skip = failed;
+        let needs = |t: &str, skip: &BTreeSet<String>| self.depends.get(t).and_then(|d| d.iter().find(|d| skip.contains(*d))).cloned();
+        while let Some((t, d)) = self.targets(&skip).into_iter().find_map(|t| needs(t, &skip).map(|d| (t.to_string(), d))) {
+            report::failure(&format!("install package {t}"), &format!("it needs {d}, which did not build"));
+            skip.insert(t);
+        }
+        skip
     }
 
     pub fn print(&self, l: &mut Vec<String>) {
@@ -290,22 +305,15 @@ fn aur_table(names: &[String]) -> Result<Vec<(String, String, String)>> {
         .collect())
 }
 
-fn srcinfo(dir: &str) -> Result<(Vec<String>, Vec<String>)> {
+/// Writes the .SRCINFO of a local package, as an AUR package has one, and
+/// returns its dependencies.
+fn srcinfo(dir: &str) -> Result<Vec<String>> {
     let mut c = cmd("makepkg", &["--printsrcinfo"]);
     c.env("HOME", BUILD).env("LC_ALL", "C").current_dir(dir);
     let text = output(&mut sandboxed(c, Some("pacnix"), &[BUILD]))
         .with_context(|| format!("read the PKGBUILD in {dir}"))?;
-    let (mut names, mut deps) = (vec![], vec![]);
-    for line in text.lines() {
-        if let Some((k, v)) = line.trim().split_once(" = ") {
-            match k {
-                "pkgname" => names.push(v.to_string()),
-                "depends" | "makedepends" | "checkdepends" => deps.push(dep_name(v).to_string()),
-                _ => {}
-            }
-        }
-    }
-    Ok((names, deps))
+    std::fs::write(Path::new(dir).join(".SRCINFO"), text)?;
+    Ok(srcinfo_file(dir).2)
 }
 
 fn local_sources() -> BTreeMap<String, String> {
@@ -480,6 +488,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
     plan.install.extend(chosen.iter().cloned());
     plan.deps.extend(chosen);
     plan.unknown.extend(wrong_providers(g, &repo, &sync)?);
+    plan.depends = universe.into_iter().map(|(n, i)| (n, i.depends.iter().map(|d| dep_name(d).to_string()).collect())).collect();
     plan.remove = inst.keys().filter(|n| !keep.contains(*n)).cloned().collect();
     plan.remove.sort();
     let kernel = output_any(pacman(&["-Qqo", &format!("/usr/lib/modules/{}/vmlinuz", uname())]))?;
@@ -816,7 +825,7 @@ pub fn fetch_builds(g: &Generation, plan: &Plan) -> Result<Builds> {
         run_cmd(cmd("cp", &["-rT", &dirs_of[name], &dir]))?;
         run_cmd(cmd("chown", &["-R", "pacnix:pacnix", &format!("{BUILD}/local")]))?;
         run_cmd(cmd("chmod", &["-R", "u+w", &dir]))?;
-        let (_, deps) = srcinfo(&dir)?;
+        let deps = srcinfo(&dir)?;
         // Dependencies that no sync package satisfies, by name or by provides, come from the AUR.
         let satisfied = |d: &String| {
             sync.contains(d) || dirs_of.contains_key(d) || g.m.packages.providers.contains_key(d) || pacman(&["-Sddp", "--config", CONF, d]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
@@ -837,16 +846,23 @@ pub fn fetch_builds(g: &Generation, plan: &Plan) -> Result<Builds> {
 }
 
 /// Builds AUR and local packages into the local repository and drops packages
-/// that no declaration needs.
-fn build(g: &Generation, plan: &Plan, builds: Builds) -> Result<()> {
-    build_dirs(g, builds)?;
+/// that no declaration needs. Returns the packages that did not build. A local
+/// package that did not build keeps its old record, thus it builds again at
+/// the next apply. The kept sources of local packages that are not declared go.
+fn build(g: &Generation, plan: &Plan, builds: Builds) -> Result<BTreeSet<String>> {
+    let failed = build_dirs(g, builds)?;
+    let dirs_of = local_dirs(g);
     if !plan.local.is_empty() {
         let mut sources = local_sources();
-        let dirs_of = local_dirs(g);
-        for name in &plan.local {
+        for name in plan.local.iter().filter(|n| !failed.contains(*n)) {
             sources.insert(name.clone(), dirs_of[name].clone());
         }
         std::fs::write(SOURCES, serde_json::to_string_pretty(&sources)?)?;
+    }
+    for e in std::fs::read_dir(format!("{BUILD}/sources")).into_iter().flatten().flatten() {
+        if !dirs_of.contains_key(&*e.file_name().to_string_lossy()) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
     }
     if !plan.drop.is_empty() {
         let files: Vec<String> = repo_db(g)?.into_iter().filter(|i| plan.drop.contains(&i.name)).map(|i| i.filename).collect();
@@ -857,7 +873,7 @@ fn build(g: &Generation, plan: &Plan, builds: Builds) -> Result<()> {
             let _ = std::fs::remove_file(format!("{REPO}/{f}.sig"));
         }
     }
-    Ok(())
+    Ok(failed)
 }
 
 /// Runs aur sync --no-build and returns the package directories in build
@@ -877,15 +893,24 @@ fn fetch(mut c: impl std::borrow::BorrowMut<Command>) -> Result<Vec<String>> {
 /// time. Before the build of an AUR package, the output shows the changes of
 /// its PKGBUILD since its last build; after the build, its record keeps the
 /// built revision. root moves the packages into the local repository, which
-/// the builder user cannot change.
-fn build_dirs(g: &Generation, mut builds: Builds) -> Result<()> {
+/// the builder user cannot change. A build that fails is an isolated step: the
+/// packages that need it do not build, and the others build. Returns the
+/// names of the packages that did not build.
+fn build_dirs(g: &Generation, mut builds: Builds) -> Result<BTreeSet<String>> {
     let out = format!("{BUILD}/out");
     let built: HashMap<String, String> = repo_db(g)?.into_iter().map(|i| (i.name, i.version)).collect();
     let count = builds.queue.len();
+    let mut failed = BTreeSet::new();
     for (i, (dir, local)) in builds.queue.iter().enumerate() {
         let name = base(dir);
-        let step = format!("build {} package {}/{count}: {name}", if *local { "local" } else { "AUR" }, i + 1);
-        report::progress(&step);
+        let step = format!("build {} package {name}", if *local { "local" } else { "AUR" });
+        report::progress(&format!("build {} package {}/{count}: {name}", if *local { "local" } else { "AUR" }, i + 1));
+        let (names, version, deps) = srcinfo_file(dir);
+        if let Some(d) = deps.iter().find(|d| failed.contains(*d)) {
+            report::failure(&step, &format!("it needs {d}, which did not build"));
+            failed.extend(names);
+            continue;
+        }
         let record = builds.records.remove(&name);
         let head = match local {
             true => String::new(),
@@ -897,18 +922,29 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<()> {
             println!("pacnix: changes of the AUR package {name} since its last build:");
             run_cmd(as_builder(&["git", "-C", dir, "--no-pager", "diff", "--stat", "--patch", &old, &head]))?;
         }
-        let (names, version) = srcinfo_file(dir);
         if *local || !names.iter().all(|n| built.get(n) == Some(&version)) {
             let _ = std::fs::remove_dir_all(&out);
             run_cmd(as_builder(&["mkdir", &out]))?;
             let mut c = chroot(&["--build"]);
             c.current_dir(dir).env("PKGDEST", &out);
+            // The sources of a local package stay until its build succeeds, thus a
+            // new attempt continues a large download.
+            let sources = format!("{BUILD}/sources/{name}");
+            if *local {
+                run_cmd(as_builder(&["mkdir", "-p", &sources]))?;
+                c.env("SRCDEST", &sources);
+            }
             // makechrootpkg downloads the sources on the host as the builder user, and
             // systemd-nspawn locks the chroot in /run.
             let writable = [BUILD, REPO, "/var/lib/aurbuild", "/var/cache/pacman/pkg", "/run"];
-            run_cmd(sandboxed(c, None, &writable)).context(step)?;
+            let ok = isolated(&step, || run_cmd(sandboxed(c, None, &writable)));
             // No process of the builder user stays to change the packages.
             let _ = cmd("pkill", &["-KILL", "-u", "pacnix"]).status();
+            if !ok? {
+                failed.extend(names);
+                continue;
+            }
+            let _ = std::fs::remove_dir_all(&sources);
             let mut files = Vec::new();
             for e in std::fs::read_dir(&out)? {
                 let path = e?.path();
@@ -926,16 +962,18 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<()> {
             trust::save(&name, r)?;
         }
     }
-    Ok(())
+    Ok(failed)
 }
 
-/// The package names and the version in the .SRCINFO of an AUR package.
-fn srcinfo_file(dir: &str) -> (Vec<String>, String) {
+/// The package names, the version and the dependencies, also of the build, in
+/// the .SRCINFO of a package.
+fn srcinfo_file(dir: &str) -> (Vec<String>, String, Vec<String>) {
     let text = std::fs::read_to_string(Path::new(dir).join(".SRCINFO")).unwrap_or_default();
-    let (mut names, mut fields) = (Vec::new(), BTreeMap::new());
+    let (mut names, mut fields, mut deps) = (Vec::new(), BTreeMap::new(), Vec::new());
     for (k, v) in text.lines().filter_map(|l| l.trim().split_once(" = ")) {
-        match k {
+        match k.split('_').next().unwrap_or(k) {
             "pkgname" => names.push(v.to_string()),
+            "depends" | "makedepends" | "checkdepends" => deps.push(dep_name(v).to_string()),
             "epoch" | "pkgver" | "pkgrel" => {
                 fields.entry(k).or_insert(v);
             }
@@ -943,7 +981,7 @@ fn srcinfo_file(dir: &str) -> (Vec<String>, String) {
         }
     }
     let epoch = fields.get("epoch").filter(|e| **e != "0").map(|e| format!("{e}:")).unwrap_or_default();
-    (names, format!("{epoch}{}-{}", fields.get("pkgver").unwrap_or(&""), fields.get("pkgrel").unwrap_or(&"")))
+    (names, format!("{epoch}{}-{}", fields.get("pkgver").unwrap_or(&""), fields.get("pkgrel").unwrap_or(&"")), deps)
 }
 
 /// Removes a stale pacman lock that a killed transaction left, and the local
@@ -998,8 +1036,10 @@ fn transaction(args: &[&str]) -> Result<()> {
 /// Builds packages and downloads the packages to install, before units stop,
 /// so that a change of the network service still downloads, and the
 /// transaction then installs from the cache. Without packages to install,
-/// nothing downloads.
-pub fn prepare(g: &Generation, plan: &Plan, builds: Builds) -> Result<()> {
+/// nothing downloads. Returns the packages that the transaction skips: the
+/// packages that did not build and the packages that need them.
+pub fn prepare(g: &Generation, plan: &Plan, builds: Builds) -> Result<BTreeSet<String>> {
+    let mut failed = BTreeSet::new();
     write_confs(g)?;
     trust_server(g)?;
     if is_builder(g) && (!g.m.packages.aur.is_empty() || !g.m.packages.local.is_empty() || has_local(g)) {
@@ -1011,19 +1051,25 @@ pub fn prepare(g: &Generation, plan: &Plan, builds: Builds) -> Result<()> {
         if !builds.queue.is_empty() {
             ensure_chroot()?;
         }
-        build(g, plan, builds)?;
+        failed = build(g, plan, builds)?;
     }
     if has_local(g) {
         sync_pacnix_db()?;
     }
-    download(&plan.targets())
+    let skip = plan.skipped(failed);
+    download(&plan.targets(&skip))?;
+    Ok(skip)
 }
 
-pub fn apply(plan: &Plan) -> Result<()> {
-    if !plan.targets().is_empty() {
-        report::progress(&format!("install {} packages", plan.targets().len()));
+/// Installs, marks and removes packages. With skipped packages, the removals
+/// wait: a skipped package can be the replacement of a package that leaves,
+/// for example of a network service.
+pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
+    let targets = plan.targets(skip);
+    if !targets.is_empty() {
+        report::progress(&format!("install {} packages", targets.len()));
         let mut args = vec!["-S", "--needed", "--noconfirm", "--ask=4", "--config", CONF];
-        args.extend(plan.targets());
+        args.extend(targets);
         transaction(&args)?;
     }
     if !plan.archive.is_empty() {
@@ -1035,6 +1081,13 @@ pub fn apply(plan: &Plan) -> Result<()> {
     }
     if !plan.explicit.is_empty() {
         run_cmd(pacman(&["-D", "--asexplicit"]).args(&plan.explicit))?;
+    }
+    if !skip.is_empty() {
+        if !plan.remove.is_empty() || !plan.deps.is_empty() {
+            let step = "remove the packages that the configuration does not declare";
+            report::failure(step, "it waits until each declared package builds, because a package that did not build can replace a package that leaves");
+        }
+        return Ok(());
     }
     if !plan.deps.is_empty() {
         run_cmd(pacman(&["-D", "--asdeps"]).args(&plan.deps))?;
@@ -1095,6 +1148,7 @@ pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
     transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
     if !builds.queue.is_empty() {
         ensure_chroot()?;
+        // An AUR package that did not build stays at its installed version.
         build_dirs(g, builds)?;
         sync_pacnix_db()?;
         transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;

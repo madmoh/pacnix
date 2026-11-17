@@ -345,8 +345,9 @@ pub fn apply(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<Vec<String>> {
 fn triggered<'a>(plan: &'a Plan, changed: &[String]) -> Vec<(&'a String, &'a String)> {
     plan.triggers
         .iter()
-        .filter(|(_, t)| {
+        .filter(|(n, t)| {
             changed.iter().any(|c| t.paths.iter().any(|p| c == p || (p.ends_with('/') && c.starts_with(p.as_str()))))
+                || crate::report::retry(&format!("trigger {n}"))
         })
         .map(|(n, t)| (n, &t.command))
         .collect()
@@ -364,10 +365,22 @@ pub fn print_triggers(plan: &Plan, l: &mut Vec<String>) {
     l.extend(crate::units::changed_units(&changed).into_iter().map(|u| format!("restart unit {u} if it runs")));
 }
 
+/// Runs the triggers of the changed files and the triggers that failed at an
+/// earlier apply, in the order of their names. A trigger can need the result
+/// of an earlier one, for example the boot loader needs the boot images: after
+/// a failed trigger, the later triggers wait for the next apply.
 pub fn run_triggers(plan: &Plan, changed: &[String]) -> Result<()> {
+    let mut failed: Option<&String> = None;
     for (name, command) in triggered(plan, changed) {
+        let step = format!("trigger {name}");
+        if let Some(f) = failed {
+            crate::report::failure(&step, &format!("it runs after trigger {f}, which failed"));
+            continue;
+        }
         crate::report::progress(&format!("run trigger {name}: {command}"));
-        run_cmd(cmd("sh", &["-ec", command])).with_context(|| format!("trigger {name}"))?;
+        if !crate::isolated(&step, || run_cmd(cmd("sh", &["-ec", command])))? {
+            failed = Some(name);
+        }
     }
     Ok(())
 }

@@ -1,0 +1,11 @@
+# A package that needs no other test package.
+pkgname=kg-c
+pkgver=1
+pkgrel=1
+pkgdesc='pacnix test package without test dependencies'
+arch=(any)
+license=(MIT)
+
+package() {
+  install -Dm644 /dev/null "$pkgdir/usr/share/kg-c/done"
+}

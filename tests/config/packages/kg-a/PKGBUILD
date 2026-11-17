@@ -1,0 +1,20 @@
+# A package that does not build while its source file mode has the word fail.
+pkgname=kg-a
+pkgver=1
+pkgrel=1
+pkgdesc='pacnix test package with a build that can fail'
+arch=(any)
+license=(MIT)
+source=(mode)
+sha256sums=(SKIP)
+
+build() {
+  if [[ $(<"$srcdir/mode") == fail ]]; then
+    echo "error: the test build fails while the file mode has the word fail" >&2
+    return 1
+  fi
+}
+
+package() {
+  install -Dm644 /dev/null "$pkgdir/usr/share/kg-a/done"
+}

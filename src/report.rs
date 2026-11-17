@@ -10,12 +10,16 @@ const PACMAN_LOG: &str = "/var/log/pacman.log";
 /// The install notes of the packages: the last scriptlet output of each
 /// package, and the notes of the last run that had notes, for the audit.
 const NOTES: &str = "/var/lib/pacnix/notes.json";
+/// The isolated steps that failed and that the next apply does again.
+const RETRY: &str = "/var/lib/pacnix/retry.json";
 
 /// The current step and its start, and the size of the pacman log at the
 /// start of the run.
 static RUN: Mutex<Option<(String, Instant, u64)>> = Mutex::new(None);
 /// Lines for the end of the summary, for example the next command after an install.
 static LAST: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// The isolated steps that failed in this attempt.
+static FAILED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -44,15 +48,71 @@ pub fn last(line: String) {
     LAST.lock().unwrap().push(line);
 }
 
+/// The failed steps of earlier applies that the next apply does again.
+pub fn retries() -> std::collections::BTreeSet<String> {
+    std::fs::read(RETRY).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn store(steps: &std::collections::BTreeSet<String>) {
+    if let Ok(b) = serde_json::to_vec_pretty(steps) {
+        let _ = std::fs::create_dir_all(crate::generation::STATE).and_then(|_| std::fs::write(RETRY, b));
+    }
+}
+
+/// True when the step failed at an earlier apply and did not succeed after it.
+pub fn retry(step: &str) -> bool {
+    retries().contains(step)
+}
+
+/// Records a step that succeeded. Returns true.
+pub fn passed(step: &str) -> bool {
+    let mut steps = retries();
+    if steps.remove(step) {
+        store(&steps);
+    }
+    true
+}
+
+/// Records and shows a step that failed, so that the next apply does it again,
+/// also when this run stops later. Returns false.
+pub fn failure(step: &str, reason: &str) -> bool {
+    println!("pacnix: error: {step}: {reason}");
+    println!("pacnix: the apply continues without this step");
+    FAILED.lock().unwrap().push(step.to_string());
+    let mut steps = retries();
+    if steps.insert(step.to_string()) {
+        store(&steps);
+    }
+    false
+}
+
+/// Starts a new attempt without failed steps.
+pub fn reset() {
+    FAILED.lock().unwrap().clear();
+}
+
+/// True when a step of this run failed.
+pub fn failed() -> bool {
+    !FAILED.lock().unwrap().is_empty()
+}
+
+/// After a complete activation, the steps to do again are the failed steps of this run.
+pub fn save_retries() {
+    store(&FAILED.lock().unwrap().iter().cloned().collect());
+}
+
 /// A line for a command that writes no output for a long time, so that the
-/// output shows that the step continues.
-pub fn heartbeat(command: &str, minutes: u64) {
+/// output shows that the step continues, with the last state of a progress meter.
+pub fn heartbeat(command: &str, minutes: u64, meter: &str) {
     let guard = RUN.lock().unwrap();
     let (step, minutes) = match guard.as_ref() {
         Some((s, start, _)) if !s.is_empty() => (s.clone(), start.elapsed().as_secs() / 60),
         _ => (command.to_string(), minutes),
     };
-    println!("pacnix: the step continues after {minutes} min without output: {step}");
+    match meter.trim() {
+        "" => println!("pacnix: the step continues after {minutes} min without output: {step}"),
+        meter => println!("pacnix: the step continues after {minutes} min: {step}: {meter}"),
+    }
 }
 
 /// The install notes and the new .pacnew files in the part of the pacman log
@@ -105,6 +165,13 @@ pub fn summary() {
     }
     for l in LAST.lock().unwrap().iter() {
         println!("{l}");
+    }
+    let failed = FAILED.lock().unwrap();
+    if !failed.is_empty() {
+        println!("pacnix: the apply is done, but {} steps failed. The next apply does them again:", failed.len());
+        for f in failed.iter() {
+            println!("  {f}");
+        }
     }
     if !fresh.is_empty() {
         saved.scriptlets.extend(fresh.clone());

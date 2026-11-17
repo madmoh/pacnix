@@ -312,15 +312,16 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
         run_quiet(cmd("nix-store", &["--add-root", PENDING, "--realise", &plan.target.path]))?;
     }
     let leaving = units::leaving(&plan.units, &plan.files.deleted());
-    packages::prepare(&plan.target, &plan.packages, builds)?;
+    let skip = packages::prepare(&plan.target, &plan.packages, builds)?;
     units::stop(&leaving)?;
-    packages::apply(&plan.packages)?;
+    packages::apply(&plan.packages, &skip)?;
     users::apply(&plan.users)?;
     let changed = files::apply(ctx, &plan.target, &plan.files)?;
     files::run_triggers(&plan.files, &changed)?;
     units::apply(&plan.units, &changed)?;
     home::apply(&plan.target, &plan.home)?;
     keep_or_delete(&plan.target, &plan.data, delete)?;
+    report::save_retries();
     Ok(())
 }
 

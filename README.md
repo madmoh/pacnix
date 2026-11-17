@@ -228,7 +228,16 @@ Run pacnix as your user. Before it changes the system, pacnix starts itself agai
 
 At the end, `apply` and `rollback` show the items that you must know: if a reboot is necessary (the kernel that runs is not installed, a boot image changed, or a DKMS module was built for a kernel that does not run), new or changed install notes of packages, and new `.pacnew` files.
 
-When a download fails because of the network, for example no connection, a DNS timeout or a mirror that stops, pacnix tries again after 10 s, 30 s and 60 s, with one download at a time. Your `ParallelDownloads` setting in `/etc/pacman.conf` does not change. The next attempt uses the packages that are already in the pacman cache and in the local repository. Each other failure, for example an error in the configuration or a package that does not build, stops pacnix with the reason.
+When a download fails because of the network, for example no connection, a DNS timeout or a mirror that stops, pacnix tries again after 10 s, 30 s and 60 s, with one download at a time. Your `ParallelDownloads` setting in `/etc/pacman.conf` does not change. The next attempt uses the packages that are already in the pacman cache and in the local repository, and a partial download of a local package continues.
+
+A failed step that changes only one item does not stop `apply` and `rollback`, as with [`nix build --keep-going`](https://nix.dev/manual/nix/stable/command-ref/new-cli/nix3-build) and [`switch-to-configuration`](https://nixos.org/manual/nixos/stable/#sec-switching-systems) of NixOS. These steps are:
+
+- the build of an AUR or a local package. The packages that need it do not build or install. The package removals wait until each declared package builds, because a package that did not build can replace a package that leaves.
+- a trigger. The later triggers wait, because a trigger can need the result of an earlier trigger, for example the boot loader needs the boot images.
+- a `systemctl` command that starts, stops, restarts, masks or unmasks a unit
+- the activation of a home configuration
+
+pacnix shows the reason of each failed step and applies the rest of the configuration. The summary shows the failed steps, and the exit status is 4. The next `apply` does the failed steps again, and `plan` shows them. A failure in the network stops a step only after the last attempt. Each other failure, for example an error in the configuration, a refused plan or a pacman transaction that fails, stops pacnix with the reason and the exit status 1.
 
 pacnix refuses to remove `base`, `pacman`, `nix`, `pacnix` and the kernel that runs, unless you give `--allow-protected-removal`. Each apply keeps a generation in the Nix profile `/nix/var/nix/profiles/pacnix`.
 

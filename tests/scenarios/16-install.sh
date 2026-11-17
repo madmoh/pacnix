@@ -9,10 +9,13 @@
 # (a repository on the disk takes the role of GitHub), and the plan shows that
 # pacnix keeps the originals of the files that it replaces. pacnix apply, as
 # the user without --yes, asks nothing. The local package slow first fails
-# with a message that has "timed out": pacnix stops one time with the reason
-# and does not try again. After the correction, the build is silent for 65 s:
-# the output shows each step, a line for the silence and the end, without Nix
-# notes, progress meter redraws or escape sequences. After a reboot, the system
+# with a message that has "timed out": pacnix shows the reason, does not try
+# again, applies the rest of the configuration and exits with status 4, and
+# the download stays for the next attempt. After
+# the correction, the build is silent for 65 s, then redraws a progress meter
+# for 65 s: the output shows each step, a line for the silence, a line with the
+# last state of the meter and the end, without Nix notes, other progress meter
+# redraws or escape sequences. The download goes after the build succeeds. After a reboot, the system
 # boots the declared loader entry, and has the declared swap, locale, user and
 # home configuration and an empty plan.
 size=(6 4096 1)
@@ -71,19 +74,26 @@ for l in 'write file /etc/fstab (override the file of package filesystem, keep t
 	'write file /etc/localtime (replace the unmanaged file, keep the original)' 'change user arch: shell /usr/bin/zsh'; do
 	grep -qxF "$l" <<<"$out" || { echo "$out"; fail "the plan does not show: $l"; }
 done
-step "a build failure with \"timed out\" in its output stops pacnix one time with the reason"
-out=$(pacnix newbox apply 2>&1) && { echo "$out" | tail -40; fail "the apply with the failing build succeeded"; }
+step "a build failure with \"timed out\" in its output does not stop the apply"
+rc=0
+out=$(pacnix newbox apply 2>&1) || rc=$?
 echo "$out" | tail -8
-grep -q '^pacnix: error: build local package 1/1: slow: aur chroot .* failed with exit status: 255' <<<"$out" || fail "the error does not name the build and its status"
+((rc == 4)) || fail "the exit status of the apply with the failing build is $rc, not 4"
+grep -q '^pacnix: error: build local package slow: aur chroot .* failed with exit status: 255' <<<"$out" || fail "the error does not name the build and its status"
+grep -qx '  build local package slow' <<<"$out" || fail "the summary does not show the failed build"
+check newbox 'test "$(readlink /etc/localtime)" = /usr/share/zoneinfo/Europe/Berlin' "the apply with the failing build did not apply the rest of the configuration"
 grep -q '^ *error: the test build timed out while the file mode has the word fail' <<<"$out" || fail "the error does not show the reason of the failure"
 grep -q 'attempt 1 of' <<<"$out" && fail "pacnix tried a build failure again"
 grep -q 'aurutils' <<<"$out" && fail "the apply builds aurutils"
-step "the first complete pacnix apply adopts the system without a question"
+check newbox 'sudo test -s /var/lib/pacnix/build/sources/slow/lastupdate' "the download of the failed build does not stay for the next attempt"
+step "the next apply builds the package and asks no question"
 on newbox 'echo ok >/etc/pacnix/packages/slow/mode'
-out=$(pacnix newbox apply 2>&1) || { echo "$out" | tail -30; fail "the adoption failed"; }
+out=$(pacnix newbox apply 2>&1) || { echo "$out" | tail -30; fail "the apply after the correction failed"; }
 for l in 'pacnix: build local package 1/1: slow' 'pacnix: the step continues after 1 min without output: build local package 1/1: slow' '==> colored line' 'progress done'; do
 	grep -qxF "$l" <<<"$out" || fail "the output does not show: $l"
 done
+refute newbox 'sudo test -e /var/lib/pacnix/build/sources/slow' "the download stays after the build succeeded"
+grep -qx 'pacnix: the step continues after 2 min: build local package 1/1: slow: downloaded [0-9]* MB' <<<"$out" || fail "the output does not show the progress meter after 60 s of redraws"
 grep -q 'progress 10%\|not writing modified lock file\|Added input' <<<"$out" && fail "the output shows progress meter redraws or Nix notes"
 grep -q $'\e\|\r' <<<"$out" && fail "the output has escape sequences or carriage returns"
 check newbox 'sudo grep -q "^UUID=" /var/lib/pacnix/originals/etc/fstab && sudo grep -q "timeout 3" /var/lib/pacnix/originals/boot/loader/loader.conf' "the originals are not kept"

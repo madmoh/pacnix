@@ -1,5 +1,5 @@
 use crate::generation::Generation;
-use crate::{cmd, output, run_cmd, run_silent};
+use crate::{cmd, isolated, output, report, run_cmd, run_silent};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -23,6 +23,8 @@ pub struct Plan {
     pub disable: Vec<String>,
     mask: Vec<String>,
     unmask: Vec<String>,
+    /// The systemctl commands that failed at an earlier apply.
+    retry: Vec<String>,
 }
 
 impl Plan {
@@ -34,6 +36,7 @@ impl Plan {
         l.extend(self.disable.iter().map(|u| format!("disable and stop unit {u}")));
         l.extend(self.mask.iter().map(|u| format!("mask unit {u}")));
         l.extend(self.unmask.iter().map(|u| format!("unmask unit {u}")));
+        l.extend(self.retry.iter().map(|c| format!("run {c} again (it failed at the last apply)")));
     }
 }
 
@@ -134,8 +137,18 @@ pub fn plan(g: &Generation, old: &Generation) -> Result<Plan> {
     plan.mask = g.m.units.mask.iter().filter(|u| !masked.contains(*u)).cloned().collect();
     let masks: BTreeSet<&String> = g.m.units.mask.iter().collect();
     plan.unmask = old.m.units.mask.iter().filter(|u| !masks.contains(u) && masked.contains(*u)).cloned().collect();
+    // A unit that left has nothing to do again.
+    let exists = |c: &String| c.rsplit(' ').next().is_some_and(|u| states.contains_key(u) || states.contains_key(&template(u)));
+    plan.retry = report::retries().into_iter().filter(|c| c.starts_with("systemctl ") && exists(c)).collect();
     plan.now = now;
     Ok(plan)
+}
+
+/// A systemctl command as an isolated step: a unit that does not start or stop
+/// does not stop the apply, as with switch-to-configuration of NixOS. `step`
+/// is the command that the next apply runs again.
+fn systemctl(step: &str, args: &[&str]) -> Result<bool> {
+    isolated(step, || run_cmd(cmd("systemctl", args)))
 }
 
 /// Writes the preset file and runs systemctl preset-all, then starts the
@@ -153,10 +166,10 @@ pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
         run_cmd(cmd("systemctl", &["daemon-reload"]))?;
     }
     for u in &plan.unmask {
-        run_cmd(cmd("systemctl", &["unmask", u]))?;
+        systemctl(&format!("systemctl unmask {u}"), &["unmask", u])?;
     }
     for u in &plan.mask {
-        run_cmd(cmd("systemctl", &["mask", "--now", u]))?;
+        systemctl(&format!("systemctl mask --now {u}"), &["mask", "--now", u])?;
     }
     let before = &plan.now;
     run_silent(cmd("systemctl", &["preset-all"]))?;
@@ -165,7 +178,7 @@ pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
     // The list from the plan is older than the package transaction: skip the
     // units that stop_leaving stopped and the units whose package left.
     for u in before.difference(&after).filter(|u| states.contains_key(*u) && !plan.disable.contains(*u)) {
-        run_cmd(cmd("systemctl", &["stop", u]))?;
+        systemctl(&format!("systemctl stop {u}"), &["stop", u])?;
     }
     let instances = plan.enable.iter().filter(|u| u.contains('@') && !u.contains("@."));
     let started: BTreeSet<&String> = after.difference(before).filter(|u| plan.declared.contains(*u)).chain(instances).collect();
@@ -178,11 +191,17 @@ pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
             println!("pacnix: unit {u} starts at the next boot, because its service runs");
             continue;
         }
-        run_cmd(cmd("systemctl", &["start", u]))?;
+        systemctl(&format!("systemctl start {u}"), &["start", u])?;
     }
     for u in changed_units(changed).iter().filter(|u| !started.contains(u)) {
         println!("pacnix: restart unit {u} if it runs");
-        run_cmd(cmd("systemctl", &["try-restart", u]))?;
+        // A unit that fails at the restart does not run, thus the next apply restarts it without the condition.
+        systemctl(&format!("systemctl restart {u}"), &["try-restart", u])?;
+    }
+    for c in &plan.retry {
+        println!("pacnix: run {c} again");
+        let args: Vec<&str> = c.split(' ').skip(1).collect();
+        systemctl(c, &args)?;
     }
     Ok(())
 }
@@ -198,7 +217,7 @@ pub fn leaving(plan: &Plan, deleted: &[String]) -> Vec<String> {
 /// Disables and stops units.
 pub fn stop(units: &[String]) -> Result<()> {
     for u in units {
-        run_cmd(cmd("systemctl", &["disable", "--now", u]))?;
+        systemctl(&format!("systemctl disable --now {u}"), &["disable", "--now", u])?;
     }
     Ok(())
 }

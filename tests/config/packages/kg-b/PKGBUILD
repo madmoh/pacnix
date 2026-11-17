@@ -1,0 +1,12 @@
+# A package that needs kg-a.
+pkgname=kg-b
+pkgver=1
+pkgrel=1
+pkgdesc='pacnix test package that needs kg-a'
+arch=(any)
+license=(MIT)
+depends=(kg-a)
+
+package() {
+  install -Dm644 /dev/null "$pkgdir/usr/share/kg-b/done"
+}
