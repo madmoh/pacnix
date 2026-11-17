@@ -1,5 +1,6 @@
 # Home configuration of the user: a dotfile, dconf settings, a user unit, and
 # editor settings that the editor rewrites itself. home.packages stays empty.
+# The file ~/.fail-activation stops the activation before it links the files.
 { config, lib, ... }:
 let
   cfg = config.features.home;
@@ -10,14 +11,17 @@ in
     extra = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Add the clock-format dconf key and the hello user unit.";
+      description = "Add the dotfile, the clock-format dconf key and the hello user unit.";
     };
   };
   config = lib.mkIf cfg.enable {
     packages.repo = [ "dconf" ];
     claims.home.home = [ ".config/Code" ".config/dconf" ];
     home.users.${config.user} = { lib, ... }: {
-      home.file.".config/demo/settings.conf".text = "theme = dark\n";
+      home.file.".config/demo/settings.conf" = lib.mkIf cfg.extra { text = "theme = dark\n"; };
+      home.activation.failTest = lib.hm.dag.entryBetween [ "linkGeneration" ] [ "writeBoundary" ] ''
+        if [ -e "$HOME/.fail-activation" ]; then echo "the test stops the activation"; exit 1; fi
+      '';
       dconf.settings."org/gnome/desktop/interface" = {
         color-scheme = "prefer-dark";
       } // lib.optionalAttrs cfg.extra { clock-format = "24h"; };

@@ -22,6 +22,12 @@ in
       };
     }));
   };
+  options.mounts = mkOption {
+    type = types.attrsOf types.str;
+    default = { };
+    internal = true;
+    description = "File system type of each mount point that must be mounted before pacnix writes files below it.";
+  };
   options.swapDevices = mkOption {
     default = [ ];
     description = "Swap partitions and swap files, in /etc/fstab. A swap file with a size that does not exist, pacnix makes with mkswap. When its declaration goes, the swap file is data of a removed feature.";
@@ -45,6 +51,7 @@ in
     };
   };
   config = lib.mkMerge [
+    { mounts = lib.mapAttrs' (_: fs: lib.nameValuePair fs.mountPoint fs.fsType) cfg; }
     (lib.mkIf (cfg != { } || config.swapDevices != [ ]) {
       files."/etc/fstab".text = lib.concatStrings (
         map (fs: "${fs.device} ${fs.mountPoint} ${fs.fsType} ${lib.concatStringsSep "," fs.options} 0 ${pass fs}\n") (lib.attrValues cfg)

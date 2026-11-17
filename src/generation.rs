@@ -21,6 +21,7 @@ pub struct Manifest {
     pub audit: AuditSpec,
     pub home: BTreeMap<String, Home>,
     pub users: Accounts,
+    pub mounts: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize, Default, Clone)]

@@ -60,6 +60,7 @@ let
       groups = lib.mapAttrs (name: g: { inherit (g) gid; }) cfg.users.groups;
     };
     triggers = cfg.triggers;
+    mounts = cfg.mounts;
     claims = cfg.claims;
     audit.ignore = lib.unique cfg.audit.ignore;
     home = lib.mapAttrs (user: hm: {

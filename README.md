@@ -153,19 +153,26 @@ The configuration contains no passwords. Before it changes the system, `pacnix a
 | `swapDevices` | Swap partitions and swap files, for example `[ { device = "/swapfile"; size = 4096; } ]`. pacnix makes a swap file with a `size` in MiB that does not exist with [mkswap](https://man.archlinux.org/man/mkswap.8). |
 | `zramSwap.enable`, `zramSwap.settings` | Swap on compressed memory with [zram-generator](https://wiki.archlinux.org/title/Zram). |
 
-With a declared file system or swap device, pacnix writes all of [/etc/fstab](https://wiki.archlinux.org/title/Fstab). Declare all the file systems of the system, also the root file system and the EFI system partition. A new mount is active after the next boot. When you remove the declaration of a swap file, the swap file is the data of a removed feature. pacnix does not make partitions or file systems.
+With a declared file system or swap device, pacnix writes all of [/etc/fstab](https://wiki.archlinux.org/title/Fstab). Declare all the file systems of the system, also the root file system and the EFI system partition. A new mount is active after the next boot. pacnix writes the declared files below a declared mount point only when the declared file system is mounted there. When you remove the declaration of a swap file, the swap file is the data of a removed feature. pacnix does not make partitions or file systems.
 
 ### Boot
 
 | Option | Function |
 |---|---|
 | `boot.kernels` | The kernel packages, for example `[ "linux" "linux-lts" ]`. The boot loader gets an entry for each kernel. |
-| `boot.kernelParams` | The kernel command line, also in `/etc/kernel/cmdline`. For systemd-boot, pacnix adds the root parameters of `fileSystems."/"`. |
-| `boot.loader.efi.efiSysMountPoint` | The mount point of the EFI system partition. The default is `/boot`. |
-| `boot.loader.systemd-boot.enable`, `.settings` | [systemd-boot](https://wiki.archlinux.org/title/Systemd-boot), with the settings of [loader.conf](https://man.archlinux.org/man/loader.conf.5), for example `{ timeout = 3; }`. pacnix writes one entry for each kernel. |
+| `boot.kernelParams` | The kernel command line, for example `[ "rd.luks.name=UUID=root" "rd.luks.options=tpm2-device=auto,discard" ]`. pacnix adds `root=`, `rw` and the `subvol=` option of `fileSystems."/"` before it, in `/etc/kernel/cmdline` and in the entries and UKIs of systemd-boot. GRUB gets only `kernelParams`, and `grub-mkconfig` adds the root parameters. |
+| `boot.loader.efi.efiSysMountPoint` | The mount point of the [EFI system partition](https://wiki.archlinux.org/title/EFI_system_partition), `/boot` or `/efi`. The default is `/boot`. |
+| `boot.loader.systemd-boot.enable`, `.settings` | [systemd-boot](https://wiki.archlinux.org/title/Systemd-boot), with the settings of [loader.conf](https://man.archlinux.org/man/loader.conf.5), for example `{ timeout = 3; }`. The first kernel is the default. Without UKIs, pacnix writes one entry for each kernel, and the EFI system partition must be at `/boot`. |
+| `boot.loader.systemd-boot.uki` | Boot each kernel from a [unified kernel image](https://wiki.archlinux.org/title/Unified_kernel_image) `EFI/Linux/arch-KERNEL.efi` on the EFI system partition, with the command line in the image. Needs mkinitcpio. |
 | `boot.loader.grub.enable`, `.device`, `.settings` | [GRUB](https://wiki.archlinux.org/title/GRUB). With `device`, for example `/dev/sda`, GRUB installs for BIOS on that disk. Without `device`, it installs on the EFI system partition. `settings` are variables of `/etc/default/grub`, for example `{ GRUB_TIMEOUT = "1"; }`. |
 
 pacnix installs the boot loader when it is missing, and the boot loader adds itself to the EFI boot order. Enable one boot loader. pacnix does not remove a boot loader.
+
+With [mkinitcpio](https://wiki.archlinux.org/title/Mkinitcpio), pacnix writes the preset of each kernel. The pacman hook of mkinitcpio builds the images after a kernel installation. pacnix runs the same hook after a change of a preset, of `/etc/mkinitcpio.conf`, of a file in `/etc/mkinitcpio.conf.d` or of the command line, then deletes the images of the other format. Declare the hooks in a file of `/etc/mkinitcpio.conf.d`, for example `sd-encrypt`. Install `amd-ucode` or `intel-ucode` for the microcode, which the `microcode` hook adds to the image.
+
+pacnix writes files on the EFI system partition only when a vfat file system is mounted at its mount point. When the EFI system partition is at a different mount point, for example `/efi`, mount it at the declared mount point before the apply: `umount /efi` and `mount --mkdir /dev/disk/by-uuid/UUID /boot`. pacnix keeps the entries and images that it did not write. Delete the entries of other systems, for example `/boot/loader/entries/old.conf`, after the first boot of the new configuration.
+
+systemd-boot shows Windows only when the Windows Boot Manager is on the same EFI system partition. For Windows on a different disk, use the boot menu of the firmware. The menu entry `Reboot Into Firmware Interface` of systemd-boot opens the firmware setup.
 
 ### Host name, time zone and locale
 
@@ -180,11 +187,13 @@ pacnix installs the boot loader when it is missing, and the boot loader adds its
 
 ### Services
 
-`units.enable`, `units.disable` and `units.mask` contain systemd system units. pacnix writes them as a [preset](https://man.archlinux.org/man/systemd.preset.5) file and runs `systemctl preset-all`. The vendor presets of the packages control the units that are not in the configuration.
+`units.enable`, `units.disable` and `units.mask` contain systemd system units. pacnix writes them as a [preset](https://man.archlinux.org/man/systemd.preset.5) file and runs `systemctl preset-all`. The vendor presets of the packages control the units that are not in the configuration. pacnix starts the units of `units.enable` at the apply. A unit that only a vendor preset enables starts at the next boot.
 
 ### Home
 
 `home.users.<name>` contains a [Home Manager](https://nix-community.github.io/home-manager/) module. Use it for dotfiles, dconf settings and user units. pacnix activates it after the system step. Install software with `packages`, not with `home.packages`.
+
+When a home file of the configuration exists and Home Manager did not make it, pacnix keeps it as `FILE.pacnix-hm-backup`, and the plan shows it. When the declaration of the file goes, the original comes back. When an application replaces a home file with its own file, pacnix replaces that file at the next change of the home configuration and keeps the first original. Declare a file that an application writes, for example `~/.config/mimeapps.list`, in `/etc/xdg` or not at all.
 
 ### Scope
 

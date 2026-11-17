@@ -89,7 +89,28 @@ pub fn owners(paths: &[&str]) -> BTreeMap<String, String> {
     map
 }
 
+/// Refuses files below a declared mount point that does not have the declared
+/// file system, for example an EFI system partition that is not mounted yet.
+fn check_mounts(g: &Generation) -> Result<()> {
+    for (point, fs) in &g.m.mounts {
+        if fs == "auto" || !g.m.files.keys().any(|p| Path::new(p).starts_with(point)) {
+            continue;
+        }
+        // Reading the directory mounts an automount.
+        let _ = std::fs::read_dir(point);
+        let mounts = std::fs::read_to_string("/proc/self/mounts")?;
+        let found = mounts.lines().map(|l| l.split(' ').collect::<Vec<_>>()).filter(|f| f.len() > 2 && f[1] == point).map(|f| f[2].to_string()).last();
+        match found {
+            Some(t) if &t == fs => {}
+            Some(t) => bail!("{point} has the file system {t}, and the configuration declares {fs}. Mount the {fs} file system at {point}, then run pacnix again"),
+            None => bail!("{point} is not a mount point, and pacnix writes files below it only on the declared {fs} file system. Mount it, then run pacnix again. A change of /etc/fstab mounts it only at the next boot"),
+        }
+    }
+    Ok(())
+}
+
 pub fn plan(_ctx: &Ctx, g: &Generation, ledger: &[Generation]) -> Result<Plan> {
+    check_mounts(g)?;
     let mut plan = Plan::default();
     plan.stale = g.m.files.keys().chain(ledger.iter().flat_map(|l| l.m.files.keys())).map(|p| temporary(p)).filter(|t| t.symlink_metadata().is_ok()).collect();
     // Triggers of the previous generation also run, so that a dropped feature

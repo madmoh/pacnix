@@ -16,6 +16,9 @@ const SCRATCH: &str = "/run/pacnix/preset-root";
 pub struct Plan {
     preset: String,
     now: BTreeSet<String>,
+    /// The units of units.enable. Only these start at the apply; a unit that a
+    /// vendor preset enables starts at the next boot, in its own target.
+    declared: BTreeSet<String>,
     pub enable: Vec<String>,
     pub disable: Vec<String>,
     mask: Vec<String>,
@@ -24,7 +27,10 @@ pub struct Plan {
 
 impl Plan {
     pub fn print(&self, l: &mut Vec<String>) {
-        l.extend(self.enable.iter().map(|u| format!("enable and start unit {u}")));
+        l.extend(self.enable.iter().map(|u| match self.declared.contains(u) {
+            true => format!("enable and start unit {u}"),
+            false => format!("enable unit {u} (a vendor preset, it starts at the next boot)"),
+        }));
         l.extend(self.disable.iter().map(|u| format!("disable and stop unit {u}")));
         l.extend(self.mask.iter().map(|u| format!("mask unit {u}")));
         l.extend(self.unmask.iter().map(|u| format!("unmask unit {u}")));
@@ -114,7 +120,7 @@ fn simulate(g: &Generation, old: &Generation, preset: &str) -> Result<BTreeSet<S
 /// The units that preset-all enables and disables. Declared units of packages
 /// that are not installed yet are listed as well.
 pub fn plan(g: &Generation, old: &Generation) -> Result<Plan> {
-    let mut plan = Plan { preset: preset_text(g), ..Default::default() };
+    let mut plan = Plan { preset: preset_text(g), declared: g.m.units.enable.iter().cloned().collect(), ..Default::default() };
     let states = unit_states(None)?;
     let now = in_state(&states, "enabled");
     let after = simulate(g, old, &plan.preset)?;
@@ -132,8 +138,8 @@ pub fn plan(g: &Generation, old: &Generation) -> Result<Plan> {
     Ok(plan)
 }
 
-/// Writes the preset file and runs systemctl preset-all, then starts the units
-/// that it enabled and stops the units that it disabled.
+/// Writes the preset file and runs systemctl preset-all, then starts the
+/// declared units that it enabled and stops the units that it disabled.
 pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
     if std::fs::read_to_string(PRESET).unwrap_or_default() != plan.preset {
         std::fs::create_dir_all(Path::new(PRESET).parent().unwrap())?;
@@ -162,7 +168,7 @@ pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
         run_cmd(cmd("systemctl", &["stop", u]))?;
     }
     let instances = plan.enable.iter().filter(|u| u.contains('@') && !u.contains("@."));
-    let started: BTreeSet<&String> = after.difference(before).chain(instances).collect();
+    let started: BTreeSet<&String> = after.difference(before).filter(|u| plan.declared.contains(*u)).chain(instances).collect();
     for u in &started {
         if u.ends_with(".target") || u.contains("@.") {
             continue;
