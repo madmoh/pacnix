@@ -1,4 +1,4 @@
-use crate::{Ctx, ask, audit, cmd, failed, files, forward, home, packages, report, run_cmd, run_quiet, trust, units};
+use crate::{Ctx, ask, audit, cmd, failed, files, forward, home, packages, report, run_cmd, run_quiet, trust, units, users};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -20,6 +20,32 @@ pub struct Manifest {
     pub claims: BTreeMap<String, Claim>,
     pub audit: AuditSpec,
     pub home: BTreeMap<String, Home>,
+    pub users: Accounts,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Accounts {
+    pub users: BTreeMap<String, User>,
+    pub groups: BTreeMap<String, Group>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct User {
+    pub uid: Option<u32>,
+    pub group: Option<String>,
+    #[serde(rename = "extraGroups")]
+    pub extra_groups: Vec<String>,
+    pub shell: Option<String>,
+    pub home: String,
+    pub description: Option<String>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Group {
+    pub gid: Option<u32>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -47,7 +73,7 @@ pub struct Serve {
 pub struct FileSpec {
     pub source: String,
     pub target: Option<String>,
-    pub mode: String,
+    pub mode: Option<String>,
     pub user: String,
     pub group: String,
 }
@@ -137,12 +163,11 @@ pub fn build(ctx: &Ctx) -> Result<Generation> {
 }
 
 /// The user that owns the directory of the flake, when it is not root and the
-/// nix-daemon accepts connections. In a chroot, and before Nix makes its store,
-/// root evaluates.
+/// nix-daemon accepts connections. Before Nix makes its store, root evaluates.
 fn owner(flake: &str) -> Option<(u32, u32, String, String)> {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(flake).ok()?;
-    if meta.uid() == 0 || !packages::booted() || !Path::new("/nix/var/nix/daemon-socket/socket").exists() || !Path::new("/nix/store").exists() {
+    if meta.uid() == 0 || !Path::new("/nix/var/nix/daemon-socket/socket").exists() || !Path::new("/nix/store").exists() {
         return None;
     }
     let entry = crate::output(cmd("getent", &["passwd", &meta.uid().to_string()])).ok()?;
@@ -183,6 +208,7 @@ pub fn history() -> Result<Vec<(u64, Generation)>> {
 pub struct Plan {
     pub target: Generation,
     pub packages: packages::Plan,
+    pub users: users::Plan,
     pub files: files::Plan,
     pub units: units::Plan,
     pub home: home::Plan,
@@ -195,16 +221,18 @@ impl Plan {
         let old = active()?.unwrap_or_default();
         let ledger: Vec<Generation> = std::iter::once(old.clone()).chain(pending()).collect();
         let packages = packages::plan(ctx, &target)?;
+        let users = users::plan(&target, &old)?;
         let files = files::plan(ctx, &target, &ledger)?;
         let units = units::plan(&target, &old)?;
         let home = home::plan(&target)?;
         let data = audit::leftovers(&old, &target)?;
-        Ok(Plan { target, packages, files, units, home, data })
+        Ok(Plan { target, packages, users, files, units, home, data })
     }
 
     fn print(&self) {
         let mut lines = Vec::new();
         self.packages.print(&mut lines);
+        self.users.print(&mut lines);
         self.files.print(&mut lines);
         files::print_triggers(&self.files, &mut lines);
         self.units.print(&mut lines);
@@ -240,6 +268,7 @@ pub fn apply(ctx: &Ctx, offline: bool) -> Result<()> {
         let builds = packages::upgrade_builds(&target)?;
         let news = news.join().unwrap_or_default();
         ask(&[packages::removals(&before.packages), builds.asks.clone(), news].concat(), &audit::asks(&before.data), &ctx.opts)?;
+        users::ask_passwords(&before.users, &ctx.opts)?;
         // When the upgrade changes no package and no sync database, the plan stays the same.
         let (state, built) = (packages::databases(), builds.queue.is_empty());
         packages::upgrade(&target, builds)?;
@@ -274,6 +303,7 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
     files::check(ctx, &plan.target, &plan.files)?;
     let builds = packages::fetch_builds(&plan.target, &plan.packages)?;
     let delete = ask(&[packages::removals(&plan.packages), builds.asks.clone()].concat(), &audit::asks(&plan.data), &ctx.opts)?;
+    users::ask_passwords(&plan.users, &ctx.opts)?;
     let current = std::fs::canonicalize(PENDING).ok();
     if current.as_deref() != Some(Path::new(&plan.target.path)) {
         std::fs::create_dir_all(STATE)?;
@@ -284,22 +314,12 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
     packages::prepare(&plan.target, &plan.packages, builds)?;
     units::stop(&leaving)?;
     packages::apply(&plan.packages)?;
+    users::apply(&plan.users)?;
     let changed = files::apply(ctx, &plan.target, &plan.files)?;
     files::run_triggers(&plan.files, &changed)?;
     units::apply(&plan.units, &changed)?;
     home::apply(&plan.target, &plan.home)?;
     keep_or_delete(&plan.target, &plan.data, delete)?;
-    // A chroot cannot build packages or activate home configurations.
-    if !packages::booted() {
-        let deferred = packages::deferred(&plan.target);
-        if !deferred.is_empty() {
-            report::last(format!("pacnix: these packages wait for the booted system: {}", deferred.join(" ")));
-        }
-        if !plan.target.m.home.is_empty() {
-            report::last(format!("pacnix: these home configurations wait for the booted system: {}", plan.target.m.home.keys().cloned().collect::<Vec<_>>().join(" ")));
-        }
-        report::last("pacnix: next step: reboot, log in, connect to the network, then run: pacnix apply".to_string());
-    }
     Ok(())
 }
 

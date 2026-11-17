@@ -13,10 +13,9 @@ in
     type = lib.types.str;
     default = "arch";
   };
-  options.hostName = lib.mkOption { type = lib.types.str; };
   config = lib.mkIf cfg.enable {
     packages.repo = [
-      "base" cfg.kernel "grub" "efibootmgr" "dosfstools" "btrfs-progs" "gptfdisk"
+      "base" "efibootmgr" "dosfstools" "btrfs-progs" "gptfdisk"
       "openssh" "sudo" "cloud-init" "cloud-guest-utils" "qemu-guest-agent" "rsync" "git" "jq"
     ] ++ lib.optional (cfg.network == "NetworkManager") "networkmanager";
     units.enable = [
@@ -29,21 +28,8 @@ in
       else [ "NetworkManager.service" "NetworkManager-wait-online.service" ]);
     # The systemd vendor preset enables systemd-networkd.
     units.disable = lib.optionals (cfg.network != "networkd") [ "systemd-networkd.service" "systemd-networkd.socket" "systemd-networkd-wait-online.service" ];
-    # GRUB has no pacman hook of its own: this one writes grub.cfg after a kernel or initramfs change.
-    files."/etc/pacman.d/hooks/99-grub.hook".text = ''
-      [Trigger]
-      Type = Path
-      Operation = Install
-      Operation = Upgrade
-      Operation = Remove
-      Target = usr/lib/modules/*/vmlinuz
-      Target = usr/lib/booster/*
-      Target = usr/lib/initcpio/*
-      [Action]
-      Description = Writing grub.cfg...
-      When = PostTransaction
-      Exec = /usr/bin/grub-mkconfig -o /boot/grub/grub.cfg
-    '';
+    boot.kernels = [ cfg.kernel ];
+    boot.loader.grub = { enable = true; device = "/dev/vda"; settings.GRUB_TIMEOUT = "1"; };
     claims.base.system = [
       "/efi" "/swap" "/var/lib/cloud" "/etc/systemd/network/10-cloud-init-*.network" "/etc/sudoers.d/90-cloud-init-users"
       "/etc/systemd/system/pacman-init.service" "/etc/systemd/system/ctrl-alt-del.target" "/etc/audit/*.d" "/etc/audisp"

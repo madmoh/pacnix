@@ -55,6 +55,10 @@ let
       inherit (f) target mode user group;
     }) cfg.files;
     units = { enable = lib.unique cfg.units.enable; disable = lib.unique cfg.units.disable; mask = lib.unique cfg.units.mask; };
+    users = {
+      users = lib.mapAttrs (name: u: { inherit (u) uid group extraGroups shell home description; }) cfg.users.users;
+      groups = lib.mapAttrs (name: g: { inherit (g) gid; }) cfg.users.groups;
+    };
     triggers = cfg.triggers;
     claims = cfg.claims;
     audit.ignore = lib.unique cfg.audit.ignore;

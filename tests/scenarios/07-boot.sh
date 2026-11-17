@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Scenario 7: kernel command line and mkinitcpio settings through drop-ins and
-# triggers, a reboot, and the reverse when the feature goes. The summary of
+# Scenario 7: boot.kernelParams for GRUB, and mkinitcpio settings through a
+# drop-in and a trigger, a reboot, and the reverse when the feature goes. The summary of
 # apply and the audit show that a reboot is necessary until the reboot.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
@@ -8,7 +8,7 @@ apply $h >/dev/null || fail "first apply failed"
 step "declare the drop-ins"
 scenario $h '{ features.boot = { enable = true; cmdline = "pacnix.test=1 mitigations=auto"; compression = "xz"; }; }'
 out=$(plan $h)
-grep -qx 'run trigger grub: grub-mkconfig -o /boot/grub/grub.cfg' <<<"$out" || { echo "$out"; fail "the plan does not run grub-mkconfig"; }
+grep -qx 'run trigger grub: grub-install --target=i386-pc /dev/vda && grub-mkconfig -o /boot/grub/grub.cfg' <<<"$out" || { echo "$out"; fail "the plan does not run grub-mkconfig"; }
 grep -qx 'run trigger mkinitcpio: mkinitcpio -P' <<<"$out" || fail "the plan does not run mkinitcpio"
 out=$(apply $h) || fail "apply failed"
 grep -qx 'pacnix: reboot to use the changes: /boot/initramfs-linux.img changed after the boot' <<<"$out" || { echo "$out"; fail "apply does not tell to reboot"; }

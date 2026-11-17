@@ -6,6 +6,7 @@ mod packages;
 mod report;
 mod trust;
 mod units;
+mod users;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
@@ -55,9 +56,6 @@ pub struct Opts {
     /// Permit removal of base, pacman, nix, pacnix and the booted kernel
     #[arg(long)]
     pub allow_protected_removal: bool,
-    /// Permit replacement of files that no package and no generation owns
-    #[arg(long)]
-    pub overwrite_unmanaged: bool,
 }
 
 #[derive(Args, Clone)]
@@ -102,6 +100,10 @@ fn run() -> Result<()> {
         Ok(p) => p.display().to_string(),
         Err(_) => cli.flake.clone(),
     };
+    // pacnix uses systemd to make changes: it does not run in a chroot, for example arch-chroot.
+    if !packages::booted() {
+        bail!("pacnix runs only on the booted system. Boot the installed system, then run pacnix again");
+    }
     let _lock = lock()?;
     let ctx = |opts| Ctx { flake: flake.clone(), host: host.clone(), opts };
     match cli.verb {
@@ -239,12 +241,14 @@ fn lock() -> Result<std::fs::File> {
     Ok(f)
 }
 
-/// The command line, without the runuser, systemd-run and env prefix of the builder commands.
+/// The command line, without the runuser, sandbox and env prefix of the builder commands.
 pub fn describe(cmd: &Command) -> String {
     let words: Vec<String> = std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|w| w.to_string_lossy().into_owned()).collect();
     let mut start = 0;
-    if words[0] == "runuser" || words[0] == "systemd-run" {
-        start = words.iter().position(|w| w == "--").map_or(0, |i| i + 1);
+    // The sandbox has two separators: the one of unshare and the one after the writable paths.
+    let separators = if words[0] == "unshare" { 2 } else { 1 };
+    if words[0] == "runuser" || words[0] == "unshare" {
+        start = words.iter().enumerate().filter(|(_, w)| *w == "--").nth(separators - 1).map_or(0, |(i, _)| i + 1);
         if words.get(start).is_some_and(|w| w == "env") {
             start += 1 + words[start + 1..].iter().take_while(|w| w.contains('=') || w.starts_with('-')).count();
         }

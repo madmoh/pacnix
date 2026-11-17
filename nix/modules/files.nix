@@ -27,8 +27,9 @@ in
           description = "Target of a symbolic link. Set one of text, source and target. Mode, user and group do not apply.";
         };
         mode = mkOption {
-          type = types.strMatching "0?[0-7]{3,4}";
+          type = types.nullOr (types.strMatching "0?[0-7]{3,4}");
           default = "0644";
+          description = "Mode of the file. null: the file system gives the mode and the owner, for example vfat through its mount options.";
         };
         user = mkOption {
           type = types.str;

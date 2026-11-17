@@ -162,8 +162,7 @@ fn is_builder(g: &Generation) -> bool {
 }
 
 /// True when systemd runs the system and pacnix is not in a chroot, the test
-/// of systemd-detect-virt --chroot. In arch-chroot, for example during an
-/// install from a live medium, clean chroot builds cannot run.
+/// of systemd-detect-virt --chroot.
 pub fn booted() -> bool {
     use std::os::unix::fs::MetadataExt;
     let same_root = match (std::fs::metadata("/"), std::fs::metadata("/proc/1/root")) {
@@ -171,17 +170,6 @@ pub fn booted() -> bool {
         _ => false,
     };
     same_root && Path::new("/run/systemd/system").exists()
-}
-
-/// A builder host in a chroot builds nothing: AUR and local packages wait for
-/// the first pacnix apply on the booted system.
-pub fn defer_builds(g: &Generation) -> bool {
-    is_builder(g) && !booted()
-}
-
-/// The AUR and local packages that wait for the booted system.
-pub fn deferred(g: &Generation) -> Vec<String> {
-    built_aur(g).into_iter().chain(local_dirs(g).into_keys()).collect()
 }
 
 /// Reads the pacnix-local database from the local repository or from the server.
@@ -357,9 +345,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
     built_aur.dedup();
     let missing_aur: Vec<String> = built_aur.iter().filter(|n| !repo_names.contains(*n)).cloned().collect();
     let mut table = Vec::new();
-    if defer_builds(g) {
-        plan.notes.push(format!("the first pacnix apply on the booted system builds and installs: {}", deferred(g).join(" ")));
-    } else if is_builder(g) {
+    if is_builder(g) {
         table = aur_table(&missing_aur)?;
         let found: BTreeSet<&String> = table.iter().map(|t| &t.0).collect();
         plan.unknown.extend(missing_aur.iter().filter(|n| !found.contains(n)).cloned());
@@ -399,7 +385,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
 
     // Reconciliation of the installed packages.
     let inst = installed()?;
-    plan.install = declared.iter().filter(|n| !inst.contains_key(*n) && !(defer_builds(g) && !sync.contains(*n))).cloned().collect();
+    plan.install = declared.iter().filter(|n| !inst.contains_key(*n)).cloned().collect();
     plan.explicit = declared.iter().filter(|n| inst.get(*n).is_some_and(|i| !i.explicit)).cloned().collect();
     plan.deps = inst.values().filter(|i| i.explicit && !declared.contains(&i.name)).map(|i| i.name.clone()).collect();
     plan.deps.sort();
@@ -490,7 +476,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
         }
     }
     // pacman -S marks its targets explicit. The chosen providers become dependencies after it.
-    chosen.retain(|n| !declared.contains(n) && !(defer_builds(g) && !sync.contains(n)));
+    chosen.retain(|n| !declared.contains(n));
     plan.install.extend(chosen.iter().cloned());
     plan.deps.extend(chosen);
     plan.unknown.extend(wrong_providers(g, &repo, &sync)?);
@@ -510,7 +496,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
 /// version: the sync repositories, the local repository or the Arch Linux Archive.
 fn pin(g: &Generation, plan: &mut Plan, inst: &HashMap<String, Info>, sync: &BTreeSet<String>, repo: &[Info]) -> Result<()> {
     for (name, version) in &g.m.packages.versions {
-        if inst.get(name).is_some_and(|i| &i.version == version) || (defer_builds(g) && !sync.contains(name)) {
+        if inst.get(name).is_some_and(|i| &i.version == version) {
             continue;
         }
         plan.install.retain(|n| n != name);
@@ -643,24 +629,33 @@ fn as_builder(args: &[&str]) -> Command {
     sandboxed(c, Some("pacnix"), &[BUILD])
 }
 
-/// Runs a command as a transient systemd service in a sandbox: the file system
-/// is read-only apart from the writable paths, the home directories are not
-/// visible, and /tmp, /var/tmp and /dev/shm are private. A PKGBUILD runs on the host in it, as the
-/// builder user, for example to download its sources, and cannot get root.
+/// Runs a command in a sandbox: a mount namespace in which the file system is
+/// read-only apart from the writable paths, the home directories are empty,
+/// and /tmp, /var/tmp and /dev/shm are private. A PKGBUILD runs on the host in
+/// it, as the builder user, for example to download its sources, and cannot
+/// get root.
 fn sandboxed(c: Command, user: Option<&str>, writable: &[&str]) -> Command {
-    let mut s = cmd("systemd-run", &["--quiet", "--wait", "--pipe", "--collect", "--service-type=exec"]);
-    s.args(["-p", "ProtectSystem=strict", "-p", "ProtectHome=yes", "-p", "PrivateTmp=yes", "-p", "TemporaryFileSystem=/dev/shm"]);
-    s.args(writable.iter().map(|w| format!("--property=ReadWritePaths={w}")));
-    if let Some(u) = user {
-        s.args(["-p", &format!("User={u}"), "-p", "NoNewPrivileges=yes"]);
-    }
+    const SCRIPT: &str = r#"set -e
+user=$1; shift
+rw="/proc /dev /sys/fs/cgroup"
+while [ "$1" != -- ]; do rw="$rw $1"; shift; done; shift
+for d in $rw; do mount --rbind "$d" "$d"; done
+mount -o remount,bind,ro=recursive /
+for d in $rw; do mount -o remount,bind,rw=recursive "$d"; done
+for d in /home /root /tmp /var/tmp /dev/shm; do mount -t tmpfs -o mode=1777 tmpfs "$d"; done
+if [ -n "$user" ]; then exec setpriv --reuid="$user" --regid="$user" --clear-groups --no-new-privs -- "$@"; fi
+exec "$@""#;
+    let mut s = cmd("unshare", &["--mount", "--propagation", "private", "--", "sh", "-c", SCRIPT, "sh", user.unwrap_or("")]);
+    s.args(writable).arg("--").arg(c.get_program()).args(c.get_args());
     if let Some(d) = c.get_current_dir() {
-        s.arg(format!("--working-directory={}", d.display()));
+        s.current_dir(d);
     }
     for (k, v) in c.get_envs() {
-        s.arg(format!("--setenv={}={}", k.to_string_lossy(), v.unwrap_or_default().to_string_lossy()));
+        match v {
+            Some(v) => s.env(k, v),
+            None => s.env_remove(k),
+        };
     }
-    s.arg("--").arg(c.get_program()).args(c.get_args());
     s
 }
 
@@ -804,7 +799,7 @@ fn base(dir: &str) -> String {
 /// change: aur sync --no-build gives the AUR packages with their AUR
 /// dependencies in build order.
 pub fn fetch_builds(g: &Generation, plan: &Plan) -> Result<Builds> {
-    if !is_builder(g) || defer_builds(g) || (plan.build.is_empty() && plan.local.is_empty()) {
+    if !is_builder(g) || (plan.build.is_empty() && plan.local.is_empty()) {
         return Ok(Builds::default());
     }
     ensure_repo()?;
@@ -1010,15 +1005,13 @@ pub fn prepare(g: &Generation, plan: &Plan, builds: Builds) -> Result<()> {
     if is_builder(g) && (!g.m.packages.aur.is_empty() || !g.m.packages.local.is_empty() || has_local(g)) {
         ensure_repo()?;
         write_confs(g)?;
-        if !defer_builds(g) {
-            // The build asks pacman for the dependencies, which needs the
-            // pacnix database also on a new host.
-            sync_pacnix_db()?;
-            if !builds.queue.is_empty() {
-                ensure_chroot()?;
-            }
-            build(g, plan, builds)?;
+        // The build asks pacman for the dependencies, which needs the
+        // pacnix database also on a new host.
+        sync_pacnix_db()?;
+        if !builds.queue.is_empty() {
+            ensure_chroot()?;
         }
+        build(g, plan, builds)?;
     }
     if has_local(g) {
         sync_pacnix_db()?;
@@ -1063,7 +1056,7 @@ pub fn apply(plan: &Plan) -> Result<()> {
 /// changes that need a confirmation. A host without a local repository has
 /// none yet: the apply after the upgrade builds them.
 pub fn upgrade_builds(g: &Generation) -> Result<Builds> {
-    if !is_builder(g) || defer_builds(g) || !Path::new(REPO).join("pacnix-local.db.tar.gz").exists() {
+    if !is_builder(g) || !Path::new(REPO).join("pacnix-local.db.tar.gz").exists() {
         return Ok(Builds::default());
     }
     write_confs(g)?;

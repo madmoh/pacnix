@@ -6,13 +6,11 @@ use std::path::Path;
 #[derive(Default)]
 pub struct Plan {
     activate: Vec<(String, String)>,
-    deferred: Vec<String>,
 }
 
 impl Plan {
     pub fn print(&self, l: &mut Vec<String>) {
         l.extend(self.activate.iter().map(|(u, p)| format!("activate home configuration of {u}: {p}")));
-        l.extend(self.deferred.iter().map(|u| format!("note: the first pacnix apply on the booted system activates the home configuration of {u}")));
     }
 }
 
@@ -28,10 +26,6 @@ fn out_path(drv: &str) -> Result<String> {
 
 pub fn plan(g: &Generation) -> Result<Plan> {
     let mut plan = Plan::default();
-    if !crate::packages::booted() {
-        plan.deferred = g.m.home.keys().cloned().collect();
-        return Ok(plan);
-    }
     for (user, h) in &g.m.home {
         let out = out_path(&h.drv).with_context(|| format!("home configuration of {user}"))?;
         if current(&h.directory).as_deref() != Some(out.as_str()) {

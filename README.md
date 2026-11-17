@@ -1,12 +1,12 @@
 # pacnix
 
-pacnix manages an Arch Linux system from a declarative configuration. You write the packages, files, services and home configuration of each host in the Nix language. `pacnix apply` then makes the system agree with that configuration. pacman, makepkg and systemd make all the changes. The system stays a normal Arch Linux system.
+pacnix manages an Arch Linux system from a declarative configuration. You write the packages, users, mounts, boot loader, files, services and home configuration of each host in the Nix language. `pacnix apply` then makes the system agree with that configuration. pacman, makepkg and systemd make all the changes. The system stays a normal Arch Linux system.
 
 pacnix is idempotent and it reconciles: when you remove a declaration, its package, file or service also leaves the system. When you read the configuration, you can find the cause of each item on the system.
 
 ## Installation
 
-pacnix is in the signed pacman repository `[pacnix]`, which the releases of this project supply. Each release has the packages of pacnix, its signing key `pacnix-keyring` and [aurutils](https://github.com/aurutils/aurutils), the repository database and the signing key `pacnix.asc`. pacnix uses aurutils for the AUR, thus aurutils is a dependency of pacnix and comes built from `[pacnix]`. Each day, a job puts the latest aurutils release into the repository. To trust the key and add the repository, run these commands as root. During an Arch Linux installation, run them on the live system.
+pacnix is in the signed pacman repository `[pacnix]`, which the releases of this project supply. Each release has the packages of pacnix, its signing key `pacnix-keyring` and [aurutils](https://github.com/aurutils/aurutils), the repository database and the signing key `pacnix.asc`. pacnix uses aurutils for the AUR, thus aurutils is a dependency of pacnix and comes built from `[pacnix]`. Each day, a job puts the latest aurutils release into the repository. To trust the key and add the repository, run these commands as root.
 
 ```sh
 curl -fLO https://github.com/madmoh/pacnix/releases/latest/download/pacnix.asc
@@ -17,35 +17,23 @@ printf '\n[pacnix]\nServer = https://github.com/madmoh/pacnix/releases/latest/do
 
 For more information, see [Unofficial user repositories](https://wiki.archlinux.org/title/Unofficial_user_repositories).
 
-### During the installation of Arch Linux
+### Usage after the installation
 
-Do the steps of the [installation guide](https://wiki.archlinux.org/title/Installation_guide) until the partitions are mounted on `/mnt`. Then:
+pacnix runs on a booted system, because systemd makes many of its changes. In a chroot, for example `arch-chroot`, pacnix stops before it changes the system. Thus install Arch Linux with the [installation guide](https://wiki.archlinux.org/title/Installation_guide), with a boot loader, a user that can use `sudo`, and a network connection. The steps that you declare later, for example the time zone, the locale and the host name, can stay at their defaults. pacnix also takes control of a system that you used and configured before.
 
-```sh
-pacstrap -K /mnt base pacnix
-cp -a config /mnt/etc/pacnix
-arch-chroot /mnt pacnix apply --host myhost
-```
-
-`pacstrap -K` gives the new system an empty keyring. The package `pacnix-keyring` adds the key of `[pacnix]` to it with `pacman-key --populate`, as `archlinux-keyring` does for the Arch Linux keys. The configuration must declare `/etc/pacman.conf` with the section `[pacnix]`: pacnix uses the declared `pacman.conf` for each pacman command, also before it writes the file. In the chroot, you are root. If `pacstrap` fails, for example because a mirror stops, run it again: the packages that it downloaded stay in the pacman cache of `/mnt`. The apply in the chroot does these steps:
-
-- It installs the packages from the repositories.
-- It writes the files and enables the services.
-- It runs the triggers, for example `locale-gen` and the installation of the boot loader.
-
-A chroot cannot build AUR packages or activate a home configuration. At the end, the apply in the chroot shows the packages and home configurations that wait for the booted system, and the next command. `arch-chroot` mounts `/etc/resolv.conf` of the live system, thus pacnix cannot write a declared `/etc/resolv.conf` in the chroot. Write it after you leave the chroot, as the output shows, for example `ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf` for [systemd-resolved](https://wiki.archlinux.org/title/Systemd-resolved). Set the passwords with `arch-chroot /mnt passwd` before you reboot. pacnix does not manage secrets. In the chroot, root owns `/etc/pacnix`. To edit the configuration as your user after the reboot, declare a [tmpfiles](https://man.archlinux.org/man/tmpfiles.d.5) rule that gives the directory to your user, for example `Z /etc/pacnix - alice alice`.
-
-Reboot and log in. Connect to the network, for example to a WiFi network in the desktop. Then run:
+Boot the system, log in, and add `[pacnix]` as the previous section shows. Then install the package and get the configuration, for example from a Git repository:
 
 ```sh
+sudo pacman -Syu pacnix
+sudo install -d -o $USER /etc/pacnix
+git clone https://github.com/alice/config /etc/pacnix
+pacnix plan
 pacnix apply
 ```
 
-The first apply on the booted system refreshes the sync databases, builds and installs the AUR and local packages, and activates the home configurations. The builds can take a long time. When a step gives no output for 60 s, pacnix writes a line that tells that the step continues. A new installation asks no question.
+Run `pacnix plan` and change the configuration until the plan shows only the changes that you want. When a declared file replaces a file that pacnix did not write, also a file of a package, pacnix keeps the original file in `/var/lib/pacnix/originals`, and the plan shows `keep the original`. When you remove the declaration, pacnix puts the original file back. A declared user that exists keeps its password and its home directory. The configuration must declare `/etc/pacman.conf` with the section `[pacnix]`.
 
-### On an installed system
-
-Install the package with `pacman -Syu pacnix`. Write the configuration in `/etc/pacnix`. Then run `pacnix plan` and change the configuration until the plan shows only the changes that you want. Then run `pacnix apply`.
+The first apply builds and installs the AUR and local packages, and activates the home configurations. The builds can take a long time. When a step gives no output for 60 s, pacnix writes a line that tells that the step continues.
 
 ## Configuration
 
@@ -68,19 +56,26 @@ Each file in `modules` is a module of the [NixOS module system](https://nixos.or
 ```nix
 # /etc/pacnix/hosts/myhost.nix
 {
-  packages.repo = [ "base" "linux" "linux-firmware" "pacnix" "grub" "networkmanager" "firefox" ];
+  packages.repo = [ "base" "linux-firmware" "pacnix" "networkmanager" "firefox" ];
   packages.aur = [ "visual-studio-code-bin" ];
   packages.local.my-tool = ../packages/my-tool;
 
-  files."/etc/hostname".text = "myhost\n";
+  fileSystems."/" = { device = "LABEL=root"; fsType = "ext4"; };
+  fileSystems."/boot" = { device = "LABEL=ESP"; fsType = "vfat"; options = [ "fmask=0077" "dmask=0077" ]; };
+  zramSwap.enable = true;
+  boot.kernels = [ "linux" ];
+  boot.loader.systemd-boot.enable = true;
+
+  networking.hostName = "myhost";
+  time.timeZone = "Europe/Berlin";
+  i18n.defaultLocale = "en_US.UTF-8";
+  users.users.me = { extraGroups = [ "wheel" ]; shell = "/usr/bin/zsh"; };
+
   files."/etc/pacman.conf".source = ../pacman.conf;
-  files."/etc/localtime".target = "/usr/share/zoneinfo/Europe/Berlin";
   files."/etc/firefox/policies/policies.json".source = ./firefox-policies.json;
 
   units.enable = [ "NetworkManager.service" ];
   units.disable = [ "systemd-networkd.service" ];
-
-  triggers.locale = { paths = [ "/etc/locale.gen" ]; command = "locale-gen"; };
 
   home.users.me = {
     dconf.settings."org/gnome/desktop/interface".color-scheme = "prefer-dark";
@@ -103,7 +98,7 @@ Each file in `modules` is a module of the [NixOS module system](https://nixos.or
 
 After an apply, the explicitly installed packages are equal to the declared packages, and no orphan packages stay installed. pacnix uses aurutils to build AUR and local packages in a [clean chroot](https://wiki.archlinux.org/title/DeveloperWiki:Building_in_a_clean_chroot) with the settings of `/etc/makepkg.conf`, for example the compression, `MAKEFLAGS` and debug packages. Declare this file to change them, see [makepkg](https://wiki.archlinux.org/title/Makepkg). The packages go into the local repository `/var/lib/pacnix/repo`.
 
-The PKGBUILD of a package runs on the host as the user `pacnix`, for example to download the sources, and in the clean chroot for the build. On the host, it runs in a transient [systemd](https://man.archlinux.org/man/systemd.exec.5) service: the file system is read-only, apart from the build directory `/var/lib/pacnix/build`, the home directories are not visible, and `/tmp`, `/var/tmp` and `/dev/shm` are private. The user `pacnix` has no sudo rule: root starts the clean chroot and adds the packages to the repository, which the user `pacnix` cannot change.
+The PKGBUILD of a package runs on the host as the user `pacnix`, for example to download the sources, and in the clean chroot for the build. On the host, it runs in a private [mount namespace](https://man.archlinux.org/man/unshare.1): the file system is read-only, apart from the build directory `/var/lib/pacnix/build`, the home directories are not visible, and `/tmp`, `/var/tmp` and `/dev/shm` are private. The user `pacnix` has no sudo rule: root starts the clean chroot and adds the packages to the repository, which the user `pacnix` cannot change.
 
 pacnix signs the local repository with a key that it makes at the first build and keeps in `/var/lib/pacnix/gnupg`. At that time, the output shows the fingerprint. To give the repository to other hosts, serve `/var/lib/pacnix/repo` with an HTTP server. On each of the other hosts, declare `packages.server` and the fingerprint in `packages.serverKey`. pacnix then downloads the public key `pacnix-local.asc` from the server, makes sure that it has the declared fingerprint, and trusts it with `pacman-key`. pacman installs only the packages that have a correct signature. To show the fingerprint again, run `gpg --show-keys /var/lib/pacnix/repo/pacnix-local.asc`.
 
@@ -125,15 +120,63 @@ pacnix downloads the packages into the pacman cache before the transaction. If a
 - `source`: a file that has the content.
 - `target`: the target of a symbolic link.
 
-`mode`, `user` and `group` set the permissions. pacnix writes regular files with an atomic replace. Some file systems, for example vfat, cannot keep a mode or an owner, because the mount options set them for all files. In this condition, pacnix refuses the apply before it changes the system, and the error shows the mount options. Declare the mode and the owner that the mount options give, or change the mount options in [fstab](https://wiki.archlinux.org/title/Fstab). When you remove a declaration of a file, pacnix deletes the file. If a package owns the file, pacnix restores the file of the package. pacnix does not replace a file that no package and no generation owns, unless you give `--overwrite-unmanaged`.
+`mode`, `user` and `group` set the permissions. pacnix writes regular files with an atomic replace. Some file systems, for example vfat, cannot keep a mode or an owner, because the mount options set them for all files. In this condition, pacnix refuses the apply before it changes the system, and the error shows the mount options. Set `mode = null` to use the mode and the owner that the mount options give, for example for a file on the EFI system partition, or change the mount options in [fstab](https://wiki.archlinux.org/title/Fstab). When you remove a declaration of a file, pacnix deletes the file. If the file was there before pacnix, pacnix restores the original file. Else, if a package owns the file, pacnix restores the file of the package.
 
 When possible, use the drop-in directories, for example `/etc/sysctl.d`, `/etc/systemd/system/*.d` and `/etc/default/grub.d`. Do not replace the complete file of a package.
 
-Users and groups are files in [sysusers.d](https://man.archlinux.org/man/sysusers.d.5), and directories are files in [tmpfiles.d](https://man.archlinux.org/man/tmpfiles.d.5). sysusers.d adds users and groups. It does not change or delete them.
+Directories are files in [tmpfiles.d](https://man.archlinux.org/man/tmpfiles.d.5).
 
 ### Triggers
 
-`triggers.<name>` runs `command` after a change to one of its `paths`. A path that ends with `/` includes all the files below it. Use triggers for commands such as `locale-gen`, `mkinitcpio -P` and `grub-mkconfig`. For changes that a package makes, use a [pacman hook](https://man.archlinux.org/man/alpm-hooks.5).
+`triggers.<name>` runs `command` after a change to one of its `paths`. A path that ends with `/` includes all the files below it. Use triggers for commands such as `mkinitcpio -P`. For changes that a package makes, use a [pacman hook](https://man.archlinux.org/man/alpm-hooks.5).
+
+### Users and groups
+
+| Option | Function |
+|---|---|
+| `users.users.<name>` | A user account. pacnix creates a missing account with [useradd](https://man.archlinux.org/man/useradd.8) and changes an existing account with [usermod](https://man.archlinux.org/man/usermod.8). |
+| `users.users.<name>.uid` | The user ID of a new account. If an existing account has a different ID, pacnix stops before it changes the system. |
+| `users.users.<name>.group` | The primary group. By default, a new account gets a group with its name. |
+| `users.users.<name>.extraGroups` | The supplementary groups, for example `[ "wheel" ]`. The account is in these groups and in no other supplementary group. |
+| `users.users.<name>.shell` | The login shell, for example `/usr/bin/zsh`. Declare the package of the shell. |
+| `users.users.<name>.home` | The home directory of a new account. The default is `/home/<name>`. |
+| `users.users.<name>.description` | The full name (GECOS field). |
+| `users.groups.<name>.gid` | A group, and the group ID of a new group. |
+
+The configuration contains no passwords. Before it changes the system, `pacnix apply` asks for the password of each account that it creates, and gives it to [chpasswd](https://man.archlinux.org/man/chpasswd.8). pacnix does not keep the password. With `--yes` or without a terminal, the new account has no password, and the summary tells you to set it with `passwd`. When you remove the declaration of an account that pacnix created, pacnix deletes the account with `userdel`. The home directory stays. pacnix does not delete an account that it did not create.
+
+### File systems and swap
+
+| Option | Function |
+|---|---|
+| `fileSystems.<mount point>` | A file system to mount, with `device`, `fsType` and `options`, for example `{ device = "UUID=…"; fsType = "ext4"; }`. |
+| `swapDevices` | Swap partitions and swap files, for example `[ { device = "/swapfile"; size = 4096; } ]`. pacnix makes a swap file with a `size` in MiB that does not exist with [mkswap](https://man.archlinux.org/man/mkswap.8). |
+| `zramSwap.enable`, `zramSwap.settings` | Swap on compressed memory with [zram-generator](https://wiki.archlinux.org/title/Zram). |
+
+With a declared file system or swap device, pacnix writes all of [/etc/fstab](https://wiki.archlinux.org/title/Fstab). Declare all the file systems of the system, also the root file system and the EFI system partition. A new mount is active after the next boot. When you remove the declaration of a swap file, the swap file is the data of a removed feature. pacnix does not make partitions or file systems.
+
+### Boot
+
+| Option | Function |
+|---|---|
+| `boot.kernels` | The kernel packages, for example `[ "linux" "linux-lts" ]`. The boot loader gets an entry for each kernel. |
+| `boot.kernelParams` | The kernel command line, also in `/etc/kernel/cmdline`. For systemd-boot, pacnix adds the root parameters of `fileSystems."/"`. |
+| `boot.loader.efi.efiSysMountPoint` | The mount point of the EFI system partition. The default is `/boot`. |
+| `boot.loader.systemd-boot.enable`, `.settings` | [systemd-boot](https://wiki.archlinux.org/title/Systemd-boot), with the settings of [loader.conf](https://man.archlinux.org/man/loader.conf.5), for example `{ timeout = 3; }`. pacnix writes one entry for each kernel. |
+| `boot.loader.grub.enable`, `.device`, `.settings` | [GRUB](https://wiki.archlinux.org/title/GRUB). With `device`, for example `/dev/sda`, GRUB installs for BIOS on that disk. Without `device`, it installs on the EFI system partition. `settings` are variables of `/etc/default/grub`, for example `{ GRUB_TIMEOUT = "1"; }`. |
+
+pacnix installs the boot loader when it is missing, and the boot loader adds itself to the EFI boot order. Enable one boot loader. pacnix does not remove a boot loader.
+
+### Host name, time zone and locale
+
+| Option | Function |
+|---|---|
+| `networking.hostName` | The host name, in `/etc/hostname`. |
+| `time.timeZone` | The time zone, for example `Europe/Berlin`. |
+| `i18n.defaultLocale` | `LANG`, for example `en_US.UTF-8`. |
+| `i18n.extraLocaleSettings` | Other variables of `/etc/locale.conf`, for example `{ LC_TIME = "en_GB.UTF-8"; }`. |
+| `i18n.supportedLocales` | The lines of `/etc/locale.gen`. The default contains the default locale. pacnix runs `locale-gen` after a change. |
+| `console.keyMap`, `console.font` | The console keyboard layout and font, in `/etc/vconsole.conf`. |
 
 ### Services
 
@@ -156,8 +199,8 @@ Do not declare the data that an application writes, for example databases, token
 
 pacnix does not manage these items:
 
-- partitions and file systems
-- firmware settings, for example Secure Boot and the TPM
+- partitions and file systems: make them with the installation guide, and declare their mounts in `fileSystems`
+- firmware settings, for example Secure Boot, the TPM and the EFI boot order
 - secrets and passwords
 
 ## Usage

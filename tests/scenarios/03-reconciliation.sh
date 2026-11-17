@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scenario 3: add and remove a repo package, a group and AUR packages, remove a whole
-# feature, and restore pristine files after an override is dropped. A new AUR
+# feature, and restore the original files after an override is dropped. A new AUR
 # dependency of a built AUR package and package removals are in the one
 # question of a run, which needs --yes without a terminal.
 source "$(dirname "$0")/../lib.sh"
@@ -79,6 +79,7 @@ refute $h "systemctl show -p Environment sshd | grep -q DEMO=1" "the sshd drop-i
 empty_plan $h
 
 step "override package files"
+originals=$(on $h 'md5sum /etc/pacman.conf /etc/locale.gen /etc/pam.d/su')
 scenario $h '{ features.overrides.enable = true; }'
 apply $h || fail "apply failed"
 check $h "grep -qx Color /etc/pacman.conf" "pacman.conf is not overridden"
@@ -86,14 +87,10 @@ check $h "locale -a | grep -q ar_AE" "the locale trigger did not run"
 check $h "grep -q '^auth.*pam_wheel.so use_uid' /etc/pam.d/su" "the PAM file is not overridden"
 empty_plan $h
 
-step "drop the overrides and restore the pristine files"
+step "drop the overrides and restore the original files"
 scenario $h ''
 apply $h || fail "apply failed"
-for f in pacman:/etc/pacman.conf glibc:/etc/locale.gen util-linux:/etc/pam.d/su; do
-	check $h "bsdtar -xOf /var/cache/pacman/pkg/${f%%:*}-\$(pacman -Q ${f%%:*} | cut -d' ' -f2)-*.pkg.tar.zst ${f#*:/} | cmp - ${f#*:}" "${f#*:} is not pristine"
-done
+[[ $(on $h 'md5sum /etc/pacman.conf /etc/locale.gen /etc/pam.d/su') == "$originals" ]] || fail "the original files did not come back"
 refute $h "locale -a | grep -q ar_AE" "the locale trigger did not run after the restore"
-# The pacman.conf of the package has no [pacnix] section: add the test repository again.
-"$vm" push $h >/dev/null
 empty_plan $h
 pass

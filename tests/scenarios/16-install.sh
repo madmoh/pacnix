@@ -1,92 +1,107 @@
 #!/usr/bin/env bash
-# Scenario 16: install to an empty disk with the steps of the README and no
-# other step. A live system (the role of the Arch ISO) partitions, formats and
-# mounts the disk, pacstraps base and pacnix from [pacnix], which brings
-# aurutils built and the key of [pacnix], puts the configuration, a Git
-# repository, at /etc/pacnix and runs pacnix apply in arch-chroot, which uses
-# the declared pacman.conf and lists the deferred work and the next command.
-# The configuration gives /etc/pacnix to the user. The disk then boots alone,
-# without cloud-init, and the first pacnix apply, as the user without sudo and
-# without --yes, builds the local package and activates the home
-# configuration: a new installation asks nothing. Nix evaluates as the user,
-# no file in the home belongs to root, and the builder user has no sudo rule.
-# The local package slow first fails with a message that has "timed out":
-# pacnix stops one time with the reason and does not try again. After the
-# correction, the build is silent for 65 s: the output shows each step, a line
-# for the silence and the end, without Nix notes, progress meter redraws or
-# escape sequences.
+# Scenario 16: pacnix takes over a system that the installation guide made by
+# hand. A live system (the role of the Arch ISO) partitions, formats and mounts
+# a disk with an EFI system partition, pacstraps base, linux and the packages
+# for network and SSH, and in arch-chroot configures by hand: genfstab, time
+# zone, locale, host name, systemd-boot, a user with sudo and SSH, the network,
+# and [pacnix]. pacnix apply in arch-chroot refuses and changes nothing. The
+# disk boots with UEFI, without cloud-init. The user clones the configuration
+# (a repository on the disk takes the role of GitHub), and the plan shows that
+# pacnix keeps the originals of the files that it replaces. pacnix apply, as
+# the user without --yes, asks nothing. The local package slow first fails
+# with a message that has "timed out": pacnix stops one time with the reason
+# and does not try again. After the correction, the build is silent for 65 s:
+# the output shows each step, a line for the silence and the end, without Nix
+# notes, progress meter redraws or escape sequences. After a reboot, the system
+# boots the declared loader entry, and has the declared swap, locale, user and
+# home configuration and an empty plan.
 size=(6 4096 1)
 source "$(dirname "$0")/../lib.sh"
 fresh live "$cache/base-20261101.620452.qcow2"
 "$vm" blank live 12G
-step "install from the live system"
 on live "sudo tee /etc/pacnix/scenario.nix >/dev/null" <<<"{ features.machine.sshKey = \"$(cat "$cache/id_ed25519.pub")\n\"; }"
-on live 'set -e
-printf "label: dos\n,,L,*\n" | sudo sfdisk -q /dev/vdb
-sudo mkfs.ext4 -qL root /dev/vdb1
-sudo mount /dev/vdb1 /mnt
-sudo pacstrap -K /mnt base pacnix >/dev/null
-sudo cp -a /etc/pacnix /mnt/etc/pacnix
-echo fail | sudo tee /mnt/etc/pacnix/packages/slow/mode >/dev/null
-sudo git -C /mnt/etc/pacnix init -q
-sudo git -C /mnt/etc/pacnix add -A
-# Not steps of the README: the test repository [pacnix] is a directory, and
-# Nix downloads through the cache of the tests.
-sudo cp -a /srv/pacnix /mnt/srv/
-sudo install -Dm644 /etc/xdg/nix/nix.conf /mnt/etc/xdg/nix/nix.conf' || fail "pacstrap failed"
-out=$(on live 'sudo arch-chroot /mnt pacnix apply --host newbox --yes 2>&1') || { echo "$out" | tail -30; fail "apply in arch-chroot failed"; }
-grep '^note:\|^pacnix: \(these\|next\)' <<<"$out"
-for l in 'note: the first pacnix apply on the booted system builds and installs: slow' \
-	'pacnix: these packages wait for the booted system: slow' \
-	'pacnix: these home configurations wait for the booted system: arch' \
-	'pacnix: next step: reboot, log in, connect to the network, then run: pacnix apply'; do
-	grep -qxF "$l" <<<"$out" || fail "the apply in the chroot does not show: $l"
-done
-[[ $(tail -1 <<<"$out") == 'pacnix: next step: reboot, log in, connect to the network, then run: pacnix apply' ]] || fail "the next command is not the last line"
-grep -qxF 'pacnix: /etc/resolv.conf is a mount point in this chroot. Write it after you leave the chroot, for example: ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf' <<<"$out" || fail "apply does not tell how to write /etc/resolv.conf"
-on live 'sudo ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf' || fail "the link of /etc/resolv.conf cannot be written"
+key=$(cat "$cache/id_ed25519.pub")
+
+step "install by hand with the installation guide"
+on live "set -e
+printf 'label: gpt\n,512M,U\n,,L\n' | sudo sfdisk -q /dev/vdb
+sudo mkfs.fat -F32 -n ESP /dev/vdb1 >/dev/null && sudo mkfs.ext4 -qL root /dev/vdb2
+sudo mount /dev/vdb2 /mnt && sudo mount --mkdir /dev/vdb1 /mnt/boot
+sudo pacstrap -K /mnt base linux openssh sudo zsh git >/dev/null
+sudo genfstab -U /mnt | sudo tee -a /mnt/etc/fstab >/dev/null
+# Not steps of the guide: the test repository [pacnix] is a directory, Nix downloads
+# through the cache of the tests, and a Git repository takes the role of GitHub.
+sudo cp -a /srv/pacnix /mnt/srv/ && sudo install -Dm644 /etc/xdg/nix/nix.conf /mnt/etc/xdg/nix/nix.conf
+sudo git -C /etc/pacnix init -q && sudo git -C /etc/pacnix add -A && sudo git -C /etc/pacnix -c user.name=test -c user.email=test@pacnix commit -qm config
+sudo git clone -q --bare /etc/pacnix /mnt/srv/config.git
+sudo arch-chroot /mnt sh -ec '
+ln -sf /usr/share/zoneinfo/UTC /etc/localtime
+echo \"en_US.UTF-8 UTF-8\" >/etc/locale.gen && locale-gen >/dev/null
+echo LANG=en_US.UTF-8 >/etc/locale.conf
+echo newbox >/etc/hostname
+bootctl install >/dev/null 2>&1
+printf \"default arch.conf\ntimeout 3\n\" >/boot/loader/loader.conf
+printf \"title Arch Linux\nlinux /vmlinuz-linux\ninitrd /initramfs-linux.img\noptions root=LABEL=root rw\n\" >/boot/loader/entries/arch.conf
+useradd -m -G wheel arch && chown -R arch:arch /srv/config.git
+echo \"%wheel ALL=(ALL:ALL) NOPASSWD: ALL\" >/etc/sudoers.d/wheel
+install -d -o arch -g arch -m 700 /home/arch/.ssh && echo \"$key\" | install -o arch -g arch -m 600 /dev/stdin /home/arch/.ssh/authorized_keys
+printf \"[Match]\nName=en*\n[Network]\nDHCP=yes\n\" >/etc/systemd/network/20-wired.network
+systemctl enable -q sshd systemd-networkd systemd-resolved
+printf \"\n[pacnix]\nServer = file:///srv/pacnix\n\" >>/etc/pacman.conf
+pacman-key --add /srv/pacnix/test-key.asc >/dev/null 2>&1 && pacman-key --lsign-key \"pacnix test\" >/dev/null 2>&1
+pacman -S --noconfirm pacnix >/dev/null 2>&1'
+sudo ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf" || fail "the installation by hand failed"
+step "pacnix apply in arch-chroot refuses"
+before=$(on live 'sudo find /mnt -xdev -newer /mnt/etc/hostname 2>/dev/null | grep -v "^/mnt/\(var/log\|proc\|sys\|dev\|run\|tmp\)" | sort')
+out=$(on live 'sudo arch-chroot /mnt pacnix apply --yes 2>&1') && fail "pacnix apply ran in arch-chroot"
+grep -qx 'pacnix: error: pacnix runs only on the booted system. Boot the installed system, then run pacnix again' <<<"$out" || { echo "$out"; fail "the refusal does not tell to boot"; }
+[[ $before == "$(on live 'sudo find /mnt -xdev -newer /mnt/etc/hostname 2>/dev/null | grep -v "^/mnt/\(var/log\|proc\|sys\|dev\|run\|tmp\)" | sort')" ]] || fail "the refused apply changed the system"
 # pacstrap -K starts a gpg-agent for the new keyring, which keeps /mnt busy.
-on live 'sudo gpgconf --homedir /mnt/etc/pacman.d/gnupg --kill gpg-agent && sudo umount -R /mnt' || fail "umount failed"
-on live 'sudo systemctl poweroff' || true
+on live 'sudo gpgconf --homedir /mnt/etc/pacman.d/gnupg --kill gpg-agent && sudo umount -R /mnt && sudo systemctl poweroff' || true
 while virsh -c qemu:///system domstate pacnix-live 2>/dev/null | grep -q running; do sleep 2; done
-mv "$cache/pacnix-live-blank.qcow2" "$cache/newbox-disk.qcow2"
+mv "$cache/pacnix-live-vdb.qcow2" "$cache/newbox-disk.qcow2"
 "$vm" down live
-step "boot the installed disk"
+
+step "boot, clone the configuration and look at the plan"
 started+=(newbox)
 "$vm" boot newbox "$cache/newbox-disk.qcow2"
-check newbox 'test "$(id -nG)" = "arch wheel" && test "$(getent passwd arch | cut -d: -f7)" = /usr/bin/zsh' "the user, its groups or its shell are wrong"
-check newbox 'test "$(readlink /etc/localtime)" = /usr/share/zoneinfo/Europe/Berlin' "the time zone link is wrong"
-check newbox 'locale -a | grep -qx en_US.utf8' "the locale is not generated"
-check newbox 'systemctl is-active sshd systemd-networkd' "declared units do not run"
-check newbox 'pacman-key --list-keys "pacnix test" >/dev/null' "the key of [pacnix] is not in the keyring"
-check newbox 'pacman -Qi aurutils | grep -qx "Install Reason  : Installed as a dependency for another package"' "aurutils is not a dependency of pacnix"
-refute newbox 'sudo -l -U pacnix | grep -q "may run"' "the builder user has a sudo rule"
-check newbox 'test "$(systemctl is-system-running)" = running' "the system is not healthy"
+on newbox 'sudo install -d -o arch -g arch /etc/pacnix && git clone -q /srv/config.git /etc/pacnix && echo fail >/etc/pacnix/packages/slow/mode' || fail "git clone failed"
+out=$(plan newbox) || { echo "$out"; fail "plan failed"; }
+for l in 'write file /etc/fstab (override the file of package filesystem, keep the original)' 'write file /boot/loader/loader.conf (replace the unmanaged file, keep the original)' \
+	'write file /etc/localtime (replace the unmanaged file, keep the original)' 'change user arch: shell /usr/bin/zsh'; do
+	grep -qxF "$l" <<<"$out" || { echo "$out"; fail "the plan does not show: $l"; }
+done
 step "a build failure with \"timed out\" in its output stops pacnix one time with the reason"
-out=$(pacnix newbox apply 2>&1) && { echo "$out" | tail -40; fail "the upgrade with the failing build succeeded"; }
+out=$(pacnix newbox apply 2>&1) && { echo "$out" | tail -40; fail "the apply with the failing build succeeded"; }
 echo "$out" | tail -8
 grep -q '^pacnix: error: build local package 1/1: slow: aur chroot .* failed with exit status: 255' <<<"$out" || fail "the error does not name the build and its status"
 grep -q '^ *error: the test build timed out while the file mode has the word fail' <<<"$out" || fail "the error does not show the reason of the failure"
 grep -q 'attempt 1 of' <<<"$out" && fail "pacnix tried a build failure again"
-grep -q 'aurutils' <<<"$out" && fail "the upgrade builds aurutils"
-step "the first pacnix apply completes the configuration without a question"
+grep -q 'aurutils' <<<"$out" && fail "the apply builds aurutils"
+step "the first complete pacnix apply adopts the system without a question"
 on newbox 'echo ok >/etc/pacnix/packages/slow/mode'
-out=$(pacnix newbox apply 2>&1) || { echo "$out" | tail -30; fail "the first upgrade failed"; }
+out=$(pacnix newbox apply 2>&1) || { echo "$out" | tail -30; fail "the adoption failed"; }
 for l in 'pacnix: build local package 1/1: slow' 'pacnix: the step continues after 1 min without output: build local package 1/1: slow' '==> colored line' 'progress done'; do
 	grep -qxF "$l" <<<"$out" || fail "the output does not show: $l"
 done
 grep -q 'progress 10%\|not writing modified lock file\|Added input' <<<"$out" && fail "the output shows progress meter redraws or Nix notes"
 grep -q $'\e\|\r' <<<"$out" && fail "the output has escape sequences or carriage returns"
+check newbox 'sudo grep -q "^UUID=" /var/lib/pacnix/originals/etc/fstab && sudo grep -q "timeout 3" /var/lib/pacnix/originals/boot/loader/loader.conf' "the originals are not kept"
+step "reboot"
+"$vm" reboot newbox
+check newbox 'test "$(systemctl is-system-running)" = running' "the system is not healthy after the reboot"
+check newbox 'grep -q "root=LABEL=root" /proc/cmdline && test "$(sudo bootctl status 2>/dev/null | awk "/Current Entry:/ { print \$3 }")" = linux.conf' "the system does not boot the declared entry"
+check newbox 'test "$(id -nG)" = "arch wheel" && test "$(getent passwd arch | cut -d: -f7)" = /usr/bin/zsh' "the user, its groups or its shell are wrong"
+check newbox 'test "$(readlink /etc/localtime)" = /usr/share/zoneinfo/Europe/Berlin' "the time zone link is wrong"
+check newbox 'locale -a | grep -qx en_US.utf8' "the locale is not generated"
+check newbox 'swapon --show=NAME --noheadings | sort | tr "\n" " " | grep -qx "/dev/zram0 /swapfile "' "the swap file or zram is not active"
 check newbox 'pacman -Q slow' "the local package is not installed"
-check newbox 'test "$(stat -c %U ~/.cache/nix)" = arch' "Nix does not evaluate as the owner of the flake"
+check newbox 'test "$(dconf read /org/gnome/desktop/interface/color-scheme)" = "'"'prefer-dark'"'"' "the home configuration is not active"
 refute newbox 'sudo find /home/arch -user root | grep -q .' "a file in the home belongs to root"
 refute newbox 'sudo find /var/lib/pacnix/repo ! -user root | grep -q .' "the builder user owns a file of the local repository"
 check newbox 'sudo gpg --homedir /var/lib/pacnix/gnupg --verify /var/lib/pacnix/repo/pacnix-local.db.sig /var/lib/pacnix/repo/pacnix-local.db' "the local repository is not signed"
-check newbox 'test "$(readlink /etc/resolv.conf)" = /run/systemd/resolve/stub-resolv.conf' "the resolv.conf link is not written"
-check newbox 'test "$(dconf read /org/gnome/desktop/interface/color-scheme)" = "'"'prefer-dark'"'"' "the home configuration is not active"
+check newbox 'pacman -Qi aurutils | grep -qx "Install Reason  : Installed as a dependency for another package"' "aurutils is not a dependency of pacnix"
+refute newbox 'sudo -l -U pacnix | grep -q "may run"' "the builder user has a sudo rule"
 packages_match newbox
 empty_plan newbox
-step "a flake in a dirty Git tree gives no Nix notes"
-out=$(plan newbox) || fail "plan failed in a Git tree"
-grep -q 'warning:\|Added input' <<<"$out" && { echo "$out"; fail "the plan shows Nix notes"; }
 pass

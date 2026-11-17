@@ -14,22 +14,23 @@ pub struct Plan {
     restore: Vec<(String, String)>,
     delete: Vec<String>,
     pacnew: Vec<String>,
-    conflicts: Vec<String>,
+    adopt: Vec<String>,
+    originals: Vec<String>,
     triggers: BTreeMap<String, Trigger>,
     stale: std::collections::BTreeSet<std::path::PathBuf>,
 }
 
 impl Plan {
     pub fn deleted(&self) -> Vec<String> {
-        self.delete.iter().cloned().chain(self.restore.iter().map(|r| r.0.clone())).collect()
+        self.delete.iter().chain(&self.originals).cloned().chain(self.restore.iter().map(|r| r.0.clone())).collect()
     }
 
     pub fn print(&self, l: &mut Vec<String>) {
         l.extend(self.write.iter().map(|(p, why)| format!("write file {p} ({why})")));
         l.extend(self.restore.iter().map(|(p, pkg)| format!("restore file {p} from package {pkg}")));
+        l.extend(self.originals.iter().map(|p| format!("restore the original of file {p}")));
         l.extend(self.delete.iter().map(|p| format!("delete file {p}")));
         l.extend(self.pacnew.iter().map(|p| format!("delete {p}.pacnew (the declared content replaces it)")));
-        l.extend(self.conflicts.iter().map(|p| format!("refuse to replace unmanaged file {p}")));
     }
 }
 
@@ -50,8 +51,18 @@ fn id(name: &str, user: bool) -> Option<u32> {
     }
 }
 
-fn mode(spec: &FileSpec) -> u32 {
-    u32::from_str_radix(&spec.mode, 8).unwrap_or(0o644)
+/// The declared mode. None: the file system gives the mode and the owner, for
+/// example vfat through its mount options.
+fn mode(spec: &FileSpec) -> Option<u32> {
+    spec.mode.as_ref().map(|m| u32::from_str_radix(m, 8).unwrap_or(0o644))
+}
+
+/// The copy of a file that a declared file replaced. Without the declaration,
+/// the copy goes back.
+const ORIGINALS: &str = "/var/lib/pacnix/originals";
+
+fn original(path: &str) -> std::path::PathBuf {
+    Path::new(ORIGINALS).join(path.trim_start_matches('/'))
 }
 
 /// True if the file on disk has the declared content, mode and owner.
@@ -60,11 +71,8 @@ pub fn matches(path: &str, spec: &FileSpec) -> bool {
     if let Some(target) = &spec.target {
         return std::fs::read_link(path).is_ok_and(|t| t == Path::new(target));
     }
-    meta.file_type().is_file()
-        && meta.mode() & 0o7777 == mode(spec)
-        && Some(meta.uid()) == id(&spec.user, true)
-        && Some(meta.gid()) == id(&spec.group, false)
-        && sha256(Path::new(path)) == sha256(Path::new(&spec.source))
+    let owned = mode(spec).is_none_or(|m| meta.mode() & 0o7777 == m && Some(meta.uid()) == id(&spec.user, true) && Some(meta.gid()) == id(&spec.group, false));
+    meta.file_type().is_file() && owned && sha256(Path::new(path)) == sha256(Path::new(&spec.source))
 }
 
 /// Maps paths to the packages that own them.
@@ -81,7 +89,7 @@ pub fn owners(paths: &[&str]) -> BTreeMap<String, String> {
     map
 }
 
-pub fn plan(ctx: &Ctx, g: &Generation, ledger: &[Generation]) -> Result<Plan> {
+pub fn plan(_ctx: &Ctx, g: &Generation, ledger: &[Generation]) -> Result<Plan> {
     let mut plan = Plan::default();
     plan.stale = g.m.files.keys().chain(ledger.iter().flat_map(|l| l.m.files.keys())).map(|p| temporary(p)).filter(|t| t.symlink_metadata().is_ok()).collect();
     // Triggers of the previous generation also run, so that a dropped feature
@@ -96,28 +104,40 @@ pub fn plan(ctx: &Ctx, g: &Generation, ledger: &[Generation]) -> Result<Plan> {
     let dropped: Vec<&String> = managed.iter().copied().filter(|p| !g.m.files.contains_key(*p)).collect();
     ask.extend(dropped.iter().map(|s| s.as_str()));
     let owner = owners(&ask);
+    // The files of the active generation, the kept originals and the files that a
+    // pending generation wrote are pacnix's. A pending generation can stop before
+    // it writes its files, for example at a build failure.
+    let ours = |p: &String| {
+        previous.is_some_and(|f| f.contains_key(p))
+            || original(p).symlink_metadata().is_ok()
+            || ledger.iter().skip(1).any(|l| l.m.files.get(p).is_some_and(|spec| matches(p, spec)))
+    };
     for (path, spec) in &g.m.files {
         if Path::new(&format!("{path}.pacnew")).exists() {
             plan.pacnew.push(path.clone());
         }
-        if matches(path, spec) {
+        // A file that pacnix did not write keeps its original, also when it agrees, for the removal of the declaration.
+        if matches(path, spec) && ours(path) {
             continue;
         }
         let why = if std::fs::symlink_metadata(path).is_err() {
             "create".to_string()
-        } else if managed.contains(path) {
+        } else if ours(path) {
             if previous.and_then(|f| f.get(path)) == Some(spec) { "correct drift" } else { "update" }.to_string()
-        } else if let Some(pkg) = owner.get(path) {
-            format!("override the file of package {pkg}")
-        } else if ctx.opts.overwrite_unmanaged {
-            "replace an unmanaged file".to_string()
         } else {
-            plan.conflicts.push(path.clone());
-            continue;
+            plan.adopt.push(path.clone());
+            match owner.get(path) {
+                Some(pkg) => format!("override the file of package {pkg}, keep the original"),
+                None => "replace the unmanaged file, keep the original".to_string(),
+            }
         };
         plan.write.push((path.clone(), why));
     }
     for path in dropped {
+        if original(path).symlink_metadata().is_ok() {
+            plan.originals.push(path.clone());
+            continue;
+        }
         if std::fs::symlink_metadata(path).is_err() {
             continue;
         }
@@ -130,12 +150,6 @@ pub fn plan(ctx: &Ctx, g: &Generation, ledger: &[Generation]) -> Result<Plan> {
 }
 
 pub fn check(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<()> {
-    if !plan.conflicts.is_empty() {
-        bail!(
-            "these files exist, and no package or generation owns them: {}. Give --overwrite-unmanaged to replace them",
-            plan.conflicts.join(", ")
-        );
-    }
     let mut probed = BTreeSet::new();
     for (path, _) in &plan.write {
         let spec = &g.m.files[path];
@@ -153,23 +167,20 @@ pub fn check(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<()> {
 /// does not exist yet is not tested.
 fn probe(path: &str, spec: &FileSpec) -> Result<()> {
     let Some(dir) = Path::new(path).ancestors().skip(1).find(|d| d.is_dir()) else { return Ok(()) };
-    if spec.target.is_some() {
-        return Ok(());
-    }
+    let Some(want) = mode(spec).filter(|_| spec.target.is_none()) else { return Ok(()) };
     let test = dir.join(".pacnix-probe");
     let f = std::fs::File::create(&test).with_context(|| format!("write {}", test.display()))?;
     let (uid, gid) = (id(&spec.user, true), id(&spec.group, false));
-    let set = std::os::unix::fs::fchown(&f, uid, gid).and_then(|_| f.set_permissions(std::fs::Permissions::from_mode(mode(spec))));
+    let set = std::os::unix::fs::fchown(&f, uid, gid).and_then(|_| f.set_permissions(std::fs::Permissions::from_mode(want)));
     let meta = f.metadata();
     std::fs::remove_file(&test)?;
     let meta = meta?;
-    if set.is_ok() && meta.mode() & 0o7777 == mode(spec) && uid.is_none_or(|u| u == meta.uid()) && gid.is_none_or(|g| g == meta.gid()) {
+    if set.is_ok() && meta.mode() & 0o7777 == want && uid.is_none_or(|u| u == meta.uid()) && gid.is_none_or(|g| g == meta.gid()) {
         return Ok(());
     }
     let (fs, target, options) = mount(dir);
     bail!(
-        "the {fs} file system on {target} cannot keep the mode {} and the owner {}:{} of {path}: a new file gets the mode {:04o} and the owner {}:{} (mount options {options}). Change the mount options in /etc/fstab, or declare the mode and owner that the file system gives",
-        spec.mode,
+        "the {fs} file system on {target} cannot keep the mode {want:04o} and the owner {}:{} of {path}: a new file gets the mode {:04o} and the owner {}:{} (mount options {options}). Change the mount options in /etc/fstab, declare the mode and owner that the file system gives, or declare the mode null",
         spec.user,
         spec.group,
         meta.mode() & 0o7777,
@@ -215,10 +226,12 @@ fn write_temporary(path: &str, spec: &FileSpec) -> Result<()> {
     let data = std::fs::read(&spec.source)?;
     let mut f = std::fs::File::create(&tmp)?;
     f.write_all(&data)?;
-    let uid = id(&spec.user, true).with_context(|| format!("user {} does not exist", spec.user))?;
-    let gid = id(&spec.group, false).with_context(|| format!("group {} does not exist", spec.group))?;
-    std::os::unix::fs::fchown(&f, Some(uid), Some(gid))?;
-    f.set_permissions(std::fs::Permissions::from_mode(mode(spec)))?;
+    if let Some(m) = mode(spec) {
+        let uid = id(&spec.user, true).with_context(|| format!("user {} does not exist", spec.user))?;
+        let gid = id(&spec.group, false).with_context(|| format!("group {} does not exist", spec.group))?;
+        std::os::unix::fs::fchown(&f, Some(uid), Some(gid))?;
+        f.set_permissions(std::fs::Permissions::from_mode(m))?;
+    }
     Ok(())
 }
 
@@ -269,6 +282,12 @@ pub fn apply(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<Vec<String>> {
     for t in &plan.stale {
         std::fs::remove_file(t)?;
     }
+    // The original of an unmanaged file is copied before the declared file replaces it.
+    for path in &plan.adopt {
+        let keep = original(path);
+        std::fs::create_dir_all(keep.parent().unwrap())?;
+        run_cmd(cmd("cp", &["-a", "-T", path]).arg(&keep)).with_context(|| format!("keep the original of {path}"))?;
+    }
     for (path, _) in &plan.write {
         write_temporary(path, &g.m.files[path]).with_context(|| format!("write {path}"))?;
     }
@@ -276,28 +295,22 @@ pub fn apply(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<Vec<String>> {
         unsafe { libc::sync() };
     }
     for (path, _) in &plan.write {
-        match std::fs::rename(temporary(path), path) {
-            // arch-chroot bind-mounts /etc/resolv.conf from the live system.
-            Err(e) if !crate::packages::booted() && e.raw_os_error() == Some(libc::EBUSY) => {
-                let _ = std::fs::remove_file(temporary(path));
-                // The first pacnix apply needs it, for example /etc/resolv.conf for DNS.
-                let how = match &g.m.files[path].target {
-                    Some(t) => format!(", for example: ln -sf {t} /mnt{path}"),
-                    None => String::new(),
-                };
-                crate::report::last(format!("pacnix: {path} is a mount point in this chroot. Write it after you leave the chroot{how}"));
-            }
-            r => {
-                r.with_context(|| format!("write {path}"))?;
-                changed.push(path.clone());
-            }
-        }
+        std::fs::rename(temporary(path), path).with_context(|| format!("write {path}"))?;
+        changed.push(path.clone());
     }
     for path in &plan.pacnew {
         std::fs::remove_file(format!("{path}.pacnew"))?;
     }
     for (path, pkg) in &plan.restore {
         restore(path, pkg).with_context(|| format!("restore {path}"))?;
+        changed.push(path.clone());
+    }
+    for path in &plan.originals {
+        let keep = original(path);
+        run_cmd(cmd("cp", &["-a", "-T"]).arg(&keep).arg(temporary(path))).with_context(|| format!("restore the original of {path}"))?;
+        std::fs::rename(temporary(path), path)?;
+        std::fs::remove_file(&keep)?;
+        prune_dirs(&keep.display().to_string());
         changed.push(path.clone());
     }
     for path in &plan.delete {

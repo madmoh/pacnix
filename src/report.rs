@@ -129,11 +129,8 @@ fn boot_time() -> i64 {
 
 /// The reasons to reboot: the running kernel left the system, the boot images
 /// changed after the boot, or a DKMS module was built after the boot, for a
-/// kernel that does not run or that did not load it. In a chroot there is none.
+/// kernel that does not run or that did not load it.
 fn reboot_reasons() -> Vec<String> {
-    if !crate::packages::booted() {
-        return vec![];
-    }
     let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default().trim().to_string();
     let mut reasons = Vec::new();
     if !Path::new(&format!("/usr/lib/modules/{release}/vmlinuz")).exists() {

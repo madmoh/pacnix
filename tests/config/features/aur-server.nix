@@ -3,7 +3,7 @@
 { config, lib, hosts, ... }:
 let
   cfg = config.features.aur-server;
-  clients = lib.filter (h: h.config.packages.server == cfg.url) (lib.attrValues (removeAttrs hosts [ config.hostName ]));
+  clients = lib.filter (h: h.config.packages.server == cfg.url) (lib.attrValues (removeAttrs hosts [ config.networking.hostName ]));
 in
 {
   options.features.aur-server = {

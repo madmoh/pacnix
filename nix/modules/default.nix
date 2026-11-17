@@ -1,6 +1,6 @@
 { lib, ... }:
 {
-  imports = [ ./packages.nix ./files.nix ./units.nix ./state.nix ./arch.nix ];
+  imports = [ ./packages.nix ./files.nix ./units.nix ./state.nix ./arch.nix ./users.nix ./filesystems.nix ./boot.nix ./system.nix ];
   options = {
     assertions = lib.mkOption {
       type = lib.types.listOf lib.types.unspecified;

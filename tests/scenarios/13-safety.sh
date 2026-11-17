@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Scenario 13: an empty package list, a misspelled package name, a conflicting
-# declaration and the removal of protected packages fail before any change.
+# declaration, the removal of protected packages, a different ID of an existing
+# account and two boot loaders fail before any change.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 apply $h >/dev/null || fail "first apply failed"
@@ -27,6 +28,6 @@ refused '{ packages.aur = [ "htop" ]; packages.repo = [ "htop" ]; }' 'more than 
 refused '{ packages.repo = [ "vim" "gvim" ]; }' 'declared packages conflict: gvim and vim' 'two declared packages that conflict'
 refused '{ packages.versions.htop = "3.0.0-1"; }' 'declare these packages in repo or aur: htop' 'a version of a package that is not declared'
 refused '{ lib, ... }: { features.base.enable = lib.mkForce false; packages.repo = [ "openssh" "sudo" "cloud-init" "rsync" "git" "jq" "grub" ]; units.enable = [ "sshd.service" ]; }' 'protected packages: base' 'removal of base and the kernel'
-on $h 'sudo touch /etc/unmanaged.conf'
-refused '{ files."/etc/unmanaged.conf".text = "x"; }' 'no package or generation owns them' 'replacement of an unmanaged file'
+refused '{ users.users.arch.uid = 1234; }' 'pacnix does not change the ID of an account' 'a different ID of an existing account'
+refused '{ boot.loader.systemd-boot.enable = true; }' 'enable one boot loader' 'two boot loaders'
 pass

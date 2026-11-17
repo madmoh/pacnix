@@ -164,9 +164,15 @@ pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
     let instances = plan.enable.iter().filter(|u| u.contains('@') && !u.contains("@."));
     let started: BTreeSet<&String> = after.difference(before).chain(instances).collect();
     for u in &started {
-        if !u.ends_with(".target") && !u.contains("@.") {
-            run_cmd(cmd("systemctl", &["start", u]))?;
+        if u.ends_with(".target") || u.contains("@.") {
+            continue;
         }
+        // systemd refuses to start a socket while its service runs, for example systemd-journald-audit.socket.
+        if u.ends_with(".socket") && output(cmd("systemctl", &["show", "-P", "Triggers", u]))?.split_whitespace().any(|s| cmd("systemctl", &["is-active", "--quiet", s]).status().is_ok_and(|x| x.success())) {
+            println!("pacnix: unit {u} starts at the next boot, because its service runs");
+            continue;
+        }
+        run_cmd(cmd("systemctl", &["start", u]))?;
     }
     for u in changed_units(changed).iter().filter(|u| !started.contains(u)) {
         println!("pacnix: restart unit {u} if it runs");

@@ -14,8 +14,8 @@
 #   wait <name>           wait for SSH after a reboot
 #   reboot <name>         reboot a VM and wait until SSH answers from the new boot
 #   reset <name>          power a VM off without shutdown, start it and wait for SSH
-#   blank <name> <size>   attach a new empty disk to a VM as /dev/vdb
-#   boot <name> <disk>    start a VM from the disk that an install wrote, without cloud-init
+#   blank <name> <size> [dev] attach a new empty disk to a VM as /dev/vdb or dev
+#   boot <name> <disk>    start a VM with UEFI from the disk that an install wrote, without cloud-init
 # PACNIX_VM_CPUS and PACNIX_VM_MEM (MiB) set the size of a new VM.
 set -euo pipefail
 export LIBVIRT_DEFAULT_URI=qemu:///system
@@ -147,7 +147,7 @@ down)
 	close "$2"
 	virsh destroy "pacnix-$2" >/dev/null 2>&1 || true
 	virsh undefine "pacnix-$2" --nvram >/dev/null 2>&1 || virsh undefine "pacnix-$2" >/dev/null 2>&1 || true
-	rm -f "$cache/pacnix-$2.qcow2" "$cache/pacnix-$2.seed.iso" "$cache/pacnix-$2-blank.qcow2"
+	rm -f "$cache/pacnix-$2.qcow2" "$cache/pacnix-$2.seed.iso" "$cache/pacnix-$2"-vd?.qcow2
 	;;
 ssh)
 	n=$2
@@ -179,15 +179,17 @@ snapshot)
 	"$0" down "$2"
 	;;
 blank)
-	rm -f "$cache/pacnix-$2-blank.qcow2"
-	qemu-img create -qf qcow2 "$cache/pacnix-$2-blank.qcow2" "$3"
-	virsh attach-disk "pacnix-$2" "$cache/pacnix-$2-blank.qcow2" vdb --driver qemu --subdriver qcow2 --targetbus virtio >/dev/null
+	d=$cache/pacnix-$2-${4:-vdb}.qcow2
+	rm -f "$d"
+	qemu-img create -qf qcow2 "$d" "$3"
+	virsh attach-disk "pacnix-$2" "$d" "${4:-vdb}" --driver qemu --subdriver qcow2 --targetbus virtio >/dev/null
 	;;
 boot)
 	"$0" down "$2" 2>/dev/null || true
 	network
 	mv "$3" "$cache/pacnix-$2.qcow2"
 	virt-install --name "pacnix-$2" --osinfo archlinux --import --noautoconsole --vcpus "${PACNIX_VM_CPUS:-2}" --memory "${PACNIX_VM_MEM:-3072}" \
+		--boot uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=no \
 		--disk "$cache/pacnix-$2.qcow2,bus=virtio,discard=unmap" --network network=pacnix,model=virtio --graphics vnc,listen=127.0.0.1 >/dev/null
 	wait_ssh "$2"
 	;;
