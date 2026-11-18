@@ -1,22 +1,44 @@
 use crate::generation::Generation;
 use crate::{cmd, isolated, output, report, run_cmd, run_silent};
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::Path;
 
 /// The preset file of pacnix. It has priority over the vendor presets of the
 /// packages. pacnix runs systemctl preset only for the declared units and the
-/// units of the earlier generation: when a declaration goes, the vendor preset
-/// decides the unit again, and the other units stay as they are.
+/// units whose state it changed: when a declaration goes, the vendor preset
+/// decides such a unit again, and the other units stay as they are.
 pub const PRESET: &str = "/etc/systemd/system-preset/00-pacnix.preset";
+/// The units whose state pacnix changed for a declaration, and the units that it masked.
+const MADE: &str = "/var/lib/pacnix/units.json";
+
+#[derive(Serialize, Deserialize, Default, Clone)]
+struct Made {
+    preset: BTreeSet<String>,
+    mask: BTreeSet<String>,
+}
+
+/// The record of the units that pacnix changed. Without the record, the units
+/// of the earlier generation, which pacnix 0.10 changed.
+fn made(old: &Generation) -> Made {
+    let u = &old.m.units;
+    std::fs::read(MADE).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| Made {
+        preset: u.enable.iter().chain(&u.disable).cloned().collect(),
+        mask: u.mask.iter().cloned().collect(),
+    })
+}
 const SCRATCH: &str = "/run/pacnix/preset-root";
 
 #[derive(Default)]
 pub struct Plan {
     preset: String,
-    /// The units that systemctl preset gets: the declared units and the units of the earlier generation.
+    /// The units that systemctl preset gets: the declared units and the units that pacnix changed.
     touched: Vec<String>,
+    /// The declared units of units.enable and units.disable.
+    listed: BTreeSet<String>,
+    made: Made,
     now: BTreeSet<String>,
     /// The units of units.enable. Only these start at the apply; a unit that a
     /// vendor preset enables starts at the next boot, in its own target.
@@ -130,14 +152,14 @@ fn simulate(g: &Generation, old: &Generation, preset: &str, units: Option<&[Stri
     enabled
 }
 
-/// The declared units and the units of the earlier generation whose unit file
+/// The declared units and the units that pacnix changed, whose unit file
 /// exists and stays: a unit whose declared unit file goes stops with it.
-fn touched(g: &Generation, old: &Generation, states: &BTreeMap<String, String>) -> Vec<String> {
+fn touched(g: &Generation, old: &Generation, made: &Made, states: &BTreeMap<String, String>) -> Vec<String> {
     let gone = |u: &str| [u.to_string(), template(u)].iter().any(|f| {
         let path = format!("/etc/systemd/system/{f}");
         old.m.files.contains_key(&path) && !g.m.files.contains_key(&path)
     });
-    let all = [g, old].into_iter().flat_map(|x| x.m.units.enable.iter().chain(&x.m.units.disable));
+    let all = g.m.units.enable.iter().chain(&g.m.units.disable).chain(&made.preset);
     let mut units: Vec<String> = all.filter(|u| (states.contains_key(*u) || states.contains_key(&template(u))) && !gone(u)).cloned().collect();
     units.sort();
     units.dedup();
@@ -151,7 +173,9 @@ pub fn plan(g: &Generation, old: &Generation, all: bool) -> Result<Plan> {
     let mut plan = Plan { preset: preset_text(g), declared: g.m.units.enable.iter().cloned().collect(), ..Default::default() };
     let states = unit_states(None)?;
     let now = in_state(&states, "enabled");
-    plan.touched = touched(g, old, &states);
+    plan.made = made(old);
+    plan.listed = g.m.units.enable.iter().chain(&g.m.units.disable).cloned().collect();
+    plan.touched = touched(g, old, &plan.made, &states);
     let after = match (all, plan.touched.is_empty()) {
         (true, _) => simulate(g, old, &plan.preset, None)?,
         (false, true) => now.clone(),
@@ -166,7 +190,7 @@ pub fn plan(g: &Generation, old: &Generation, all: bool) -> Result<Plan> {
     let masked = in_state(&states, "masked");
     plan.mask = g.m.units.mask.iter().filter(|u| !masked.contains(*u)).cloned().collect();
     let masks: BTreeSet<&String> = g.m.units.mask.iter().collect();
-    plan.unmask = old.m.units.mask.iter().filter(|u| !masks.contains(u) && masked.contains(*u)).cloned().collect();
+    plan.unmask = plan.made.mask.iter().filter(|u| !masks.contains(u) && masked.contains(*u)).cloned().collect();
     // A command runs again only when the configuration still wants its result.
     let wanted = |c: &String| {
         let words: Vec<&str> = c.split(' ').collect();
@@ -225,6 +249,13 @@ pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
     }
     let states = unit_states(None)?;
     let after = in_state(&states, "enabled");
+    // The record: the units that this apply changed, less the units that went back to their vendor preset.
+    let mut made = plan.made.clone();
+    made.preset.retain(|u| plan.listed.contains(u));
+    made.preset.extend(before.symmetric_difference(&after).cloned());
+    made.mask.extend(plan.mask.iter().cloned());
+    made.mask.retain(|u| !plan.unmask.contains(u));
+    std::fs::write(MADE, serde_json::to_vec(&made)?)?;
     // The list from the plan is older than the package transaction: skip the
     // units that stop_leaving stopped and the units whose package left.
     for u in before.difference(&after).filter(|u| states.contains_key(*u) && !plan.disable.contains(*u)) {

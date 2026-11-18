@@ -104,7 +104,7 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
 
     let units = crate::units::plan(&g, &g, true)?;
     report.extend(units.disable.iter().map(|u| format!("enabled unit not declared and not enabled by a vendor preset: {u}")));
-    report.extend(units.enable.iter().map(|u| format!("declared unit not enabled: {u}")));
+    report.extend(units.enable.iter().filter(|u| g.m.units.enable.contains(*u)).map(|u| format!("declared unit not enabled: {u}")));
 
     home(&g, &origins, &mut report)?;
     crate::report::audit(&mut report);

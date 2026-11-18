@@ -516,7 +516,17 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
     plan.deps.extend(chosen);
     plan.unknown.extend(wrong_providers(g, &repo, &sync)?);
     plan.depends = universe.into_iter().map(|(n, i)| (n, i.depends.iter().map(|d| dep_name(d).to_string()).collect())).collect();
-    plan.remove = inst.keys().filter(|n| !keep.contains(*n) && !plan.orphans.contains(*n)).cloned().collect();
+    // Only the packages that become dependencies and their dependencies can leave.
+    let mut reach: BTreeSet<String> = BTreeSet::new();
+    let mut queue: Vec<String> = plan.deps.clone();
+    while let Some(n) = queue.pop() {
+        for n in inst.contains_key(&n).then(|| vec![n.clone()]).unwrap_or_else(|| providers.get(&n).cloned().unwrap_or_default()) {
+            if reach.insert(n.clone()) {
+                queue.extend(inst[&n].depends.iter().map(|d| dep_name(d).to_string()));
+            }
+        }
+    }
+    plan.remove = inst.keys().filter(|n| reach.contains(*n) && !keep.contains(*n) && !plan.orphans.contains(*n)).cloned().collect();
     plan.remove.sort();
     let kernel = output_any(pacman(&["-Qqo", &format!("/usr/lib/modules/{}/vmlinuz", uname())]))?;
     plan.protected = plan

@@ -16,7 +16,8 @@
 # signatures are refused before any change. A TPM2 key without a PIN on PCRs 0
 # and 7 unlocks with no prompt. Without the TPM2 declaration, the TPM2 key that
 # pacnix enrolled goes, and sbctl stops signing the files that are not boot
-# files of the configuration. A TPM2 key that the user enrolls by hand stays.
+# files of the configuration. A TPM2 key that the user enrolls by hand and a
+# file that the user saves in sbctl stay.
 size=(4 4096 1)
 source "$(dirname "$0")/../lib.sh"
 fresh sblive "$cache/base-20261101.620452.qcow2"
@@ -194,7 +195,10 @@ check sbbox "sudo sbctl sign-all -g" "the pacman hook of sbctl fails"
 reboot_with "Please enter" pass1
 empty_plan sbbox
 
-step "a TPM2 key that the user enrolled stays"
+step "a TPM2 key and a signed file that the user added stay"
 on sbbox 'sudo env PASSWORD=pass1 systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 /dev/vda2 >/dev/null 2>&1' || fail "the enrollment by hand failed"
+on sbbox 'sudo install /usr/lib/systemd/boot/efi/systemd-bootx64.efi /boot/EFI/tools/hand.efi && sudo sbctl sign -s /boot/EFI/tools/hand.efi >/dev/null' || fail "the signature by hand failed"
 empty_plan sbbox
+apply sbbox >/dev/null || fail "apply failed"
+check sbbox 'sudo sbctl list-files --json | jq -e "any(.file == \"/boot/EFI/tools/hand.efi\")"' "the file that the user saved in sbctl is gone"
 pass

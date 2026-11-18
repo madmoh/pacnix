@@ -186,7 +186,7 @@ systemd-boot shows Windows only when the Windows Boot Manager is on the same EFI
 | `.tpm2.enable`, `.tpm2.pcrs`, `.tpm2.pin` | Unlock the device with the TPM2 chip, through [systemd-cryptenroll](https://man.archlinux.org/man/systemd-cryptenroll.1). The default PCR list is `[ 7 ]`, the Secure Boot state. With `pin`, the initramfs asks for a PIN. |
 | `.recoveryKey` | Enroll a recovery key once. |
 
-pacnix creates the keys in `/var/lib/sbctl` when they are missing, and signs systemd-boot, the UKIs and the kernels of the entries. The pacman hook and the mkinitcpio hook of sbctl sign them again after each update. When a file is not a boot file of the configuration, pacnix removes it from the database of sbctl. When the firmware is in Setup Mode, pacnix enrolls the keys. The keys do not go into the configuration.
+pacnix creates the keys in `/var/lib/sbctl` when they are missing, and signs systemd-boot, the UKIs and the kernels of the entries. The pacman hook and the mkinitcpio hook of sbctl sign them again after each update. When a file that pacnix saved in the database of sbctl is no longer a boot file of the configuration, pacnix removes it from the database. The files that you save with `sbctl sign -s` stay. When the firmware is in Setup Mode, pacnix enrolls the keys. The keys do not go into the configuration.
 
 Do these steps in the firmware setup. The summary of the apply tells the next step:
 
@@ -212,7 +212,7 @@ To remove Secure Boot, turn off Secure Boot in the firmware first. pacnix stops 
 
 ### Services
 
-`units.enable`, `units.disable` and `units.mask` contain systemd system units. pacnix writes them as a [preset](https://man.archlinux.org/man/systemd.preset.5) file and runs `systemctl preset` for these units. When a unit goes from the configuration, pacnix runs `systemctl preset` for it again, and its vendor preset decides its state. pacnix does not change the other units. pacnix starts the units of `units.enable` at the apply.
+`units.enable`, `units.disable` and `units.mask` contain systemd system units. pacnix writes them as a [preset](https://man.archlinux.org/man/systemd.preset.5) file and runs `systemctl preset` for these units. When a unit goes from the configuration and pacnix changed its state, pacnix runs `systemctl preset` for it again, and its vendor preset decides its state. pacnix does not change the other units, also not a declared unit that was enabled before its declaration. pacnix starts the units of `units.enable` at the apply.
 
 ### Home
 

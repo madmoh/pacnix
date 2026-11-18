@@ -5,13 +5,14 @@
 # with only that package, and the apply changes nothing else. When the
 # declaration goes, the package that pacnix installed goes, and the other
 # packages and the orphan of before stay. A declared package that the user
-# installed before stays when its declaration goes. A declared unit goes back
-# to its vendor preset when its declaration goes, and the other units stay.
+# installed before stays when its declaration goes. A declared unit that pacnix
+# enabled goes back to its vendor preset when its declaration goes; a declared
+# unit that was enabled before stays enabled; the other units stay.
 source "$(dirname "$0")/../lib.sh"
 fresh $h "$cache/base-20261101.620452.qcow2"
 on $h 'sudo pacman -S --noconfirm tree >/dev/null 2>&1 && sudo pacman -S --noconfirm --asdeps lsof >/dev/null 2>&1 && sudo touch /var/tmp/marker' || fail "the changes by hand failed"
 # The state that the configuration does not declare: packages and their install reason, enabled units, and changed files in /etc and /boot.
-state='pacman -Qqe | grep -vx cowsay; echo ==; pacman -Qqdtt; echo ==; systemctl list-unit-files --state=enabled --no-legend | sort; echo ==; sudo find /etc /boot -newer /var/tmp/marker \( -type f -o -type l \) -not -path "/etc/pacnix*" -not -path /etc/ld.so.cache | sort'
+state='pacman -Qq | grep -vx cowsay; echo ==; pacman -Qqe | grep -vx cowsay; echo ==; pacman -Qqdtt; echo ==; systemctl list-unit-files --state=enabled --no-legend | sort; echo ==; sudo find /etc /boot -newer /var/tmp/marker \( -type f -o -type l \) -not -path "/etc/pacnix*" -not -path /etc/ld.so.cache | sort'
 before=$(on $h "$state")
 # The test harness declares the host name.
 host='{ lib, ... }: { networking.hostName = lib.mkForce null; }'
@@ -57,4 +58,14 @@ out=$(plan $h)
 apply $h --offline >/dev/null || fail "apply failed"
 [[ $before == "$(on $h "$state")" ]] || { diff <(echo "$before") <(on $h "$state"); fail "the unit changes changed what the configuration did not declare"; }
 empty_plan $h
+
+step "a declared unit that was enabled before stays enabled when its declaration goes"
+with 'units.enable = [ "sshd.service" ];'
+empty_plan $h
+apply $h --offline >/dev/null || fail "apply failed"
+scenario $h "$host"
+empty_plan $h
+apply $h --offline >/dev/null || fail "apply failed"
+check $h 'systemctl is-enabled sshd.service' "the unit that was enabled before is not enabled"
+[[ $before == "$(on $h "$state")" ]] || { diff <(echo "$before") <(on $h "$state"); fail "the declaration of an enabled unit changed the system"; }
 pass

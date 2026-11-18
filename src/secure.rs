@@ -3,7 +3,7 @@
 use crate::generation::Generation;
 use crate::{cmd, isolated, output, output_any, report, run_quiet};
 use anyhow::{Result, bail};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -76,12 +76,26 @@ fn unsigned(g: &Generation) -> Vec<(String, String)> {
     boot_files(g).into_iter().filter(|(p, o)| Path::new(p).exists() && done.get(p) != Some(&(o.clone(), true))).collect()
 }
 
-/// The files in the database of sbctl that are not boot files of the
-/// configuration, also files that do not exist, which sbctl list-files does not show.
+/// The files that pacnix saved in the database of sbctl and that are not boot
+/// files of the configuration, also files that do not exist, which sbctl
+/// list-files does not show.
 fn forgotten(g: &Generation) -> Vec<String> {
     let files = boot_files(g);
     let saved: BTreeMap<String, serde_json::Value> = std::fs::read("/var/lib/sbctl/files.json").ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    saved.into_keys().filter(|f| !files.iter().any(|(p, _)| p == f)).collect()
+    let ours = saved_by_pacnix();
+    saved.into_keys().filter(|f| ours.contains(f) && !files.iter().any(|(p, _)| p == f)).collect()
+}
+
+/// The files that pacnix saved in the database of sbctl. A file that the user saved stays.
+const SAVED: &str = "/var/lib/pacnix/sbctl-files.json";
+
+fn saved_by_pacnix() -> BTreeSet<String> {
+    std::fs::read(SAVED).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn save_saved(list: &BTreeSet<String>) -> Result<()> {
+    std::fs::create_dir_all("/var/lib/pacnix")?;
+    Ok(std::fs::write(SAVED, serde_json::to_vec(list)?)?)
 }
 
 fn executable(path: &str) -> bool {
@@ -196,6 +210,10 @@ pub fn plan(g: &Generation, old: &Generation) -> Result<Plan> {
     let earlier = |name: &String| old.m.boot.luks.get(name).is_some_and(|o| o.tpm2.enable);
     let gone = old.m.boot.luks.iter().filter(|(n, o)| o.tpm2.enable && !g.m.boot.luks.contains_key(*n)).map(|(n, o)| (n, o, false));
     for (name, l, declared) in g.m.boot.luks.iter().map(|(n, l)| (n, l, true)).chain(gone) {
+        // A device that the configuration declares only for crypttab is not checked.
+        if !(declared && (l.tpm2.enable || l.recovery_key)) && !earlier(name) {
+            continue;
+        }
         let dev = device(&l.device);
         if !Path::new(&dev).exists() {
             continue;
@@ -292,10 +310,16 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
                 c.args(["--output", &out]);
             }
             run_quiet(c.arg(&path))?;
+            let mut ours = saved_by_pacnix();
+            ours.insert(path);
+            save_saved(&ours)?;
         }
         for path in forgotten(g) {
             report::progress(&format!("stop signing file {path}"));
             run_quiet(sbctl(&["remove-file", &path]))?;
+            let mut ours = saved_by_pacnix();
+            ours.remove(&path);
+            save_saved(&ours)?;
         }
         let left: Vec<String> = unsigned(g).into_iter().map(|(p, _)| p).collect();
         if !left.is_empty() {
@@ -363,7 +387,7 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
 /// Adds the boot files without a signature and the TPM2 keys that are not
 /// current to the report, and returns the Secure Boot state.
 pub fn audit(g: &Generation, report: &mut Vec<String>) -> Result<Option<String>> {
-    if !g.m.boot.secure_boot.enable && g.m.boot.luks.is_empty() {
+    if !g.m.boot.secure_boot.enable && !g.m.boot.luks.values().any(|l| l.tpm2.enable || l.recovery_key) {
         return Ok(None);
     }
     let fw = firmware();
