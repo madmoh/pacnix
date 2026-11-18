@@ -146,9 +146,16 @@ pub fn wrap(text: &str) -> String {
         for (i, word) in line.split_whitespace().enumerate() {
             let len = word.chars().count();
             if i > 0 && col + 1 + len > 80 {
+                // A short word, for example "in", moves to the next line with the word after it.
+                let last = out.rsplit_once(' ').filter(|(head, w)| w.chars().count() <= 3 && !head.rsplit('\n').next().unwrap_or_default().trim().is_empty()).map(|(head, w)| (head.len(), w.to_string()));
+                let carry = last.map(|(at, w)| {
+                    out.truncate(at);
+                    format!("{w} ")
+                });
                 out.push('\n');
                 out.push_str(&" ".repeat(indent + 2));
-                col = indent + 2;
+                out.push_str(carry.as_deref().unwrap_or_default());
+                col = indent + 2 + carry.map_or(0, |c| c.chars().count());
             } else if i > 0 {
                 out.push(' ');
                 col += 1;
@@ -450,6 +457,8 @@ pub fn summary() {
     let reboot: Vec<String> = reboot_reasons().into_iter().filter(|r| !before.contains(r)).collect();
     if !reboot.is_empty() {
         say!("pacnix: reboot to use the changes: {}", reboot.join("; "));
+    } else if before.is_empty() && !changed_packages(offset).is_empty() {
+        say!("pacnix: no reboot is necessary for the kernel, the boot images and the DKMS modules");
     }
     for (pkg, note) in &fresh {
         say!("pacnix: install note of {pkg}:\n  {}", note.trim_end().replace('\n', "\n  "));

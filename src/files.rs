@@ -35,8 +35,8 @@ impl Plan {
             }
         }
         changed.extend(self.restore.iter().map(|(p, pkg)| (p.clone(), format!("change file {p} back to the file of package {pkg}"))));
-        deleted.extend(self.delete.iter().map(|p| (p.clone(), format!("delete file {p} (pacnix created it)"))));
-        deleted.extend(self.pacnew.iter().map(|p| (format!("{p}.pacnew"), format!("delete file {p}.pacnew (the declared content replaces it)"))));
+        let [.., (_, deletes), _] = self.steps();
+        deleted.extend(deletes.into_iter().map(|d| (d.split(' ').next().unwrap_or(&d).to_string(), format!("delete file {d}"))));
         restored.extend(self.originals.iter().map(|p| (p.clone(), format!("restore the original of file {p}"))));
     }
 
@@ -46,7 +46,7 @@ impl Plan {
         [
             ("create", created.into_iter().map(|w| w.0.clone()).collect()),
             ("change", changed.into_iter().chain(&self.restore).map(|w| w.0.clone()).collect()),
-            ("delete", self.delete.iter().cloned().chain(self.pacnew.iter().map(|p| format!("{p}.pacnew"))).collect()),
+            ("delete", self.delete.iter().map(|p| format!("{p} (pacnix created it)")).chain(self.pacnew.iter().map(|p| format!("{p}.pacnew (the declared content replaces it)"))).collect()),
             ("restore the original of", self.originals.clone()),
         ]
     }
@@ -54,8 +54,8 @@ impl Plan {
 
 /// The new value of a file for its plan line: the target of a link, or the
 /// lines of a text file that leave and that come, six at most, compared with
-/// the file at the path.
-pub fn value(path: &Path, new: &Path, link: bool) -> String {
+/// the file at the path. Without `full`, only the number of changed lines.
+pub fn value(path: &Path, new: &Path, link: bool, full: bool) -> String {
     if link {
         return format!("\n  link to {}", new.display());
     }
@@ -64,6 +64,9 @@ pub fn value(path: &Path, new: &Path, link: bool) -> String {
     let (before, after): (BTreeSet<&str>, BTreeSet<&str>) = (old.lines().collect(), text.lines().collect());
     let mut lines: Vec<String> = old.lines().filter(|l| !after.contains(l)).map(|l| format!("- {l}")).collect();
     lines.extend(text.lines().filter(|l| !before.contains(l)).map(|l| format!("+ {l}")));
+    if !full {
+        lines = if lines.is_empty() { vec![] } else { vec![format!("{} differ", crate::count(lines.len(), "line"))] };
+    }
     let more = lines.len().saturating_sub(6);
     lines.truncate(6);
     if more > 0 {
@@ -184,7 +187,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation, ledger: &[Generation]) -> Result<Plan> {
             }
             continue;
         }
-        let value = value(Path::new(path), spec.target.as_deref().map(Path::new).unwrap_or(Path::new(&spec.source)), spec.target.is_some());
+        let value = value(Path::new(path), spec.target.as_deref().map(Path::new).unwrap_or(Path::new(&spec.source)), spec.target.is_some(), true);
         let why = if std::fs::symlink_metadata(path).is_err() {
             format!("create{value}")
         } else if ours(path) {

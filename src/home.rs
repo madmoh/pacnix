@@ -70,17 +70,18 @@ pub fn plan(g: &Generation) -> Result<Plan> {
         for rel in &new {
             let path = home.join(rel);
             let file = Path::new(&out).join("home-files").join(rel);
-            let (p, value) = (path.display().to_string(), crate::files::value(&path, &file, false));
+            let p = path.display().to_string();
+            let value = |full| crate::files::value(&path, &file, false, full);
             let linked = std::fs::read_link(&path).is_ok_and(|t| t.starts_with("/nix/store") && t.to_string_lossy().contains("-home-manager-files/"));
             let kept = backup(&path).symlink_metadata().is_ok();
             if path.symlink_metadata().is_err() {
-                plan.lines[0].push((p.clone(), format!("create home file {p}{value}")));
+                plan.lines[0].push((p.clone(), format!("create home file {p}")));
             } else if !linked {
                 let why = if kept { " (it differs from the declaration)".to_string() } else { format!("\n  keep the original as\n    {}", backup(&path).display()) };
-                plan.lines[1].push((p.clone(), format!("change home file {p}{why}{value}")));
+                plan.lines[1].push((p.clone(), format!("change home file {p}{why}{}", value(kept))));
                 plan.replace.push((p, kept));
             } else if std::fs::canonicalize(&path).ok() != std::fs::canonicalize(&file).ok() {
-                plan.lines[1].push((p.clone(), format!("change home file {p}{value}")));
+                plan.lines[1].push((p.clone(), format!("change home file {p}")));
             }
         }
         for rel in old.map(|o| home_files(&o)).unwrap_or_default() {
@@ -112,9 +113,19 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
     }
     // An activation is an isolated step: a failure does not stop the other users and the apply.
     for (user, out) in &plan.activate {
-        crate::report::progress(&step(user));
         let h = &g.m.home[user];
+        let files: Vec<String> = ["created", "changed", "deleted"]
+            .into_iter()
+            .zip(&plan.lines)
+            .map(|(verb, lines)| (verb, lines.iter().filter(|l| Path::new(&l.0).starts_with(&h.directory)).map(|l| l.0.clone()).collect::<Vec<_>>()))
+            .filter(|(_, items)| !items.is_empty())
+            .map(|(verb, items)| crate::named("home file", verb, &items))
+            .collect();
+        crate::report::progress(&format!("{}{}", step(user), if files.is_empty() { String::new() } else { format!(": {}", files.join("; ")) }));
         crate::isolated(&step(user), || activate(user, &h.directory, out, &out_path(&h.path)?))?;
+    }
+    if !plan.activate.is_empty() {
+        crate::report::last("pacnix: log in again to use the new home configuration".to_string());
     }
     for path in &plan.originals {
         let path = Path::new(path);

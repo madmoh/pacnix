@@ -74,8 +74,8 @@ impl Plan {
         add("install package", &self.install);
         add("install package from the Arch Linux Archive", &self.archive);
         add("remove package", &self.remove);
-        marks.extend(self.explicit.iter().map(|p| (p.clone(), format!("mark {p} as explicitly installed (it is installed as a dependency)"))));
-        marks.extend(self.deps.iter().map(|p| (p.clone(), format!("mark {p} as installed as a dependency"))));
+        marks.extend(self.explicit.iter().map(|p| (p.clone(), format!("{p}: installed as a dependency, set it to explicitly installed"))));
+        marks.extend(self.deps.iter().map(|p| (p.clone(), format!("{p}: set the install reason to installed as a dependency"))));
     }
 }
 

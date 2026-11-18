@@ -233,7 +233,15 @@ fn eval_error(ctx: &Ctx, lines: &[String]) -> String {
             out = out.replacen(&format!("- In `{file}'"), &format!("- In `{file}:{}'", n + 1), 1);
         }
     }
-    format!("the configuration has an error:\n  {}", out.replace('\n', "\n  "))
+    // The suggestion of Nix for an option comes first, before the definitions.
+    let mut lines: Vec<&str> = out.lines().collect();
+    if let Some(i) = lines.iter().position(|l| l.trim_start().starts_with("Did you mean")) {
+        let hint = lines.remove(i).trim_start();
+        let first = lines[0].split_once(" Definition values:").map(|(head, _)| head).unwrap_or(lines[0]);
+        let rest = if first.len() < lines[0].len() { vec!["Definition values:"] } else { vec![] };
+        lines = [vec![first, hint], rest, lines[1..].to_vec()].concat();
+    }
+    format!("the configuration has an error:\n  {}", lines.join("\n").replace('\n', "\n  "))
 }
 
 /// The generation that the profile points to.
@@ -300,7 +308,7 @@ impl Plan {
     fn sections(&self) -> Vec<((&'static str, &'static str), Lines)> {
         let kinds = [
             ("package", ""),
-            ("package", "marked"),
+            ("install reason", "set"),
             ("user", "changed"),
             ("file", "created"),
             ("file", "changed"),
@@ -331,38 +339,49 @@ impl Plan {
 
     /// The upgrade, the changes, the declared items that need no change, and a last line.
     fn print(&self) {
-        say!("{UPGRADE} (pacnix apply --offline does not upgrade)");
+        say!("apply will refresh the sync databases and upgrade the packages (not with --offline)");
         let sections = self.sections();
         let lines: Vec<&(String, String)> = sections.iter().flat_map(|s| &s.1).collect();
         lines.iter().for_each(|l| say!("{}", l.1));
+        self.same();
+        match lines.len() {
+            0 => say!("pacnix: plan done: the system agrees with the configuration, and apply only upgrades the packages. Nothing changed."),
+            n => say!("pacnix: plan done: {}, and apply also upgrades the packages. Nothing changed.", crate::count(n, "change")),
+        }
+    }
+
+    /// The declared items that need no change, with the state of each unit.
+    fn same(&self) {
+        let sections = self.sections();
+        let changed: BTreeSet<&String> = sections.iter().flat_map(|s| &s.1).map(|l| &l.0).collect();
         let m = &self.target.m;
-        let declared: [(&str, Vec<&String>); 4] = [
-            ("package", m.packages.repo.iter().chain(&m.packages.aur).chain(m.packages.local.keys()).collect()),
-            ("user", m.users.users.keys().collect()),
-            ("file", m.files.keys().collect()),
-            ("unit", m.units.enable.iter().chain(&m.units.disable).chain(&m.units.mask).collect()),
+        let units = |list: &Vec<String>, state: &str| list.iter().map(|u| (u.clone(), format!("{u} ({state})"))).collect::<Vec<_>>();
+        let plain = |list: Vec<&String>| list.into_iter().map(|i| (i.clone(), i.clone())).collect::<Vec<_>>();
+        let declared = [
+            ("package", plain(m.packages.repo.iter().chain(&m.packages.aur).chain(m.packages.local.keys()).collect())),
+            ("user", plain(m.users.users.keys().collect())),
+            ("file", plain(m.files.keys().collect())),
+            ("unit", [units(&m.units.enable, "enabled"), units(&m.units.disable, "disabled"), units(&m.units.mask, "masked")].concat()),
         ];
-        let changed: BTreeSet<&String> = lines.iter().map(|l| &l.0).collect();
         let same: Vec<String> = declared
-            .iter()
-            .map(|(noun, items)| (noun, items.iter().filter(|i| !changed.contains(*i)).map(|i| i.as_str()).collect::<Vec<_>>()))
+            .into_iter()
+            .map(|(noun, items)| (noun, items.into_iter().filter(|i| !changed.contains(&i.0)).map(|i| i.1).collect::<Vec<_>>()))
             .filter(|(_, items)| !items.is_empty())
             .map(|(noun, items)| if items.len() > 3 { crate::count(items.len(), noun) } else { items.join(", ") })
             .collect();
         if !same.is_empty() {
             say!("already as declared: {}", same.join(", "));
         }
-        say!("pacnix: plan done: {} and the system upgrade. Nothing changed.", crate::count(lines.len(), "change"));
     }
 }
 
-/// The file and line of the first line in the *.nix files of a local flake that contains the text.
 /// The lines of a kind of change, each with its item: a package, a path, a unit or a name.
 pub type Lines = Vec<(String, String)>;
 
-/// The system upgrade, in plan and in apply.
+/// The system upgrade step of apply.
 pub const UPGRADE: &str = "system upgrade: refresh the sync databases, then upgrade the packages";
 
+/// The file and line of the first line in the *.nix files of a local flake that contains the text.
 pub fn locate(ctx: &Ctx, text: &str) -> Option<String> {
     if ctx.flake.contains(':') {
         return None;
@@ -402,6 +421,9 @@ pub fn apply(ctx: &Ctx, offline: bool) -> Result<()> {
         packages::upgrade(&target, builds)?;
         plan = (built && packages::databases() == state).then_some(before);
     }
+    if offline {
+        say!("pacnix: system upgrade: skipped, because of --offline");
+    }
     activate(ctx, target.clone(), plan)?;
     commit(&target)?;
     trust::news_read(read);
@@ -438,6 +460,7 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
         let _ = std::fs::remove_file(PENDING);
         run_hidden(cmd("nix-store", &["--add-root", PENDING, "--realise", &plan.target.path]))?;
     }
+    plan.same();
     let leaving = units::leaving(&plan.units, &plan.files.deleted());
     let skip = packages::prepare(&plan.target, &plan.packages, builds)?;
     units::stop(&leaving)?;
