@@ -4,6 +4,7 @@ mod generation;
 mod home;
 mod packages;
 mod report;
+mod secure;
 mod trust;
 mod units;
 mod users;

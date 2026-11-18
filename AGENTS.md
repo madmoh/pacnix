@@ -10,8 +10,8 @@
 - One path: pacnix runs only on the booted system and refuses in a chroot. The user installs with the Arch guide, boots, and the first apply takes over. Never assume a fresh or minimal system: a system that was used and configured before must work too, unless something on it breaks or blocks pacnix.
 - Adopt, never refuse, an existing system: keep the original of each unmanaged file that a declaration replaces, show it in the plan, and restore it when the declaration goes.
 - Declare what applications read; claim what they write, for the audit.
-- In scope: users and groups, mounts and swap, kernels and boot loaders, host name, time zone and locale, as first-class options that compile to files, triggers and units. Option names stay stable after a release.
-- Out of scope: partitions, making file systems, firmware and the EFI boot order, secrets and passwords in the config (ask at the run, never store), generating config from a live system.
+- In scope: users and groups, mounts and swap, kernels and boot loaders, Secure Boot keys and signatures, TPM2 disk unlock, host name, time zone and locale, as first-class options that compile to files, triggers and units. Option names stay stable after a release.
+- Out of scope: partitions, making file systems, firmware settings (Secure Boot mode, Setup Mode) and the EFI boot order, secrets and passwords in the config (ask at the run, never store), generating config from a live system.
 - Upstream failures and bad configurations are not pacnix's to fix or block. Refuse only what breaks pacnix's own guarantees, before any change.
 - What is in scope must work completely and correctly.
 - Keep one mechanism per concern. VM evidence overrides any earlier decision.

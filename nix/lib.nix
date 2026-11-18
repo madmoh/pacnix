@@ -61,6 +61,10 @@ let
     };
     triggers = cfg.triggers;
     mounts = cfg.mounts;
+    boot = {
+      secureBoot = { inherit (cfg.boot.loader.systemd-boot.secureBoot) enable dbAdditions files; esp = cfg.boot.loader.efi.efiSysMountPoint; };
+      luks = lib.mapAttrs (name: d: { inherit (d) device recoveryKey; tpm2 = { inherit (d.tpm2) enable pcrs pin; }; }) cfg.boot.initrd.luks.devices;
+    };
     claims = cfg.claims;
     audit.ignore = lib.unique cfg.audit.ignore;
     home = lib.mapAttrs (user: hm: {

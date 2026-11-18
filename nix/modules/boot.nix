@@ -8,7 +8,9 @@
 # mkinitcpio.conf or of the command line, then deletes the images of the other
 # format. A change of the loader configuration installs the loader when it is
 # missing, and the loader registers itself in the EFI boot order. pacnix does
-# not remove a boot loader.
+# not remove a boot loader. With Secure Boot, sbctl signs the boot files, and
+# pacnix enrolls the keys of the host. /etc/crypttab.initramfs gives the LUKS
+# devices of the initramfs, and systemd-cryptenroll enrolls their TPM2 keys.
 { config, lib, ... }:
 let
   inherit (lib) mkOption types;
@@ -18,6 +20,8 @@ let
   grub = cfg.loader.grub;
   loader = sdboot.enable || grub.enable;
   uki = sdboot.enable && sdboot.uki;
+  sb = sdboot.secureBoot;
+  luks = cfg.initrd.luks.devices;
   root = config.fileSystems."/" or null;
   subvol = if root == null then null else lib.findFirst (o: lib.hasPrefix "subvol=" o) null root.options;
   # The kernel needs the root file system. Without a declared one, kernelParams gives it.
@@ -62,12 +66,54 @@ in
         default = false;
         description = "Boot each kernel from a unified kernel image in EFI/Linux/arch-KERNEL.efi on the EFI system partition, with the command line in it, instead of an entry. Needs mkinitcpio.";
       };
+      secureBoot = {
+        enable = mkOption {
+          type = types.bool;
+          default = false;
+          description = "Secure Boot with the keys of this host. pacnix creates the keys with sbctl in /var/lib/sbctl, signs systemd-boot, the UKIs or kernels, the files that the loader entries on the EFI system partition boot and extraFiles, and enrolls the keys when the firmware is in Setup Mode. The pacman hooks of sbctl sign the files again after an update.";
+        };
+        dbAdditions = mkOption {
+          type = types.listOf (types.enum [ "microsoft" "firmware-builtin" "tpm-eventlog" ]);
+          default = [ "microsoft" ];
+          description = "Certificates and checksums that the enrollment adds to the signature database, as db_additions in sbctl.conf(5). Keep microsoft when the firmware or a device has option ROMs that Microsoft signed.";
+        };
+        extraFiles = mkOption {
+          type = types.listOf types.str;
+          default = [ ];
+          example = [ "/efi/vmlinuz-linux" ];
+          description = "More EFI binaries to sign, for example a kernel of a different system.";
+        };
+        files = mkOption {
+          type = types.listOf (types.submodule { options = { path = mkOption { type = types.str; }; output = mkOption { type = types.str; }; required = mkOption { type = types.bool; }; }; });
+          internal = true;
+          readOnly = true;
+          description = "The boot files that pacnix signs, with the signed output.";
+        };
+      };
       settings = mkOption {
         type = types.attrsOf (types.oneOf [ types.str types.int types.bool ]);
         default = { };
         example = { timeout = 3; editor = false; };
         description = "Settings of loader.conf, see loader.conf(5).";
       };
+    };
+    initrd.luks.devices = mkOption {
+      default = { };
+      description = "LUKS2 devices that the initramfs opens, by mapper name, from /etc/crypttab.initramfs. Needs mkinitcpio with the hooks systemd and sd-encrypt. The passphrase of a device stays.";
+      type = types.attrsOf (types.submodule {
+        options = {
+          device = mkOption { type = types.str; example = "UUID=2d518b56-2cf4-47aa-a674-2d93c47542a5"; description = "The device, as the second field of crypttab(5)."; };
+          options = mkOption { type = types.listOf types.str; default = [ ]; example = [ "discard" ]; description = "Options of crypttab(5)."; };
+          tpm2.enable = mkOption {
+            type = types.bool;
+            default = false;
+            description = "Unlock with the TPM2 chip. pacnix enrolls a TPM2 key with systemd-cryptenroll when the firmware checks Secure Boot signatures, and enrolls it again when the values of the PCRs change, for example after new Secure Boot keys. The apply asks for the passphrase.";
+          };
+          tpm2.pcrs = mkOption { type = types.listOf types.int; default = [ 7 ]; description = "The PCRs that the TPM2 key needs, as --tpm2-pcrs of systemd-cryptenroll. PCR 7 has the Secure Boot state and keys."; };
+          tpm2.pin = mkOption { type = types.bool; default = false; description = "Ask for a PIN at boot, as --tpm2-with-pin of systemd-cryptenroll. The apply asks for the new PIN."; };
+          recoveryKey = mkOption { type = types.bool; default = false; description = "Enroll a recovery key with systemd-cryptenroll --recovery-key when the device has none. The summary shows it one time."; };
+        };
+      });
     };
     loader.grub = {
       enable = mkOption { type = types.bool; default = false; description = "GRUB, installed with grub-install."; };
@@ -93,8 +139,25 @@ in
         { assertion = !loader || cfg.kernels != [ ]; message = "boot.kernels: a boot loader needs a kernel."; }
         { assertion = !uki || mkinitcpio; message = "boot.loader.systemd-boot.uki: UKIs need the initramfs provider mkinitcpio."; }
         { assertion = !sdboot.enable || uki || esp == "/boot"; message = "boot.loader.systemd-boot: entries without UKIs need the EFI system partition at /boot."; }
+        { assertion = !sb.enable || sdboot.enable; message = "boot.loader.systemd-boot.secureBoot: Secure Boot needs systemd-boot."; }
+        { assertion = luks == { } || mkinitcpio; message = "boot.initrd.luks.devices: the devices need the initramfs provider mkinitcpio."; }
       ];
+      boot.loader.systemd-boot.secureBoot.files = lib.optionals sb.enable (
+        map (f: { path = f; output = f; required = false; }) ([ "${esp}/EFI/systemd/systemd-bootx64.efi" "${esp}/EFI/BOOT/BOOTX64.EFI" ]
+          ++ map (k: if uki then image k else "/boot/vmlinuz-${k}") cfg.kernels)
+        ++ map (f: { path = f; output = f; required = true; }) sb.extraFiles
+        ++ [ { path = "/usr/lib/systemd/boot/efi/systemd-bootx64.efi"; output = "/usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed"; required = false; } ]);
     }
+    (lib.mkIf sb.enable {
+      packages.repo = [ "sbctl" ];
+      # bootctl installs the signed systemd-boot when the .signed file exists.
+      claims.secure-boot.system = [ "/var/lib/sbctl" "/usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed" ];
+    })
+    (lib.mkIf (luks != { }) {
+      packages.repo = lib.optional (lib.any (d: d.tpm2.enable) (lib.attrValues luks)) "tpm2-tss";
+      files."/etc/crypttab.initramfs".text = lib.concatStrings (lib.mapAttrsToList (name: d:
+        "${name} ${d.device} none ${lib.concatStringsSep "," (lib.optional d.tpm2.enable "tpm2-device=auto" ++ d.options)}\n") luks);
+    })
     (lib.mkIf (params != [ ]) {
       files."/etc/kernel/cmdline".text = "${toString params}\n";
     })
@@ -113,7 +176,7 @@ in
     # With another provider, the trigger deletes the images of mkinitcpio.
     (lib.mkIf loader {
       triggers.initramfs = {
-        paths = presets ++ [ "/etc/mkinitcpio.conf" "/etc/mkinitcpio.conf.d/" ] ++ lib.optional uki "/etc/kernel/cmdline";
+        paths = presets ++ [ "/etc/mkinitcpio.conf" "/etc/mkinitcpio.conf.d/" "/etc/crypttab.initramfs" ] ++ lib.optional uki "/etc/kernel/cmdline";
         # The pacman hook of mkinitcpio also copies each kernel to ALL_kver, for example to an EFI system partition mounted after the kernel installation.
         command = lib.optionalString mkinitcpio "cd / && printf '%s\\n' usr/lib/modules/*/vmlinuz | /usr/share/libalpm/scripts/mkinitcpio install && "
           + "rm -f ${toString (lib.concatMap other cfg.kernels)}";

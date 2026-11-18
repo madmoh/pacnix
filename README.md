@@ -160,7 +160,7 @@ With a declared file system or swap device, pacnix writes all of [/etc/fstab](ht
 | Option | Function |
 |---|---|
 | `boot.kernels` | The kernel packages, for example `[ "linux" "linux-lts" ]`. The boot loader gets an entry for each kernel. |
-| `boot.kernelParams` | The kernel command line, for example `[ "rd.luks.name=UUID=root" "rd.luks.options=tpm2-device=auto,discard" ]`. pacnix adds `root=`, `rw` and the `subvol=` option of `fileSystems."/"` before it, in `/etc/kernel/cmdline` and in the entries and UKIs of systemd-boot. GRUB gets only `kernelParams`, and `grub-mkconfig` adds the root parameters. |
+| `boot.kernelParams` | The kernel command line, for example `[ "quiet" "loglevel=3" ]`. pacnix adds `root=`, `rw` and the `subvol=` option of `fileSystems."/"` before it, in `/etc/kernel/cmdline` and in the entries and UKIs of systemd-boot. GRUB gets only `kernelParams`, and `grub-mkconfig` adds the root parameters. |
 | `boot.loader.efi.efiSysMountPoint` | The mount point of the [EFI system partition](https://wiki.archlinux.org/title/EFI_system_partition), `/boot` or `/efi`. The default is `/boot`. |
 | `boot.loader.systemd-boot.enable`, `.settings` | [systemd-boot](https://wiki.archlinux.org/title/Systemd-boot), with the settings of [loader.conf](https://man.archlinux.org/man/loader.conf.5), for example `{ timeout = 3; }`. The first kernel is the default. Without UKIs, pacnix writes one entry for each kernel, and the EFI system partition must be at `/boot`. |
 | `boot.loader.systemd-boot.uki` | Boot each kernel from a [unified kernel image](https://wiki.archlinux.org/title/Unified_kernel_image) `EFI/Linux/arch-KERNEL.efi` on the EFI system partition, with the command line in the image. Needs mkinitcpio. |
@@ -173,6 +173,31 @@ With [mkinitcpio](https://wiki.archlinux.org/title/Mkinitcpio), pacnix writes th
 pacnix writes files on the EFI system partition only when a vfat file system is mounted at its mount point. When the EFI system partition is at a different mount point, for example `/efi`, mount it at the declared mount point before the apply: `umount /efi` and `mount --mkdir /dev/disk/by-uuid/UUID /boot`. pacnix keeps the entries and images that it did not write. Delete the entries of other systems, for example `/boot/loader/entries/old.conf`, after the first boot of the new configuration.
 
 systemd-boot shows Windows only when the Windows Boot Manager is on the same EFI system partition. For Windows on a different disk, use the boot menu of the firmware. The menu entry `Reboot Into Firmware Interface` of systemd-boot opens the firmware setup.
+
+### Secure Boot and TPM2 unlock
+
+| Option | Function |
+|---|---|
+| `boot.loader.systemd-boot.secureBoot.enable` | [Secure Boot](https://wiki.archlinux.org/title/Unified_Extensible_Firmware_Interface/Secure_Boot) with [sbctl](https://man.archlinux.org/man/sbctl.8) and the keys of this host. Needs systemd-boot. |
+| `.dbAdditions` | The other keys and hashes that `sbctl enroll-keys` adds to the firmware: `microsoft`, `firmware-builtin`, `tpm-eventlog`. The default is `[ "microsoft" ]`, for the option ROMs of graphics cards and for Windows. Without the Microsoft keys, use `[ "tpm-eventlog" ]`: sbctl adds the hashes of the option ROMs that the firmware loaded. When sbctl refuses the keys because of an option ROM, the firmware stays in Setup Mode, and the summary shows the next step. pacnix does not ignore this check of sbctl. |
+| `.extraFiles` | Other EFI binaries to sign, for example the kernel of an entry that pacnix did not write. pacnix also signs the files of the entries in `loader/entries`. |
+| `boot.initrd.luks.devices.<name>.device` | The LUKS device of `/dev/mapper/<name>` in the initramfs, for example `UUID=…`. pacnix writes `/etc/crypttab.initramfs`. Needs mkinitcpio with the `sd-encrypt` hook. |
+| `.options` | Other options of [crypttab](https://man.archlinux.org/man/crypttab.5), for example `[ "discard" ]`. |
+| `.tpm2.enable`, `.tpm2.pcrs`, `.tpm2.pin` | Unlock the device with the TPM2 chip, through [systemd-cryptenroll](https://man.archlinux.org/man/systemd-cryptenroll.1). The default PCR list is `[ 7 ]`, the Secure Boot state. With `pin`, the initramfs asks for a PIN. |
+| `.recoveryKey` | Enroll a recovery key once. |
+
+pacnix creates the keys in `/var/lib/sbctl` when they are missing, and signs systemd-boot, the UKIs and the kernels of the entries. The pacman hook and the mkinitcpio hook of sbctl sign them again after each update. When a file is not a boot file of the configuration, pacnix removes it from the database of sbctl. When the firmware is in Setup Mode, pacnix enrolls the keys. The keys do not go into the configuration.
+
+Do these steps in the firmware setup. The summary of the apply tells the next step:
+
+1. Set Secure Boot to custom mode, and reset it to Setup Mode. This deletes the factory keys.
+2. Run `pacnix apply`. It enrolls the keys of this host.
+3. Reboot, and turn on Secure Boot if it is off.
+4. Run `pacnix apply` in a terminal. It asks for the current passphrase of each device and for a new PIN, then enrolls the TPM2 key and shows the recovery key one time. Write down the recovery key.
+
+The passphrase stays as a second key. When `tpm2.pcrs` contains 7, pacnix enrolls the TPM2 key only when the firmware checks the signatures, with the keys of this host when Secure Boot is declared. When the PCR values change, for example after new keys, the initramfs asks for the passphrase, and the next `pacnix apply` enrolls the TPM2 key again. When the firmware checks the signatures with other keys, pacnix stops before it changes the system. `pacnix audit` shows the Secure Boot state, the boot files without a signature and the state of each TPM2 key.
+
+To remove Secure Boot, turn off Secure Boot in the firmware first. pacnix stops when the declaration goes while the firmware checks the signatures, because the next update then installs a boot file without a signature. When `tpm2.enable` goes, pacnix removes the TPM2 key. pacnix does not remove a recovery key.
 
 ### Host name, time zone and locale
 
@@ -209,8 +234,8 @@ Do not declare the data that an application writes, for example databases, token
 pacnix does not manage these items:
 
 - partitions and file systems: make them with the installation guide, and declare their mounts in `fileSystems`
-- firmware settings, for example Secure Boot, the TPM and the EFI boot order
-- secrets and passwords
+- firmware settings, for example the Secure Boot mode and the EFI boot order
+- secrets and passwords: pacnix asks for them at the run and does not keep them
 
 ## Usage
 

@@ -16,6 +16,7 @@
 #   reset <name>          power a VM off without shutdown, start it and wait for SSH
 #   blank <name> <size> [dev] attach a new empty disk to a VM as /dev/vdb or dev
 #   boot <name> <disk>    start a VM with UEFI from the disk that an install wrote, without cloud-init
+#   answer <name> <prompt> <text>... type the text at each prompt on the serial console of a booted VM, until the last prompt
 # PACNIX_VM_CPUS and PACNIX_VM_MEM (MiB) set the size of a new VM.
 set -euo pipefail
 export LIBVIRT_DEFAULT_URI=qemu:///system
@@ -188,10 +189,37 @@ boot)
 	"$0" down "$2" 2>/dev/null || true
 	network
 	mv "$3" "$cache/pacnix-$2.qcow2"
-	virt-install --name "pacnix-$2" --osinfo archlinux --import --noautoconsole --vcpus "${PACNIX_VM_CPUS:-2}" --memory "${PACNIX_VM_MEM:-3072}" \
-		--boot uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=no \
-		--disk "$cache/pacnix-$2.qcow2,bus=virtio,discard=unmap" --network network=pacnix,model=virtio --graphics vnc,listen=127.0.0.1 >/dev/null
-	wait_ssh "$2"
+	# With PACNIX_VM_SECUREBOOT, the firmware has Secure Boot without keys (Setup
+	# Mode) and the VM has a TPM 2.0. `answer` types at the prompts on the serial console.
+	firmware=(--boot uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=no)
+	[[ -z ${PACNIX_VM_SECUREBOOT:-} ]] || firmware=(--boot uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=yes,firmware.feature1.name=enrolled-keys,firmware.feature1.enabled=no --tpm emulator,model=tpm-crb,version=2.0)
+	virt-install --name "pacnix-$2" --osinfo archlinux --import --noautoconsole --vcpus "${PACNIX_VM_CPUS:-2}" --memory "${PACNIX_VM_MEM:-3072}" "${firmware[@]}" \
+		--disk "$cache/pacnix-$2.qcow2,bus=virtio,discard=unmap" --network network=pacnix,model=virtio --graphics vnc,listen=127.0.0.1 --serial pty >/dev/null
+	[[ -n ${PACNIX_VM_NOWAIT:-} ]] || wait_ssh "$2"
+	;;
+answer)
+	# Types the text of each pair of arguments and Enter at each of its prompts on the serial console, until the last prompt.
+	python3 -I - "pacnix-$2" "${@:3}" <<-'EOF'
+		import os, pty, select, sys, time
+		name, pairs = sys.argv[1], sys.argv[2:]
+		pid, fd = pty.fork()
+		if pid == 0:
+		    os.execvp("virsh", ["virsh", "-c", "qemu:///system", "console", "--force", name])
+		answers = {p.encode(): t.encode() for p, t in zip(pairs[::2], pairs[1::2])}
+		seen, prompt, end = b"", b"", time.time() + 300
+		while prompt != pairs[-2].encode():
+		    shown = [(seen.index(p), p) for p in answers if p in seen]
+		    if shown:
+		        prompt = min(shown)[1]
+		        seen = seen[seen.index(prompt) + len(prompt):]
+		        os.write(fd, answers[prompt] + b"\r")
+		    elif time.time() > end:
+		        sys.exit("the serial console of " + name + " does not show: " + pairs[-2])
+		    elif select.select([fd], [], [], 5)[0]:
+		        seen = (seen + os.read(fd, 4096))[-8192:]
+		time.sleep(1)
+		os.kill(pid, 9)
+	EOF
 	;;
 ip) ip "$2" ;;
 wait)
@@ -215,7 +243,7 @@ reset)
 	wait_ssh "$2"
 	;;
 *)
-	sed -n '2,18p' "$0"
+	sed -n '2,19p' "$0"
 	exit 2
 	;;
 esac

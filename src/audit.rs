@@ -108,6 +108,9 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
 
     home(&g, &origins, &mut report)?;
     crate::report::audit(&mut report);
+    if let Some(state) = crate::secure::audit(&g, &mut report)? {
+        println!("{state}");
+    }
     if report.is_empty() {
         println!("The configuration explains the state of the system.");
     }

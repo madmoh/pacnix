@@ -1,4 +1,4 @@
-use crate::{Ctx, ask, audit, cmd, failed, files, forward, home, packages, report, run_cmd, run_quiet, trust, units, users};
+use crate::{Ctx, ask, audit, cmd, failed, files, forward, home, packages, report, run_cmd, run_quiet, secure, trust, units, users};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -22,6 +22,49 @@ pub struct Manifest {
     pub home: BTreeMap<String, Home>,
     pub users: Accounts,
     pub mounts: BTreeMap<String, String>,
+    pub boot: BootSpec,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct BootSpec {
+    #[serde(rename = "secureBoot")]
+    pub secure_boot: SecureBoot,
+    pub luks: BTreeMap<String, Luks>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct SecureBoot {
+    pub enable: bool,
+    #[serde(rename = "dbAdditions")]
+    pub db_additions: Vec<String>,
+    pub files: Vec<SignedFile>,
+    pub esp: String,
+}
+
+#[derive(Deserialize, Default, Clone)]
+pub struct SignedFile {
+    pub path: String,
+    pub output: String,
+    pub required: bool,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Luks {
+    pub device: String,
+    pub tpm2: Tpm2,
+    #[serde(rename = "recoveryKey")]
+    pub recovery_key: bool,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Tpm2 {
+    pub enable: bool,
+    pub pcrs: Vec<u32>,
+    pub pin: bool,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -213,6 +256,7 @@ pub struct Plan {
     pub files: files::Plan,
     pub units: units::Plan,
     pub home: home::Plan,
+    pub secure: secure::Plan,
     /// The paths of the features that leave, by feature.
     pub data: Vec<(String, Vec<String>)>,
 }
@@ -221,13 +265,16 @@ impl Plan {
     fn compute(ctx: &Ctx, target: Generation) -> Result<Plan> {
         let old = active()?.unwrap_or_default();
         let ledger: Vec<Generation> = std::iter::once(old.clone()).chain(pending()).collect();
+        // Before any change, also before the upgrade: Secure Boot must keep the system bootable.
+        secure::check(&target, &old)?;
         let packages = packages::plan(ctx, &target)?;
         let users = users::plan(&target, &old)?;
         let files = files::plan(ctx, &target, &ledger)?;
         let units = units::plan(&target, &old)?;
         let home = home::plan(&target)?;
+        let secure = secure::plan(&target)?;
         let data = audit::leftovers(&old, &target)?;
-        Ok(Plan { target, packages, users, files, units, home, data })
+        Ok(Plan { target, packages, users, files, units, home, secure, data })
     }
 
     fn print(&self) {
@@ -238,6 +285,7 @@ impl Plan {
         files::print_triggers(&self.files, &mut lines);
         self.units.print(&mut lines);
         self.home.print(&mut lines);
+        self.secure.print(&mut lines);
         lines.extend(self.data.iter().map(|(f, paths)| format!("delete the data of removed feature {f}: {}", paths.join(", "))));
         if lines.is_empty() {
             println!("No changes.");
@@ -270,6 +318,7 @@ pub fn apply(ctx: &Ctx, offline: bool) -> Result<()> {
         let news = news.join().unwrap_or_default();
         ask(&[packages::removals(&before.packages), builds.asks.clone(), news].concat(), &audit::asks(&before.data), &ctx.opts)?;
         users::ask_passwords(&before.users, &ctx.opts)?;
+        secure::ask_secrets(&before.target, &before.secure)?;
         // When the upgrade changes no package and no sync database, the plan stays the same.
         let (state, built) = (packages::databases(), builds.queue.is_empty());
         packages::upgrade(&target, builds)?;
@@ -305,6 +354,7 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
     let builds = packages::fetch_builds(&plan.target, &plan.packages)?;
     let delete = ask(&[packages::removals(&plan.packages), builds.asks.clone()].concat(), &audit::asks(&plan.data), &ctx.opts)?;
     users::ask_passwords(&plan.users, &ctx.opts)?;
+    secure::ask_secrets(&plan.target, &plan.secure)?;
     let current = std::fs::canonicalize(PENDING).ok();
     if current.as_deref() != Some(Path::new(&plan.target.path)) {
         std::fs::create_dir_all(STATE)?;
@@ -318,6 +368,7 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
     users::apply(&plan.users)?;
     let changed = files::apply(ctx, &plan.target, &plan.files)?;
     files::run_triggers(&plan.files, &changed)?;
+    secure::apply(&plan.target, &plan.secure)?;
     units::apply(&plan.units, &changed)?;
     home::apply(&plan.target, &plan.home)?;
     keep_or_delete(&plan.target, &plan.data, delete)?;
