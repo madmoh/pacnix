@@ -18,17 +18,14 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
-/// Declarative, reconciling management of an Arch Linux host from a Nix flake.
-///
-/// The flake output pacnixConfigurations.<host> comes from pacnix.lib.pacnixSystem.
-/// pacman, aurutils and systemd do all changes to the system.
+/// Make an Arch Linux system agree with its configuration in a Nix flake.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
-    /// Flake that contains the configuration
-    #[arg(long, global = true, default_value = "/etc/pacnix")]
+    /// The flake [default: /etc/pacnix]
+    #[arg(long, global = true, default_value = "/etc/pacnix", hide_default_value = true)]
     flake: String,
-    /// Host name in pacnixConfigurations (default: the system host name)
+    /// The host in the flake [default: /etc/hostname]
     #[arg(long, global = true)]
     host: Option<String>,
     #[command(subcommand)]
@@ -37,24 +34,36 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Verb {
-    /// Build the generation and show each change to the system. Change nothing.
+    /// Show each change that apply makes. Change nothing
     Plan,
-    /// Upgrade with pacman -Syu, rebuild changed AUR packages, then do the plan.
+    /// Upgrade the system, then make it agree with the configuration
     Apply(ApplyOpts),
-    /// Apply the previous generation.
+    /// Apply the previous generation
     Rollback(Opts),
-    /// Show state that no declaration explains. Change nothing.
+    /// Show what the configuration does not explain. Change nothing
     Audit,
-    /// Remove pacnix, Nix and their data. The declared files, units and packages stay.
+    /// Remove pacnix and Nix. The declared files, units and packages stay
     Uninstall(Opts),
+}
+
+impl Verb {
+    fn name(&self) -> &'static str {
+        match self {
+            Verb::Plan => "plan",
+            Verb::Apply(_) => "apply",
+            Verb::Rollback(_) => "rollback",
+            Verb::Audit => "audit",
+            Verb::Uninstall(_) => "uninstall",
+        }
+    }
 }
 
 #[derive(Args, Clone, Default)]
 pub struct Opts {
-    /// Accept package removals, new maintainers or AUR dependencies of AUR packages, the Arch Linux news and the deletion of the data of removed features without a question
+    /// Accept the items of the question
     #[arg(long, short)]
     pub yes: bool,
-    /// Permit removal of base, pacman, nix, pacnix and the booted kernel
+    /// Permit the removal of protected packages
     #[arg(long)]
     pub allow_protected_removal: bool,
 }
@@ -63,7 +72,7 @@ pub struct Opts {
 struct ApplyOpts {
     #[command(flatten)]
     opts: Opts,
-    /// Keep the sync databases and the AUR packages as they are: no pacman -Syu and no AUR rebuilds, for a change that needs no download
+    /// No pacman -Syu and no AUR builds
     #[arg(long)]
     offline: bool,
 }
@@ -74,19 +83,23 @@ pub struct Ctx {
     pub opts: Opts,
 }
 
+/// Each run ends with one line: the result, the changes and the exit status.
+/// As with switch-to-configuration of NixOS, the exit status 4 tells that the
+/// change is done but some steps failed.
 fn main() {
-    if let Err(e) = run() {
-        eprintln!("pacnix: error: {e:#}");
-        std::process::exit(1);
+    let cli = Cli::parse();
+    let verb = cli.verb.name();
+    report::signals();
+    let result = run(cli);
+    if let Err(e) = &result {
+        if !report::interrupted() {
+            eprintln!("pacnix: error: {e:#}");
+        }
     }
-    // As switch-to-configuration of NixOS: the change is done, but some steps failed.
-    if report::failed() {
-        std::process::exit(4);
-    }
+    std::process::exit(report::close(verb, result.is_ok()));
 }
 
-fn run() -> Result<()> {
-    let cli = Cli::parse();
+fn run(cli: Cli) -> Result<()> {
     // Like paru, pacnix runs as the user and elevates one time, before any
     // change, so that a long build cannot outlast the sudo timestamp.
     if unsafe { libc::geteuid() } != 0 {
@@ -94,6 +107,8 @@ fn run() -> Result<()> {
         let e = Command::new("sudo").arg("--").arg(exe).args(std::env::args_os().skip(1)).exec();
         return Err(e).context("run pacnix with sudo");
     }
+    // pacnix uses the Nix store directly as root, without the nix-daemon.
+    unsafe { std::env::set_var("NIX_REMOTE", "local") };
     let host = match cli.host {
         Some(h) => h,
         None => std::fs::read_to_string("/etc/hostname")
@@ -196,6 +211,7 @@ fn resilient(f: impl Fn() -> Result<()>) -> Result<()> {
         report::reset();
         match f() {
             Ok(()) => return Ok(report::summary()),
+            Err(e) if report::interrupted() => return Err(e),
             Err(e) => match cause(&e) {
                 Cause::Network(line) => {
                     report::progress(&format!("attempt {} of {} failed in the network: {line}. Next attempt in {pause} s, with one download at a time", attempt + 1, PAUSES.len() + 1));
@@ -226,6 +242,7 @@ pub fn isolated(step: &str, f: impl FnOnce() -> Result<()>) -> Result<bool> {
         Err(e) => e,
     };
     match cause(&e) {
+        _ if report::interrupted() => Err(e),
         // The next attempt can find the step done, for example a written file without its trigger.
         Cause::Stale => Err(report::remember(step, e)),
         Cause::Network(_) if !FINAL.load(std::sync::atomic::Ordering::Relaxed) => Err(report::remember(step, e)),
@@ -306,6 +323,11 @@ impl std::fmt::Display for Failed {
 
 impl std::error::Error for Failed {}
 
+/// An error with its message and the output of the command that failed, for the retry policy.
+pub fn failed_with(message: String, lines: &[String]) -> anyhow::Error {
+    Failed { message, lines: lines.to_vec() }.into()
+}
+
 /// The error of a failed command, with the last lines of its output.
 pub fn failed(cmd: &Command, status: ExitStatus, lines: &[String]) -> anyhow::Error {
     let tail: Vec<&str> = lines.iter().rev().take(6).rev().map(|l| l.as_str()).collect();
@@ -326,10 +348,22 @@ pub fn run_quiet(mut cmd: impl BorrowMut<Command>) -> Result<()> {
     execute(cmd.borrow_mut(), false)
 }
 
+/// Runs a command without output and fails on a nonzero exit status with the
+/// last lines of its output.
+pub fn run_hidden(mut cmd: impl BorrowMut<Command>) -> Result<()> {
+    let cmd = cmd.borrow_mut();
+    let (status, lines) = forward(cmd, 20, true, |_| false)?;
+    if !status.success() {
+        return Err(failed(cmd, status, &lines));
+    }
+    Ok(())
+}
+
 /// Runs a command without output and fails on a nonzero exit status.
 pub fn run_silent(mut cmd: impl BorrowMut<Command>) -> Result<()> {
     let cmd = cmd.borrow_mut();
     let status = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status().with_context(|| format!("run {}", describe(cmd)))?;
+    report::check()?;
     if !status.success() {
         return Err(failed(cmd, status, &[]));
     }
@@ -352,8 +386,9 @@ fn execute(cmd: &mut Command, stdout: bool) -> Result<()> {
 /// shows a line with control characters as a blob. When the command writes no
 /// line for 60 s, pacnix writes one, with the last redraw of a progress meter,
 /// for example of a large download. Without `stdout`, the standard output of
-/// the command is dropped. Lines that `show` refuses are dropped too.
-/// Returns the exit status and the last `keep` lines.
+/// the command is dropped. Lines that `show` refuses are not shown, but they
+/// are kept for the error and the retry policy. Returns the exit status and
+/// the last `keep` lines.
 pub fn forward(cmd: &mut Command, keep: usize, stdout: bool, mut show: impl FnMut(&str) -> bool) -> Result<(ExitStatus, Vec<String>)> {
     let mut fds = [0; 2];
     if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
@@ -369,25 +404,30 @@ pub fn forward(cmd: &mut Command, keep: usize, stdout: bool, mut show: impl FnMu
     let mut emit = |line: &mut Vec<u8>| {
         let text = strip_escapes(line);
         line.clear();
-        if !text.is_empty() && show(&text) {
-            println!("{text}");
-            if lines.len() == keep {
-                lines.pop_front();
-            }
-            lines.push_back(text);
-            return true;
+        if text.is_empty() {
+            return false;
         }
-        false
+        let shown = show(&text);
+        if shown {
+            println!("{text}");
+        }
+        if lines.len() == keep {
+            lines.pop_front();
+        }
+        lines.push_back(text);
+        shown
     };
     let (start, mut quiet, mut buf) = (Instant::now(), Instant::now(), [0u8; 8192]);
     loop {
         let mut fd = libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-        let ready = unsafe { libc::poll(&mut fd, 1, 1000) } != 0;
+        let ready = unsafe { libc::poll(&mut fd, 1, 1000) } > 0;
         // A daemon that the command started can keep the pipe open.
         if !ready && child.try_wait()?.is_some() {
             break;
         }
-        if quiet.elapsed() >= Duration::from_secs(60) {
+        if report::meter() {
+            quiet = Instant::now();
+        } else if quiet.elapsed() >= Duration::from_secs(60) {
             report::heartbeat(&describe(cmd), start.elapsed().as_secs() / 60, &strip_escapes(&line));
             quiet = Instant::now();
         }
@@ -414,7 +454,9 @@ pub fn forward(cmd: &mut Command, keep: usize, stdout: bool, mut show: impl FnMu
         }
     }
     emit(&mut line);
-    Ok((child.wait()?, lines.into()))
+    let status = child.wait()?;
+    report::check()?;
+    Ok((status, lines.into()))
 }
 
 /// Removes ANSI escape sequences and other control characters except tabs.
@@ -446,6 +488,7 @@ fn strip_escapes(line: &[u8]) -> String {
 pub fn output(mut cmd: impl BorrowMut<Command>) -> Result<String> {
     let cmd = cmd.borrow_mut();
     let out = cmd.stderr(Stdio::inherit()).output().with_context(|| format!("run {}", describe(cmd)))?;
+    report::check()?;
     if !out.status.success() {
         return Err(failed(cmd, out.status, &[]));
     }
@@ -457,6 +500,14 @@ pub fn output_any(mut cmd: impl BorrowMut<Command>) -> Result<String> {
     let cmd = cmd.borrow_mut();
     let out = cmd.stderr(Stdio::null()).output().with_context(|| format!("run {}", describe(cmd)))?;
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The count and the noun, for example "1 package" and "3 packages".
+pub fn count(n: usize, noun: &str) -> String {
+    match n {
+        1 => format!("1 {noun}"),
+        _ => format!("{n} {noun}s"),
+    }
 }
 
 pub fn cmd(program: &str, args: &[&str]) -> Command {

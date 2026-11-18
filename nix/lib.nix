@@ -22,14 +22,40 @@ let
         programs.man.enable = lib.mkDefault false;
         manual.manpages.enable = lib.mkDefault false;
         xdg.mime.enable = lib.mkDefault false;
+        # Root links home.path to /etc/profiles/per-user/USER, as NixOS does, and
+        # writes the profile and the GC roots: the activation needs no write to
+        # the Nix store and no nix-daemon.
+        submoduleSupport.enable = true;
+        submoduleSupport.externalPackageInstall = true;
+        home.activationGenerateGcRoot = false;
       }
+      # pacman installs the software. An enabled program or service gets no
+      # package from Nix: null when its package option permits it, else a
+      # package that only links to the program of pacman in /usr/bin.
+      ({ config, options, ... }: {
+        config = lib.genAttrs [ "programs" "services" ] (kind: lib.mapAttrs (name: o: {
+          package = lib.mkIf config.${kind}.${name}.enable (lib.mkDefault (if o.package.type.check null then null else host o.package.default));
+        }) (lib.filterAttrs (_: o: visible o && (o.package.type.check null || o.package ? default)) options.${kind}));
+      })
     ];
   }) cfg.home.users;
   # Home Manager always adds hm-session-vars.sh, a generated shell file.
-  homePackages = hm: lib.filter (p: lib.getName p != "hm-session-vars.sh") hm.config.home.packages;
+  homePackages = hm: lib.filter (p: lib.getName p != "hm-session-vars.sh" && !(p.pacnixHost or false)) hm.config.home.packages;
+  # A package with only a link to the program of the same name that pacman installs.
+  host = p: let main = p.meta.mainProgram or (lib.getName p); in pkgs.runCommandLocal "pacman-${main}" {
+    # Modules read the version, for example to choose the shell integration.
+    version = p.version or "";
+    meta.mainProgram = main;
+    passthru.pacnixHost = true;
+  } "mkdir -p $out/bin && ln -s /usr/bin/${main} $out/bin/${main}";
+  # The enabled programs and services whose package option puts a package into home.packages.
+  packageOptions = hm: lib.concatLists (map (kind: lib.mapAttrsToList (name: _: "${kind}.${name}")
+    (lib.filterAttrs (name: o: visible o && hm.config.${kind}.${name}.enable && lib.elem hm.config.${kind}.${name}.package (homePackages hm)) hm.options.${kind})) [ "programs" "services" ]);
+  # A program or service with an enable and a package option that are not removed or renamed.
+  visible = o: lib.isAttrs o && !lib.isOption o && lib.all (n: lib.isOption (o.${n} or null) && o.${n}.visible or true != false) [ "enable" "package" ];
   failed = map (a: a.message) (lib.filter (a: !a.assertion) (cfg.assertions ++ lib.concatLists (lib.mapAttrsToList (user: hm: [{
     assertion = homePackages hm == [ ];
-    message = "home.users.${user}: home.packages must stay empty, install software with packages.repo or packages.aur. Set the package option of each enabled program to null. Found: ${toString (map lib.getName (homePackages hm))}";
+    message = "home.users.${user}: Home Manager installs these packages from Nix: ${toString (map lib.getName (homePackages hm))}. pacnix installs software only with pacman. Remove them from home.packages${lib.optionalString (packageOptions hm != [ ]) " and remove ${lib.concatStringsSep ", " (packageOptions hm)}"}, and declare them in packages.repo or packages.aur.";
   }]) homes)));
   storeName = path: lib.strings.sanitizeDerivationName (baseNameOf path);
   manifest = {
@@ -70,12 +96,13 @@ let
     home = lib.mapAttrs (user: hm: {
       directory = hm.config.home.homeDirectory;
       drv = builtins.unsafeDiscardStringContext hm.activationPackage.drvPath;
+      path = builtins.unsafeDiscardStringContext hm.config.home.path.drvPath;
     }) homes;
   };
 in
 eval // {
   inherit homes;
   generation =
-    if failed != [ ] then throw "pacnix: failed assertions:\n- ${lib.concatStringsSep "\n- " failed}"
+    if failed != [ ] then throw (lib.concatStringsSep "\n" failed)
     else builtins.toFile "pacnix-generation.json" (builtins.toJSON manifest);
 }

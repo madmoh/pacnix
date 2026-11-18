@@ -22,7 +22,7 @@
   claims.arch.home = [ ".bash_logout" ".bash_profile" ".bashrc" ".bash_history" ];
   claims.pacnix.system = [
     "/nix" "/var/lib/pacnix" "/var/lib/aurbuild" "/var/lib/pacman/sync/pacnix-local.*"
-    "/etc/systemd/system-preset" "/root/.cache/nix" "/root/.nix-defexpr"
+    "/etc/systemd/system-preset" "/etc/profiles/per-user" "/root/.cache/nix" "/root/.nix-defexpr"
   ];
   claims.pacnix.home = [ ".cache/nix" ".local/state/home-manager" ".local/state/nix" ".nix-defexpr" ".nix-profile" ];
 }

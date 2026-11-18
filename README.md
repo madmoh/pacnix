@@ -21,19 +21,48 @@ For more information, see [Unofficial user repositories](https://wiki.archlinux.
 
 pacnix runs on a booted system, because systemd makes many of its changes. In a chroot, for example `arch-chroot`, pacnix stops before it changes the system. Thus install Arch Linux with the [installation guide](https://wiki.archlinux.org/title/Installation_guide), with a boot loader, a user that can use `sudo`, and a network connection. The steps that you declare later, for example the time zone, the locale and the host name, can stay at their defaults. pacnix also takes control of a system that you used and configured before.
 
-Boot the system, log in, and add `[pacnix]` as the previous section shows. Then install the package and get the configuration, for example from a Git repository:
+Boot the system, log in, add `[pacnix]` as the previous section shows, and install the package:
 
 ```sh
 sudo pacman -Syu pacnix
-sudo install -d -o $USER /etc/pacnix
-git clone https://github.com/alice/config /etc/pacnix
+```
+
+pacnix uses the Nix store as root. It does not need the nix-daemon, and it does not change the nix-daemon units.
+
+## First configuration
+
+These commands make a configuration in `/etc/pacnix` for this host. It installs Git, and it gives your user a Git identity and a shell alias:
+
+```sh
+sudo install -d -o "$USER" /etc/pacnix
+cat >/etc/pacnix/flake.nix <<EOF
+{
+  inputs.pacnix.url = "path:/usr/share/pacnix";
+  outputs = { pacnix, ... }: {
+    pacnixConfigurations.$(cat /etc/hostname) = pacnix.lib.pacnixSystem {
+      modules = [ ./host.nix ];
+    };
+  };
+}
+EOF
+cat >/etc/pacnix/host.nix <<EOF
+{
+  packages.repo = [ "git" ];
+  home.users.$USER = {
+    programs.git.enable = true;
+    programs.git.settings.user = { name = "Your Name"; email = "you@example.org"; };
+    programs.bash.enable = true;
+    programs.bash.shellAliases.ll = "ls -l";
+  };
+}
+EOF
 pacnix plan
 pacnix apply
 ```
 
-Run `pacnix plan` and change the configuration until the plan shows only the changes that you want. When a declared file replaces a file that pacnix did not write, also a file of a package, pacnix keeps the original file in `/var/lib/pacnix/originals`, and the plan shows `keep the original`. When you remove the declaration, pacnix puts the original file back. A declared user that exists keeps its password and its home directory. The configuration must declare `/etc/pacman.conf` with the section `[pacnix]`.
+`pacnix plan` shows each change and changes nothing. Change the configuration until the plan shows only the changes that you want, then run `pacnix apply`. Keep the configuration in a Git repository, for example to use it on a different host. When a declared file replaces a file that pacnix did not write, also a file of a package, pacnix keeps the original file in `/var/lib/pacnix/originals`, and the plan shows `keep the original`. A declared file that has the declared content already is no change. When you remove the declaration, pacnix puts the original file back. A declared user that exists keeps its password and its home directory. If you declare `/etc/pacman.conf`, keep the section `[pacnix]` in it.
 
-The first apply builds and installs the AUR and local packages, and activates the home configurations. The builds can take a long time. When a step gives no output for 60 s, pacnix writes a line that tells that the step continues.
+The first apply builds and installs the AUR and local packages, and activates the home configurations. The builds can take a long time. When a step gives no output for 60 s, pacnix writes a line that tells that the step continues. A download shows the packages and MiB that arrived every 30 s, and tells when no data arrived for a minute.
 
 ## Configuration
 
@@ -212,11 +241,13 @@ To remove Secure Boot, turn off Secure Boot in the firmware first. pacnix stops 
 
 ### Services
 
-`units.enable`, `units.disable` and `units.mask` contain systemd system units. pacnix writes them as a [preset](https://man.archlinux.org/man/systemd.preset.5) file and runs `systemctl preset` for these units. When a unit goes from the configuration and pacnix changed its state, pacnix runs `systemctl preset` for it again, and its vendor preset decides its state. pacnix does not change the other units, also not a declared unit that was enabled before its declaration. pacnix starts the units of `units.enable` at the apply.
+`units.enable`, `units.disable` and `units.mask` contain systemd system units. pacnix writes them as a [preset](https://man.archlinux.org/man/systemd.preset.5) file and runs `systemctl preset` for these units. When a unit goes from the configuration and pacnix changed its state, pacnix runs `systemctl preset` for it again, and its vendor preset decides its state. pacnix does not change the other units, also not a declared unit that was enabled before its declaration. pacnix starts a unit of `units.enable` when it enables the unit, and stops a unit when it disables the unit. pacnix does not start a unit that is enabled already, for example a unit that you stopped. Declare each unit that you need in `units.enable`, for example the display manager: pacnix does not enable the units of a new package through their vendor preset.
 
 ### Home
 
-`home.users.<name>` contains a [Home Manager](https://nix-community.github.io/home-manager/) module. Use it for dotfiles, dconf settings and user units. pacnix activates it after the system step. Install software with `packages`, not with `home.packages`.
+`home.users.<name>` contains a [Home Manager](https://nix-community.github.io/home-manager/) module. Use it for dotfiles, dconf settings and user units. pacnix activates it after the system step. Root builds the home configuration and writes its profile and its GC roots, and the activation runs as the user and only reads the Nix store. Thus the nix-daemon is not necessary.
+
+Install software with `packages`, not with `home.packages`. An enabled program, for example `programs.git` or `programs.starship`, gets no package from Nix: pacnix sets its `package` option to `null`, or, when the option does not permit `null`, to a package that only links to the program of the same name in `/usr/bin`. Declare the program in `packages.repo`, as the first configuration does for Git.
 
 When a home file of the configuration exists and Home Manager did not make it, pacnix keeps it as `FILE.pacnix-hm-backup`, and the plan shows it. When the declaration of the file goes, the original comes back. When an application replaces a home file with its own file, pacnix replaces that file at the next change of the home configuration and keeps the first original. Declare a file that an application writes, for example `~/.config/mimeapps.list`, in `/etc/xdg` or not at all.
 
@@ -239,19 +270,30 @@ pacnix does not manage these items:
 
 ## Usage
 
-Run pacnix as your user. Before it changes the system, pacnix starts itself again with `sudo`, which asks for your password one time. pacnix evaluates the configuration as the owner of the flake directory, builds packages as the user `pacnix`, and activates each home configuration as its user. Thus no file in a home directory becomes the property of root.
+Run pacnix as your user. pacnix starts itself again with `sudo`, which asks for your password one time. pacnix evaluates the configuration as root, builds packages as the user `pacnix`, and activates each home configuration as its user. Thus no file in a home directory becomes the property of root. `pacnix --help` and `pacnix COMMAND --help` show the commands and options.
 
 | Command | Function |
 |---|---|
 | `pacnix plan` | Shows each change that `apply` will do. It does not change the system. |
-| `pacnix apply` | Upgrades the system, then makes it agree with the configuration. It also shows the [Arch Linux news](https://archlinux.org/news/) since the last upgrade. With `--offline`, it does not upgrade. |
+| `pacnix apply` | Upgrades the system, then makes it agree with the configuration. It also shows the Arch Linux news since the last upgrade. With `--offline`, it does not upgrade. |
 | `pacnix rollback` | Applies the previous generation. Package versions do not go back. |
 | `pacnix uninstall` | Removes pacnix, aurutils and Nix with pacman, and deletes the data, users and groups that they made. The declared files, units and packages stay. The Home Manager files become copies outside the Nix store. |
-| `pacnix audit` | Shows the state that the configuration does not explain, for example files without an owner, changed package files, `.pacnew` files, packages and units that are not declared, and paths in home directories. It also shows if a reboot is necessary and the install notes of the last change. |
+| `pacnix audit` | Shows the state that the configuration does not explain: files without an owner, changed package files, `.pacnew` files, explicitly installed packages that are not declared, enabled units that are not declared and that no vendor preset enables, and paths in home directories that no claim explains. It also shows if a reboot is necessary and the install notes of the last change. For each kind of item, a line tells what to do. |
 
 `apply` and `rollback` ask one question at most, before they change the system, and only for items that the configuration does not show: package removals, new maintainers or new AUR dependencies of AUR packages, the Arch Linux news and the data of removed features. `--yes` accepts the items. Without a terminal, pacnix stops if there is a question and you do not give `--yes`.
 
-At the end, `apply` and `rollback` show the items that you must know: if a reboot is necessary (the kernel that runs is not installed, a boot image changed, or a DKMS module was built for a kernel that does not run), new or changed install notes of packages, and new `.pacnew` files.
+`plan` and `apply` show each step when it starts. `apply` does not show the plan again. pacnix answers no question of pacman, and the output of pacman shows only its errors and warnings. At the end, `apply` and `rollback` show the items that you must know: if this run made a reboot necessary (the kernel that runs is not installed, a boot image changed, or a DKMS module was built for a kernel that does not run), new or changed install notes of packages, and new `.pacnew` files. The last line shows the result, the changes and the exit status:
+
+| Exit status | Result |
+|---|---|
+| 0 | The system agrees with the configuration. |
+| 1 | pacnix stopped, for example at an error in the configuration or at a refused plan. The last line tells if a change was done before the stop. |
+| 4 | The apply is done, but some steps failed. The next apply does them again. |
+| 130 | You pressed Ctrl-C. Before the first change, pacnix stops at once. After it, pacnix stops after the current step, and the last line names that step. The next apply does the rest. A second Ctrl-C stops pacnix at once. |
+
+An error in the configuration shows the message of Nix one time, with the file in the flake and its line.
+
+When the [Arch Linux news](https://archlinux.org/news/) are not available, `apply` continues without them. The next apply that gets them shows the news since the last read.
 
 When a download fails because of the network, for example no connection, a DNS timeout or a mirror that stops, pacnix tries again after 10 s, 30 s and 60 s, with one download at a time. Your `ParallelDownloads` setting in `/etc/pacman.conf` does not change. The next attempt uses the packages that are already in the pacman cache and in the local repository, and the downloaded sources of a local package stay until it builds.
 

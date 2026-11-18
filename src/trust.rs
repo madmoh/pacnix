@@ -94,23 +94,14 @@ fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
-/// The Arch Linux news since the last upgrade. Without a record of an upgrade,
-/// there is no news: the first run records the time. A feed that is not
-/// available gives a warning.
-pub fn news() -> Vec<String> {
-    let Some(since) = std::fs::read_to_string(NEWS).ok().and_then(|t| t.trim().parse::<i64>().ok()) else { return vec![] };
-    let out = std::process::Command::new("curl").args(["-fsSL", "--max-time", "20", NEWS_FEED]).output();
-    let xml = match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
-        Ok(o) => {
-            println!("pacnix: warning: the Arch Linux news are not available: {}", String::from_utf8_lossy(&o.stderr).trim());
-            return vec![];
-        }
-        Err(e) => {
-            println!("pacnix: warning: the Arch Linux news are not available: {e}");
-            return vec![];
-        }
-    };
+/// The Arch Linux news since the last read of the feed. Without a record,
+/// there is no news: the first run records the time. When the feed is not
+/// available, None: the time stays, and the next apply that reads the feed
+/// shows the news since the last read.
+pub fn news() -> Option<Vec<String>> {
+    let Some(since) = std::fs::read_to_string(NEWS).ok().and_then(|t| t.trim().parse::<i64>().ok()) else { return Some(vec![]) };
+    let out = std::process::Command::new("curl").args(["-fsSL", "--max-time", "20", NEWS_FEED]).output().ok().filter(|o| o.status.success())?;
+    let xml = String::from_utf8_lossy(&out.stdout).into_owned();
     let mut items = Vec::new();
     let mut reader = quick_xml::Reader::from_str(&xml);
     let (mut tag, mut item): (String, BTreeMap<String, String>) = Default::default();
@@ -144,12 +135,12 @@ pub fn news() -> Vec<String> {
             _ => {}
         }
     }
-    items
+    Some(items)
 }
 
-/// Records the time of a successful upgrade, or of the first successful run.
-pub fn news_read(upgrade: bool) {
-    if upgrade || !std::path::Path::new(NEWS).exists() {
+/// Records the time of a successful upgrade whose news were read, or of the first successful run.
+pub fn news_read(read: bool) {
+    if read || !std::path::Path::new(NEWS).exists() {
         let _ = std::fs::write(NEWS, format!("{}\n", now()));
     }
 }

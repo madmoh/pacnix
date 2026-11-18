@@ -1,5 +1,5 @@
 use crate::generation::Generation;
-use crate::{cmd, output, run_cmd, run_quiet};
+use crate::{cmd, output, run_cmd, run_hidden};
 use anyhow::{Context, Result};
 use std::path::Path;
 
@@ -17,7 +17,7 @@ pub struct Plan {
 
 impl Plan {
     pub fn print(&self, l: &mut Vec<String>) {
-        l.extend(self.activate.iter().map(|(u, p)| format!("activate home configuration of {u}: {p}")));
+        l.extend(self.activate.iter().map(|(u, _)| format!("activate the home configuration of {u}")));
         l.extend(self.replace.iter().map(|(p, kept)| match kept {
             false => format!("replace the unmanaged home file {p}, keep the original"),
             true => format!("replace the changed home file {p}"),
@@ -60,7 +60,8 @@ pub fn plan(g: &Generation) -> Result<Plan> {
         if old.as_deref() == Some(out.as_str()) && !crate::report::retry(&step(user)) {
             continue;
         }
-        run_quiet(cmd("nix-store", &["--realise", &h.drv]))?;
+        crate::report::progress(&format!("build the home configuration of {user}"));
+        run_hidden(cmd("nix-store", &["--realise", &h.drv, &h.path]))?;
         let new = home_files(&out);
         let home = Path::new(&h.directory);
         for rel in &new {
@@ -84,7 +85,9 @@ pub fn plan(g: &Generation) -> Result<Plan> {
 /// Keeps the original of each home file in the way, as FILE.pacnix-hm-backup,
 /// runs the activation of each home configuration as the user, with the
 /// user's systemd manager and session bus, and then gives each home file
-/// without a declaration its original back.
+/// without a declaration its original back. Root writes to the Nix store: the
+/// profile of the home configuration, the profile of its packages and the GC
+/// roots. The activation reads the store only, thus no nix-daemon is necessary.
 pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
     for (path, kept) in &plan.replace {
         let path = Path::new(path);
@@ -94,22 +97,7 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
     for (user, out) in &plan.activate {
         crate::report::progress(&step(user));
         let h = &g.m.home[user];
-        let uid = output(cmd("id", &["-u", user]))?.trim().to_string();
-        run_cmd(cmd("systemctl", &["start", &format!("user@{uid}.service")]))?;
-        let runtime = format!("/run/user/{uid}");
-        let mut c = cmd("runuser", &["-u", user, "--", "env", "-i"]);
-        c.args([
-            format!("HOME={}", h.directory),
-            format!("USER={user}"),
-            format!("LOGNAME={user}"),
-            "PATH=/usr/local/bin:/usr/bin".to_string(),
-            format!("XDG_RUNTIME_DIR={runtime}"),
-        ]);
-        if Path::new(&runtime).join("bus").exists() {
-            c.arg(format!("DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus"));
-        }
-        c.arg(format!("{out}/activate")).current_dir(&h.directory);
-        crate::isolated(&step(user), || run_cmd(&mut c))?;
+        crate::isolated(&step(user), || activate(user, &h.directory, out, &out_path(&h.path)?))?;
     }
     for path in &plan.originals {
         let path = Path::new(path);
@@ -117,6 +105,51 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
             std::fs::rename(backup(path), path).with_context(|| format!("restore the original of {}", path.display()))?;
         }
     }
+    Ok(())
+}
+
+/// The steps of the home-manager command, with root for the writes to the Nix store.
+fn activate(user: &str, home: &str, out: &str, packages: &str) -> Result<()> {
+    let (profiles, roots) = (format!("{home}/.local/state/nix/profiles"), format!("{home}/.local/state/home-manager/gcroots"));
+    run_cmd(cmd("runuser", &["-u", user, "--", "mkdir", "-p", &profiles, &roots]))?;
+    run_hidden(cmd("nix-store", &["--realise", out, "--add-root", &format!("{roots}/new-home")]))?;
+    run_hidden(cmd("nix-env", &["--profile", &format!("{profiles}/home-manager"), "--set", out]))?;
+    std::fs::create_dir_all("/etc/profiles/per-user")?;
+    run_hidden(cmd("nix-store", &["--realise", packages, "--add-root", &format!("/etc/profiles/per-user/{user}")]))?;
+    // pacnix 0.11 let Home Manager install home.path into the profile of the user.
+    for profile in [format!("{home}/.nix-profile"), format!("{profiles}/profile")] {
+        if Path::new(&profile).exists() {
+            run_hidden(cmd("nix-env", &["--profile", &profile, "--uninstall", "home-manager-path"]))?;
+        }
+    }
+    let owner = |p: &str| run_cmd(cmd("chown", &["-h", &format!("{user}:")]).arg(p));
+    for dir in [&profiles, &roots] {
+        for e in std::fs::read_dir(dir)?.flatten() {
+            owner(&e.path().display().to_string())?;
+        }
+    }
+    let uid = output(cmd("id", &["-u", user]))?.trim().to_string();
+    run_cmd(cmd("systemctl", &["start", &format!("user@{uid}.service")]))?;
+    let runtime = format!("/run/user/{uid}");
+    let mut c = cmd("runuser", &["-u", user, "--", "env", "-i"]);
+    c.args([
+        format!("HOME={home}"),
+        format!("USER={user}"),
+        format!("LOGNAME={user}"),
+        "PATH=/usr/local/bin:/usr/bin".to_string(),
+        format!("XDG_RUNTIME_DIR={runtime}"),
+        "NIX_REMOTE=local?read-only=true".to_string(),
+        "NIX_CONFIG=extra-experimental-features = read-only-local-store".to_string(),
+    ]);
+    if Path::new(&runtime).join("bus").exists() {
+        c.arg(format!("DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus"));
+    }
+    c.args([&format!("{out}/activate"), "--driver-version", "1"]).current_dir(home);
+    run_hidden(&mut c)?;
+    let current = format!("{roots}/current-home");
+    run_hidden(cmd("nix-store", &["--realise", out, "--add-root", &current]))?;
+    owner(&current)?;
+    let _ = std::fs::remove_file(format!("{roots}/new-home"));
     Ok(())
 }
 

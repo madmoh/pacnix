@@ -1,4 +1,4 @@
-use crate::{Ctx, ask, audit, cmd, failed, files, forward, home, packages, report, run_cmd, run_quiet, secure, trust, units, users};
+use crate::{Ctx, ask, audit, cmd, files, forward, home, packages, report, run_cmd, run_hidden, run_quiet, secure, trust, units, users};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -153,6 +153,8 @@ pub struct AuditSpec {
 pub struct Home {
     pub directory: String,
     pub drv: String,
+    /// The derivation of home.path, the packages of the home configuration.
+    pub path: String,
 }
 
 #[derive(Clone, Default)]
@@ -169,54 +171,68 @@ impl Generation {
     }
 }
 
-/// Evaluates the flake and writes the generation to the Nix store. The notes
-/// of Nix about a dirty Git tree and about the lock file are not shown: the
-/// override of the pacnix input always changes the lock file, and pacnix never
-/// writes it. Nix evaluates as the owner of the flake through the nix-daemon,
-/// thus the Nix cache and the Git checks of the flake are those of the owner.
+/// Evaluates the flake and writes the generation to the Nix store. Root
+/// evaluates with direct access to the store, without the nix-daemon. The
+/// output of Nix shows only at an error: pacnix never writes the lock file.
 pub fn build(ctx: &Ctx) -> Result<Generation> {
     report::progress("evaluate the configuration");
     let attr = format!("{}#pacnixConfigurations.\"{}\".generation", ctx.flake, ctx.host);
     let dir = format!("/run/pacnix/eval-{}", std::process::id());
     let result = format!("{dir}/generation");
     std::fs::create_dir_all(&dir)?;
-    let mut c = match owner(&ctx.flake) {
-        Some((uid, gid, user, home)) => {
-            std::os::unix::fs::chown(&dir, Some(uid), Some(gid))?;
-            let mut c = cmd("runuser", &["-u", &user, "--", "env", "-i", &format!("HOME={home}"), "PATH=/usr/local/bin:/usr/bin"]);
-            c.args(NIX);
-            c
-        }
-        None => cmd(NIX[0], &NIX[1..]),
-    };
+    let mut c = cmd(NIX[0], &NIX[1..]);
     c.args(["eval", "--no-warn-dirty", "--write-to", &result, &attr]);
     if Path::new(MODULES).join("flake.nix").exists() {
         c.args(["--override-input", "pacnix", &format!("path:{MODULES}")]);
     }
-    let mut lock_note = false;
-    let (status, lines) = forward(&mut c, 20, true, |l| {
-        lock_note = l.starts_with("warning: not writing modified lock file") || (lock_note && (l.starts_with("• ") || l.starts_with("    ")));
-        !lock_note
-    })?;
+    let (status, lines) = forward(&mut c, usize::MAX, true, |_| false)?;
     let path = std::fs::read_to_string(&result);
     let _ = std::fs::remove_dir_all(&dir);
     if !status.success() {
-        return Err(failed(&c, status, &lines)).context("evaluate the configuration");
+        return Err(crate::failed_with(eval_error(ctx, &lines), &lines));
     }
     Generation::load(path?.trim())
 }
 
-/// The user that owns the directory of the flake, when it is not root and the
-/// nix-daemon accepts connections. Before Nix makes its store, root evaluates.
-fn owner(flake: &str) -> Option<(u32, u32, String, String)> {
-    use std::os::unix::fs::MetadataExt;
-    let meta = std::fs::metadata(flake).ok()?;
-    if meta.uid() == 0 || !Path::new("/nix/var/nix/daemon-socket/socket").exists() || !Path::new("/nix/store").exists() {
-        return None;
+/// The error of Nix without its trace and its command: the last error with
+/// its location and the suggestion of Nix, with the paths of the flake and of
+/// the pacnix modules instead of their copies in the Nix store.
+fn eval_error(ctx: &Ctx, lines: &[String]) -> String {
+    let start = match lines.iter().rposition(|l| l.trim_start().starts_with("error:")) {
+        Some(i) if lines[i].trim() == "error:" => i + 1,
+        Some(i) => i,
+        None => lines.len().saturating_sub(6),
+    };
+    let indent = lines.get(start).map_or(0, |l| l.len() - l.trim_start().len());
+    let mut text: Vec<String> = lines[start..].iter().map(|l| l[indent.min(l.len() - l.trim_start().len())..].to_string()).collect();
+    if let Some(first) = text.first_mut() {
+        *first = first.trim_start_matches("error: ").to_string();
     }
-    let entry = crate::output(cmd("getent", &["passwd", &meta.uid().to_string()])).ok()?;
-    let fields: Vec<&str> = entry.trim().split(':').collect();
-    Some((meta.uid(), fields.get(3)?.parse().ok()?, fields[0].to_string(), fields.get(5)?.to_string()))
+    let text = text.join("\n");
+    if text.contains("does not provide attribute") && text.contains(&format!("pacnixConfigurations.\"{}\"", ctx.host)) {
+        return format!("the flake {} has no host {} in pacnixConfigurations. Add the host to the flake, or give --host with a host of the flake", ctx.flake, ctx.host);
+    }
+    let mut out = String::new();
+    let mut rest = text.as_str();
+    while let Some(i) = rest.find("/nix/store/") {
+        out.push_str(&rest[..i]);
+        let path = &rest[i..];
+        let end = path.find(['\'', '`', ':', ' ', '"', '\n']).unwrap_or(path.len());
+        let (path, after) = path.split_at(end);
+        let local = path.split_once("-source/").map(|(_, rel)| rel).and_then(|rel| [ctx.flake.as_str(), MODULES].iter().map(|d| format!("{d}/{rel}")).find(|p| Path::new(p).exists()));
+        out.push_str(local.as_deref().unwrap_or(path));
+        rest = after;
+    }
+    out.push_str(rest);
+    // Nix names only the file of an option that does not exist: the line comes from the first line with the last part of the name.
+    let option = out.split_once("The option `").and_then(|(_, r)| r.split_once("' does not exist")).map(|(o, _)| o.rsplit('.').next().unwrap_or(o).to_string());
+    let file = out.split_once("- In `").and_then(|(_, r)| r.split_once('\'')).map(|(f, _)| f.to_string());
+    if let (Some(option), Some(file)) = (option, file) {
+        if let Some(n) = std::fs::read_to_string(&file).ok().and_then(|t| t.lines().position(|l| l.contains(&option))) {
+            out = out.replacen(&format!("- In `{file}'"), &format!("- In `{file}:{}'", n + 1), 1);
+        }
+    }
+    format!("the configuration has an error:\n  {}", out.replace('\n', "\n  "))
 }
 
 /// The generation that the profile points to.
@@ -263,6 +279,7 @@ pub struct Plan {
 
 impl Plan {
     fn compute(ctx: &Ctx, target: Generation) -> Result<Plan> {
+        report::progress("compute the changes");
         let old = active()?.unwrap_or_default();
         let ledger: Vec<Generation> = std::iter::once(old.clone()).chain(pending()).collect();
         // Before any change, also before the upgrade: Secure Boot must keep the system bootable.
@@ -277,16 +294,23 @@ impl Plan {
         Ok(Plan { target, packages, users, files, units, home, secure, data })
     }
 
+    /// The lines of the plan, by kind of change.
+    fn sections(&self) -> Vec<(&'static str, Vec<String>)> {
+        let mut s: Vec<(&'static str, Vec<String>)> = ["package", "user", "file", "trigger", "unit", "home change", "Secure Boot step", "removed feature"].map(|k| (k, Vec::new())).into();
+        self.packages.print(&mut s[0].1);
+        self.users.print(&mut s[1].1);
+        self.files.print(&mut s[2].1);
+        let [_, _, _, triggers, units, ..] = &mut s[..] else { unreachable!() };
+        files::print_triggers(&self.files, &mut triggers.1, &mut units.1);
+        self.units.print(&mut s[4].1);
+        self.home.print(&mut s[5].1);
+        self.secure.print(&mut s[6].1);
+        s[7].1.extend(self.data.iter().map(|(f, paths)| format!("delete the data of removed feature {f}: {}", paths.join(", "))));
+        s
+    }
+
     fn print(&self) {
-        let mut lines = Vec::new();
-        self.packages.print(&mut lines);
-        self.users.print(&mut lines);
-        self.files.print(&mut lines);
-        files::print_triggers(&self.files, &mut lines);
-        self.units.print(&mut lines);
-        self.home.print(&mut lines);
-        self.secure.print(&mut lines);
-        lines.extend(self.data.iter().map(|(f, paths)| format!("delete the data of removed feature {f}: {}", paths.join(", "))));
+        let lines: Vec<String> = self.sections().into_iter().flat_map(|s| s.1).collect();
         if lines.is_empty() {
             println!("No changes.");
         }
@@ -294,13 +318,17 @@ impl Plan {
             println!("{l}");
         }
     }
+
+    /// Refuses a plan that is not safe, before any question and any change.
+    fn check(&self, ctx: &Ctx) -> Result<()> {
+        packages::check(ctx, &self.packages)
+    }
 }
 
 pub fn plan(ctx: &Ctx) -> Result<()> {
-    let target = build(ctx)?;
-    println!("Generation {}", target.path);
-    Plan::compute(ctx, target)?.print();
-    Ok(())
+    let plan = Plan::compute(ctx, build(ctx)?)?;
+    plan.print();
+    plan.check(ctx)
 }
 
 /// Makes the system agree with the configuration: pacman -Syu, the rebuild
@@ -310,23 +338,26 @@ pub fn plan(ctx: &Ctx) -> Result<()> {
 /// Offline, the sync databases and the AUR packages stay as they are.
 pub fn apply(ctx: &Ctx, offline: bool) -> Result<()> {
     let target = build(ctx)?;
-    let mut plan = None;
+    let (mut plan, mut read) = (None, false);
     if !offline {
         let news = std::thread::spawn(trust::news);
         let before = Plan::compute(ctx, target.clone())?;
+        before.check(ctx)?;
         let builds = packages::upgrade_builds(&target)?;
         let news = news.join().unwrap_or_default();
-        ask(&[packages::removals(&before.packages), builds.asks.clone(), news].concat(), &audit::asks(&before.data), &ctx.opts)?;
+        read = news.is_some();
+        ask(&[packages::removals(&before.packages), builds.asks.clone(), news.unwrap_or_default()].concat(), &audit::asks(&before.data), &ctx.opts)?;
         users::ask_passwords(&before.users, &ctx.opts)?;
         secure::ask_secrets(&before.target, &before.secure)?;
         // When the upgrade changes no package and no sync database, the plan stays the same.
         let (state, built) = (packages::databases(), builds.queue.is_empty());
+        report::changing();
         packages::upgrade(&target, builds)?;
         plan = (built && packages::databases() == state).then_some(before);
     }
     activate(ctx, target.clone(), plan)?;
     commit(&target)?;
-    trust::news_read(!offline);
+    trust::news_read(read);
     Ok(())
 }
 
@@ -342,24 +373,24 @@ fn commit(target: &Generation) -> Result<()> {
 
 /// Brings the system to the target generation. The profile is not changed.
 fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
-    println!("Generation {}", target.path);
     packages::recover_lock()?;
     let plan = match plan {
         Some(plan) => plan,
         None => Plan::compute(ctx, target)?,
     };
-    plan.print();
-    packages::check(ctx, &plan.packages)?;
+    plan.check(ctx)?;
     files::check(ctx, &plan.target, &plan.files)?;
     let builds = packages::fetch_builds(&plan.target, &plan.packages)?;
     let delete = ask(&[packages::removals(&plan.packages), builds.asks.clone()].concat(), &audit::asks(&plan.data), &ctx.opts)?;
     users::ask_passwords(&plan.users, &ctx.opts)?;
     secure::ask_secrets(&plan.target, &plan.secure)?;
+    report::planned(plan.sections().into_iter().skip(1).map(|(kind, lines)| (kind, lines.len())).collect());
+    report::changing();
     let current = std::fs::canonicalize(PENDING).ok();
     if current.as_deref() != Some(Path::new(&plan.target.path)) {
         std::fs::create_dir_all(STATE)?;
         let _ = std::fs::remove_file(PENDING);
-        run_quiet(cmd("nix-store", &["--add-root", PENDING, "--realise", &plan.target.path]))?;
+        run_hidden(cmd("nix-store", &["--add-root", PENDING, "--realise", &plan.target.path]))?;
     }
     let leaving = units::leaving(&plan.units, &plan.files.deleted());
     let skip = packages::prepare(&plan.target, &plan.packages, builds)?;
@@ -387,7 +418,7 @@ pub fn rollback(ctx: &Ctx) -> Result<()> {
         bail!("no generation is older than the active generation");
     }
     let (number, previous) = history[index - 1].clone();
-    println!("Roll back to generation {number}");
+    report::progress(&format!("roll back to generation {number}"));
     activate(ctx, previous, None)?;
     run_cmd(cmd("nix-env", &["--profile", PROFILE, "--switch-generation", &number.to_string()]))?;
     let _ = std::fs::remove_file(PENDING);
@@ -428,8 +459,9 @@ pub fn uninstall(ctx: &Ctx) -> Result<()> {
         asks.push(format!("Delete the users {} and the groups {}.", users.join(" "), groups.join(" ")));
     }
     asks.extend(key.iter().map(|k| format!("Delete the key {k} of packages.server in the pacman keyring.")));
-    let removals = if remove.is_empty() { vec![] } else { vec![format!("Remove {} packages: {}.", remove.len(), remove.join(" "))] };
+    let removals = if remove.is_empty() { vec![] } else { vec![format!("Remove {}: {}.", crate::count(remove.len(), "package"), remove.join(" "))] };
     let delete = ask(&removals, &asks, &ctx.opts)?;
+    report::changing();
     home::detach(&current)?;
     packages::uninstall(&remove)?;
     keep_or_delete(&target, &data, delete)?;

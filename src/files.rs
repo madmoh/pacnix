@@ -1,5 +1,5 @@
 use crate::generation::{FileSpec, Generation, Trigger};
-use crate::{Ctx, cmd, output_any, run_cmd};
+use crate::{Ctx, cmd, output_any, report, run_cmd, run_hidden};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -137,8 +137,12 @@ pub fn plan(_ctx: &Ctx, g: &Generation, ledger: &[Generation]) -> Result<Plan> {
         if Path::new(&format!("{path}.pacnew")).exists() {
             plan.pacnew.push(path.clone());
         }
-        // A file that pacnix did not write keeps its original, also when it agrees, for the removal of the declaration.
-        if matches(path, spec) && ours(path) {
+        // A file that pacnix did not write and that agrees is no change: the
+        // apply keeps its original, for the removal of the declaration.
+        if matches(path, spec) {
+            if !ours(path) {
+                plan.adopt.push(path.clone());
+            }
             continue;
         }
         let why = if std::fs::symlink_metadata(path).is_err() {
@@ -268,7 +272,7 @@ fn restore(path: &str, pkg: &str) -> Result<()> {
     let archive = match find() {
         Some(a) => a,
         None => {
-            run_cmd(cmd("pacman", &["-Sw", "--noconfirm", "--config", "/var/lib/pacnix/pacman.conf", pkg]))?;
+            run_hidden(cmd("pacman", &["-Sw", "--noconfirm", "--config", crate::packages::CONF, pkg]))?;
             find().with_context(|| format!("no archive of {pkg} {version} in the pacman cache"))?
         }
     };
@@ -300,6 +304,14 @@ pub fn prune_dirs(path: &str) {
 /// Returns the paths that changed.
 pub fn apply(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<Vec<String>> {
     let mut changed = Vec::new();
+    let changing = changes(plan);
+    if !changing.is_empty() {
+        report::progress(&format!("write {}", crate::count(changing.len(), "file")));
+    }
+    // The triggers and unit restarts that follow the changes are recorded
+    // first: after an interrupt, no change of a file shows them again.
+    report::pending(triggered(plan, &changing).into_iter().map(|(n, _)| format!("trigger {n}")));
+    report::pending(crate::units::changed_units(&changing).into_iter().map(|u| format!("systemctl try-restart {u}")));
     for t in &plan.stale {
         std::fs::remove_file(t)?;
     }
@@ -353,16 +365,16 @@ fn triggered<'a>(plan: &'a Plan, changed: &[String]) -> Vec<(&'a String, &'a Str
         .collect()
 }
 
-pub fn print_triggers(plan: &Plan, l: &mut Vec<String>) {
-    let changed: Vec<String> = plan
-        .write
-        .iter()
-        .map(|w| w.0.clone())
-        .chain(plan.restore.iter().map(|r| r.0.clone()))
-        .chain(plan.delete.iter().cloned())
-        .collect();
-    l.extend(triggered(plan, &changed).into_iter().map(|(n, c)| format!("run trigger {n}: {c}")));
-    l.extend(crate::units::changed_units(&changed).into_iter().map(|u| format!("restart unit {u} if it runs")));
+/// The paths that the apply changes.
+fn changes(plan: &Plan) -> Vec<String> {
+    plan.write.iter().map(|w| w.0.clone()).chain(plan.restore.iter().map(|r| r.0.clone())).chain(plan.originals.iter().cloned()).chain(plan.delete.iter().cloned()).collect()
+}
+
+pub fn print_triggers(plan: &Plan, triggers: &mut Vec<String>, units: &mut Vec<String>) {
+    let changed = changes(plan);
+    triggers.extend(triggered(plan, &changed).into_iter().map(|(n, c)| format!("run trigger {n}: {c}")));
+    units.extend(crate::units::changed_units(&changed).into_iter().map(|u| format!("restart unit {u} if it runs")));
+    units.extend(crate::report::retries().into_iter().filter_map(|s| s.strip_prefix("systemctl try-restart ").map(|u| format!("restart unit {u} if it runs (the last apply did not complete it)"))));
 }
 
 /// Runs the triggers of the changed files and the triggers that failed at an
@@ -378,7 +390,7 @@ pub fn run_triggers(plan: &Plan, changed: &[String]) -> Result<()> {
             continue;
         }
         crate::report::progress(&format!("run trigger {name}: {command}"));
-        if !crate::isolated(&step, || run_cmd(cmd("sh", &["-ec", command])))? {
+        if !crate::isolated(&step, || run_hidden(cmd("sh", &["-ec", command])))? {
             failed = Some(name);
         }
     }

@@ -117,8 +117,26 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
     for l in &report {
         println!("{l}");
     }
+    // One line for each kind of finding tells what to do.
+    for (kind, todo) in HINTS {
+        if report.iter().any(|l| l.starts_with(kind)) {
+            println!("{todo}");
+        }
+    }
     Ok(())
 }
+
+const HINTS: [(&str, &str); 9] = [
+    ("pacnew file", "Merge each .pacnew file into its file, then delete the .pacnew file."),
+    ("pacsave file", "Delete each .pacsave file that you do not need."),
+    ("unowned", "For an unowned path, declare it in files, add it to claims or audit.ignore, or delete it."),
+    ("modified file of package", "For a modified file of a package, declare it in files, or restore it with pacman -S PACKAGE."),
+    ("managed file differs", "pacnix apply writes the managed files again."),
+    ("explicit package not declared", "For an explicit package that is not declared, declare it in packages.repo or packages.aur, or mark it as a dependency with pacman -D --asdeps PACKAGE."),
+    ("enabled unit not declared", "For an enabled unit that is not declared, declare it in units.enable, or disable it with systemctl disable UNIT."),
+    ("declared unit not enabled", "pacnix apply enables the declared units."),
+    ("unclaimed home path", "For an unclaimed home path, declare it in home.users.USER, add it to the home paths of claims, or delete it."),
+];
 
 /// Lists entries of ~/.config, ~/.local/share, ~/.cache and dot entries of
 /// each home directory that no claim and no Home Manager file explains.

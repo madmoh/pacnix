@@ -1,5 +1,5 @@
-use crate::generation::{Generation, STATE};
-use crate::{Ctx, cmd, failed, forward, isolated, output, output_any, report, run_cmd, run_quiet, run_silent, trust};
+use crate::generation::Generation;
+use crate::{Ctx, cmd, count, failed, forward, isolated, output, output_any, report, run_cmd, run_hidden, run_quiet, run_silent, trust};
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -7,8 +7,10 @@ use std::process::Command;
 
 const REPO: &str = "/var/lib/pacnix/repo";
 const BUILD: &str = "/var/lib/pacnix/build";
-const CONF: &str = "/var/lib/pacnix/pacman.conf";
-const LOCAL_CONF: &str = "/var/lib/pacnix/pacman-local.conf";
+/// The pacman configurations of pacnix. Each run writes them again, thus they
+/// are in /run, and pacnix plan does not change /var/lib/pacnix.
+pub const CONF: &str = "/run/pacnix/pacman.conf";
+const LOCAL_CONF: &str = "/run/pacnix/pacman-local.conf";
 const SOURCES: &str = "/var/lib/pacnix/local-sources.json";
 /// The packages that pacnix installed or marked explicit for a declaration.
 /// Only these become dependencies again when their declaration goes.
@@ -21,7 +23,6 @@ const PROTECTED: &[&str] = &["base", "pacman", "nix", "pacnix"];
 
 #[derive(Default)]
 pub struct Plan {
-    notes: Vec<String>,
     unknown: Vec<String>,
     conflicts: Vec<String>,
     build: Vec<String>,
@@ -66,8 +67,6 @@ impl Plan {
 
     pub fn print(&self, l: &mut Vec<String>) {
         let mut add = |prefix: &str, list: &[String]| l.extend(list.iter().map(|p| format!("{prefix} {p}")));
-        add("note:", &self.notes);
-        add("unknown package", &self.unknown);
         add("build AUR package", &self.build);
         add("build local package", &self.local);
         add("drop from local repository", &self.drop);
@@ -204,8 +203,8 @@ fn repo_db(g: &Generation) -> Result<Vec<Info>> {
             p
         }
         Some(url) => {
-            let p = format!("{STATE}/server.db");
-            std::fs::create_dir_all(STATE)?;
+            let p = "/run/pacnix/server.db".to_string();
+            std::fs::create_dir_all("/run/pacnix")?;
             let url = format!("{}/pacnix-local.db", url.trim_end_matches('/'));
             output(cmd("curl", &["-fsSL", "--retry", "3", "-o", &p, &url])).with_context(|| format!("download {url}"))?;
             p
@@ -280,7 +279,7 @@ fn write_confs(g: &Generation) -> Result<()> {
             .map(|l| if l.trim() == "[options]" { format!("{l}\nParallelDownloads = 1\n") } else { format!("{l}\n") })
             .collect();
     }
-    std::fs::create_dir_all(STATE)?;
+    std::fs::create_dir_all("/run/pacnix")?;
     std::fs::write(CONF, format!("{system}{section}"))?;
     std::fs::write(LOCAL_CONF, format!("[options]\nArchitecture = auto\n{section}"))?;
     Ok(())
@@ -623,7 +622,7 @@ fn uname() -> String {
 /// Refuses a plan that is not safe. Runs before any change.
 pub fn check(ctx: &Ctx, plan: &Plan) -> Result<()> {
     if !plan.unknown.is_empty() {
-        bail!("unknown packages: {}", plan.unknown.join(", "));
+        bail!("{}: {}. Correct the names in the configuration", match plan.unknown.len() { 1 => "unknown package", _ => "unknown packages" }, plan.unknown.join(", "));
     }
     if !plan.conflicts.is_empty() {
         let mut pairs = plan.conflicts.clone();
@@ -644,7 +643,7 @@ pub fn check(ctx: &Ctx, plan: &Plan) -> Result<()> {
 pub fn removals(plan: &Plan) -> Vec<String> {
     match plan.remove.is_empty() {
         true => vec![],
-        false => vec![format!("Remove {} packages: {}.", plan.remove.len(), plan.remove.join(" "))],
+        false => vec![format!("Remove {}: {}.", count(plan.remove.len(), "package"), plan.remove.join(" "))],
     }
 }
 
@@ -654,14 +653,29 @@ pub fn removals(plan: &Plan) -> Vec<String> {
 /// as it is.
 pub static SERIAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Downloads packages into the pacman cache before the transaction. pacman
-/// -Sw keeps the complete files, thus a new attempt continues.
-fn download(names: &[&str]) -> Result<()> {
-    if names.is_empty() {
+/// Downloads packages into the pacman cache before the transaction, with
+/// pacman -Sw and the arguments: the names or -u for the upgrade. pacman -Sw
+/// keeps the complete files, thus a new attempt continues. Without a
+/// terminal, pacman shows no progress, thus pacnix shows the packages and
+/// MiB in the cache every 30 s, from the sizes that pacman -Sp gives.
+fn download(args: &[&str]) -> Result<()> {
+    let list = output(pacman(&["-Sp", "--print-format", "%s %l", "--config", CONF]).args(args))?;
+    let files: Vec<(String, u64)> = list
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter(|(_, url)| !url.starts_with("file://"))
+        .filter_map(|(size, url)| Some((url.rsplit('/').next()?.to_string(), size.parse().ok()?)))
+        .collect();
+    if files.is_empty() {
         return Ok(());
     }
-    report::progress(&format!("download {} packages", names.len()));
-    run_quiet(pacman(&["-Sw", "--noconfirm", "--ask=4", "--config", CONF]).args(names))
+    let label = format!("download {}", count(files.len(), "package"));
+    report::progress(&format!("{label}: {:.1} MiB", files.iter().map(|f| f.1).sum::<u64>() as f64 / 1048576.0));
+    let cache = output(cmd("pacman-conf", &["--config", CONF, "CacheDir"]))?.lines().next().unwrap_or("/var/cache/pacman/pkg/").to_string();
+    report::download(&label, &cache, Some(files));
+    let result = run_hidden(pacman(&["-Sw", "--noconfirm", "--ask=4", "--config", CONF]).args(args));
+    report::download("", "", None);
+    result
 }
 
 /// A command of the builder user in the sandbox, which can write only to the
@@ -709,7 +723,7 @@ const AUR_ARGS: &[&str] = &[
     "--chroot",
     "--database=pacnix-local",
     "--root=/var/lib/pacnix/repo",
-    "--pacman-conf=/var/lib/pacnix/pacman.conf",
+    "--pacman-conf=/run/pacnix/pacman.conf",
     "--makepkg-conf=/etc/makepkg.conf",
     "--no-confirm",
     "--no-sync",
@@ -871,7 +885,7 @@ pub fn fetch_builds(g: &Generation, plan: &Plan) -> Result<Builds> {
     aur.dedup();
     let mut queue = Vec::new();
     if !aur.is_empty() {
-        report::progress(&format!("download {} AUR packages and their AUR dependencies", aur.len()));
+        report::progress(&format!("download {} and their AUR dependencies", count(aur.len(), "AUR package")));
         let fetched = fetch(as_builder(&["aur", "sync", "--no-view", "--no-build"]).args(AUR_ARGS).args(ignored(g)).args(&aur))?;
         queue.extend(fetched.into_iter().map(|d| (d, false)));
     }
@@ -1049,7 +1063,10 @@ pub fn recover_lock() -> Result<()> {
 fn transaction(args: &[&str]) -> Result<()> {
     recover_lock()?;
     let mut c = pacman(args);
-    let (status, lines) = forward(&mut c, usize::MAX, true, |_| true)?;
+    // The lists of packages and optional dependencies stay out of the output.
+    // The summary shows the install notes and the .pacnew files.
+    let shown = |l: &str| (l.starts_with("error:") || l.starts_with("warning:")) && !l.contains(" installed as ") && !l.ends_with("-- skipping");
+    let (status, lines) = forward(&mut c, usize::MAX, true, shown)?;
     if status.success() {
         return Ok(());
     }
@@ -1059,12 +1076,16 @@ fn transaction(args: &[&str]) -> Result<()> {
     if conflicts.is_empty() {
         return Err(failed(&c, status, &lines));
     }
-    eprintln!("pacnix: replace {} files that no installed package owns, left by an interrupted transaction", conflicts.len());
+    report::progress(&format!("replace {} that no installed package owns, left by an interrupted transaction", count(conflicts.len(), "file")));
     let mut c = pacman(args);
     for f in conflicts {
         c.args(["--overwrite", f]);
     }
-    run_cmd(&mut c)
+    let (status, lines) = forward(&mut c, 20, true, shown)?;
+    if !status.success() {
+        return Err(failed(&c, status, &lines));
+    }
+    Ok(())
 }
 
 /// Builds packages and downloads the packages to install, before units stop,
@@ -1075,6 +1096,10 @@ fn transaction(args: &[&str]) -> Result<()> {
 pub fn prepare(g: &Generation, plan: &Plan, builds: Builds) -> Result<BTreeSet<String>> {
     let mut failed = BTreeSet::new();
     write_confs(g)?;
+    // pacnix 0.11 kept its pacman configurations in /var/lib/pacnix.
+    let _ = std::fs::remove_file("/var/lib/pacnix/pacman.conf");
+    let _ = std::fs::remove_file("/var/lib/pacnix/pacman-local.conf");
+    let _ = std::fs::remove_file("/var/lib/pacnix/server.db");
     trust_server(g)?;
     if is_builder(g) && (!g.m.packages.aur.is_empty() || !g.m.packages.local.is_empty() || has_local(g)) {
         ensure_repo()?;
@@ -1091,7 +1116,10 @@ pub fn prepare(g: &Generation, plan: &Plan, builds: Builds) -> Result<BTreeSet<S
         sync_pacnix_db()?;
     }
     let skip = plan.skipped(failed);
-    download(&plan.targets(&skip))?;
+    let targets = plan.targets(&skip);
+    if !targets.is_empty() {
+        download(&targets)?;
+    }
     Ok(skip)
 }
 
@@ -1105,13 +1133,13 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
     std::fs::write(MADE, serde_json::to_vec(&list)?)?;
     let targets = plan.targets(skip);
     if !targets.is_empty() {
-        report::progress(&format!("install {} packages", targets.len()));
+        report::progress(&format!("install {}", count(targets.len(), "package")));
         let mut args = vec!["-S", "--needed", "--noconfirm", "--ask=4", "--config", CONF];
         args.extend(targets);
         transaction(&args)?;
     }
     if !plan.archive.is_empty() {
-        report::progress(&format!("install {} packages from the Arch Linux Archive", plan.archive.len()));
+        report::progress(&format!("install {} from the Arch Linux Archive", count(plan.archive.len(), "package")));
         let mut args = vec!["-U", "--noconfirm", "--ask=4", "--config", CONF];
         args.extend(plan.archive.iter().map(String::as_str));
         // pacman downloads the files of -U first and stops before a change when a download fails.
@@ -1131,13 +1159,13 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
         run_cmd(pacman(&["-D", "--asdeps"]).args(&plan.deps))?;
     }
     if !plan.remove.is_empty() {
-        report::progress(&format!("remove {} packages", plan.remove.len()));
+        report::progress(&format!("remove {}", count(plan.remove.len(), "package")));
         transaction(&[&["-Rns", "--noconfirm"][..], &plan.remove.iter().map(String::as_str).collect::<Vec<_>>()].concat())?;
     }
     let orphans = output_any(&mut pacman(&["-Qqdtt"]))?;
     let orphans: Vec<&str> = orphans.split_whitespace().filter(|n| !plan.orphans.contains(*n)).collect();
     if !orphans.is_empty() {
-        eprintln!("pacnix: remove packages that no declared package needs: {}", orphans.join(" "));
+        report::progress(&format!("remove {} that no declared package needs: {}", count(orphans.len(), "package"), orphans.join(" ")));
         transaction(&[&["-Rns", "--noconfirm"][..], &orphans].concat())?;
     }
     save_made(plan)
@@ -1178,11 +1206,13 @@ pub fn databases() -> Vec<Option<std::time::SystemTime>> {
 pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
     write_confs(g)?;
     trust_server(g)?;
-    report::progress("upgrade the system with pacman -Syu");
+    report::progress("refresh the sync databases");
     recover_lock()?;
     let pins = pinned(g);
     let pins: Vec<&str> = pins.iter().map(String::as_str).collect();
-    run_quiet(pacman(&[&["-Syuw", "--noconfirm", "--config", CONF][..], &pins].concat()))?;
+    run_hidden(pacman(&["-Sy", "--config", CONF]))?;
+    download(&[&["-u"][..], &pins].concat())?;
+    report::progress("upgrade the system with pacman -Su");
     transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
     if !builds.queue.is_empty() {
         ensure_chroot()?;
@@ -1217,8 +1247,8 @@ pub fn uninstall(remove: &[String]) -> Result<()> {
     let files = output(pacman(&["-Qlq"]).args(remove))?;
     let units: Vec<&str> = files.lines().filter_map(|l| l.strip_prefix("/usr/lib/systemd/system/")).filter(|u| u.contains('.') && !u.contains('/') && !u.contains("@.")).collect();
     if !units.is_empty() {
-        run_cmd(cmd("systemctl", &["disable", "--now"]).args(&units))?;
+        run_cmd(cmd("systemctl", &["--quiet", "disable", "--now"]).args(&units))?;
     }
-    report::progress(&format!("remove {} packages", remove.len()));
+    report::progress(&format!("remove {}", count(remove.len(), "package")));
     transaction(&[&["-Rns", "--noconfirm"][..], &remove.iter().map(String::as_str).collect::<Vec<_>>()].concat())
 }

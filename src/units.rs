@@ -60,7 +60,7 @@ impl Plan {
         l.extend(self.disable.iter().map(|u| format!("disable and stop unit {u}")));
         l.extend(self.mask.iter().map(|u| format!("mask unit {u}")));
         l.extend(self.unmask.iter().map(|u| format!("unmask unit {u}")));
-        l.extend(self.retry.iter().map(|c| format!("run {c} again (it failed at the last apply)")));
+        l.extend(self.retry.iter().filter(|c| !c.starts_with("systemctl try-restart ")).map(|c| format!("run {c} (the last apply did not complete it)")));
     }
 }
 
@@ -199,7 +199,7 @@ pub fn plan(g: &Generation, old: &Generation, all: bool) -> Result<Plan> {
         let exists = states.contains_key(&u) || states.contains_key(&template(&u));
         exists && match words[1] {
             "start" => enabled,
-            "restart" => !masks.contains(&u) && !g.m.units.disable.contains(&u),
+            "restart" | "try-restart" => !masks.contains(&u) && !g.m.units.disable.contains(&u),
             "stop" | "disable" => !enabled,
             "mask" => masks.contains(&u),
             "unmask" => !masks.contains(&u),
@@ -215,13 +215,21 @@ pub fn plan(g: &Generation, old: &Generation, all: bool) -> Result<Plan> {
 /// does not stop the apply, as with switch-to-configuration of NixOS. `step`
 /// is the command that the next apply runs again.
 fn systemctl(step: &str, args: &[&str]) -> Result<bool> {
-    isolated(step, || run_cmd(cmd("systemctl", args)))
+    isolated(step, || run_cmd(cmd("systemctl", &["--quiet"]).args(args)))
 }
 
 /// Writes the preset file and runs systemctl preset for the declared units and
 /// the units of the earlier generation, then starts the declared units that it
 /// enabled and stops the units that it disabled.
 pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
+    let n = plan.enable.len() + plan.disable.len() + plan.mask.len() + plan.unmask.len();
+    if n > 0 {
+        report::progress(&format!("enable, disable or mask {}", crate::count(n, "unit")));
+    }
+    // The starts that follow the presets are recorded first: after an
+    // interrupt, the units are enabled and the next plan shows the starts.
+    let starts: Vec<String> = plan.enable.iter().filter(|u| plan.declared.contains(*u)).map(|u| format!("systemctl start {u}")).collect();
+    report::pending(starts.iter().cloned());
     if plan.preset.is_empty() {
         let _ = std::fs::remove_file(PRESET);
     } else if std::fs::read_to_string(PRESET).unwrap_or_default() != plan.preset {
@@ -263,6 +271,7 @@ pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
     }
     let instances = plan.enable.iter().filter(|u| u.contains('@') && !u.contains("@."));
     let started: BTreeSet<&String> = after.difference(before).filter(|u| plan.declared.contains(*u)).chain(instances).collect();
+    let mut done = Vec::new();
     for u in &started {
         if u.ends_with(".target") || u.contains("@.") {
             continue;
@@ -272,15 +281,24 @@ pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
             println!("pacnix: unit {u} starts at the next boot, because its service runs");
             continue;
         }
+        report::progress(&format!("start unit {u}"));
         systemctl(&format!("systemctl start {u}"), &["start", u])?;
+        done.push(format!("systemctl start {u}"));
     }
-    for u in changed_units(changed).iter().filter(|u| !started.contains(u)) {
-        println!("pacnix: restart unit {u} if it runs");
-        // A unit that fails at the restart does not run, thus the next apply restarts it without the condition.
-        systemctl(&format!("systemctl restart {u}"), &["try-restart", u])?;
+    // The recorded starts of the units that this apply did not start, for example a target, leave the record.
+    for s in starts.iter().filter(|s| !done.contains(s)) {
+        report::passed(s);
+    }
+    for u in changed_units(changed) {
+        if !started.contains(&u) {
+            report::progress(&format!("restart unit {u} if it runs"));
+            // A unit that fails at the restart does not run, thus the next apply restarts it without the condition.
+            systemctl(&format!("systemctl restart {u}"), &["try-restart", &u])?;
+        }
+        report::passed(&format!("systemctl try-restart {u}"));
     }
     for c in &plan.retry {
-        println!("pacnix: run {c} again");
+        report::progress(&format!("run {c}"));
         let args: Vec<&str> = c.split(' ').skip(1).collect();
         systemctl(c, &args)?;
     }
