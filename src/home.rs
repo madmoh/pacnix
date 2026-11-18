@@ -1,4 +1,4 @@
-use crate::generation::Generation;
+use crate::generation::{Generation, Lines};
 use crate::{cmd, output, run_cmd, run_hidden};
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -13,16 +13,19 @@ pub struct Plan {
     replace: Vec<(String, bool)>,
     /// Home files without a declaration that get their original back.
     originals: Vec<String>,
+    /// The plan lines of the home files that the activation creates, changes and deletes.
+    lines: [Lines; 3],
 }
 
 impl Plan {
-    pub fn print(&self, l: &mut Vec<String>) {
-        l.extend(self.activate.iter().map(|(u, _)| format!("activate the home configuration of {u}")));
-        l.extend(self.replace.iter().map(|(p, kept)| match kept {
-            false => format!("replace the unmanaged home file {p}, keep the original"),
-            true => format!("replace the changed home file {p}"),
-        }));
-        l.extend(self.originals.iter().map(|p| format!("restore the original of home file {p}")));
+    /// The plan lines: activations, and created, changed, deleted and restored home files.
+    pub fn print(&self, l: [&mut Lines; 5]) {
+        let [activate, created, changed, deleted, restored] = l;
+        activate.extend(self.activate.iter().map(|(u, _)| (u.clone(), step(u))));
+        created.extend(self.lines[0].iter().cloned());
+        changed.extend(self.lines[1].iter().cloned());
+        deleted.extend(self.lines[2].iter().cloned());
+        restored.extend(self.originals.iter().map(|p| (p.clone(), format!("restore the original of home file {p}"))));
     }
 }
 
@@ -66,15 +69,29 @@ pub fn plan(g: &Generation) -> Result<Plan> {
         let home = Path::new(&h.directory);
         for rel in &new {
             let path = home.join(rel);
+            let file = Path::new(&out).join("home-files").join(rel);
+            let (p, value) = (path.display().to_string(), crate::files::value(&path, &file, false));
             let linked = std::fs::read_link(&path).is_ok_and(|t| t.starts_with("/nix/store") && t.to_string_lossy().contains("-home-manager-files/"));
-            if path.symlink_metadata().is_ok() && !linked {
-                plan.replace.push((path.display().to_string(), backup(&path).symlink_metadata().is_ok()));
+            let kept = backup(&path).symlink_metadata().is_ok();
+            if path.symlink_metadata().is_err() {
+                plan.lines[0].push((p.clone(), format!("create home file {p}{value}")));
+            } else if !linked {
+                let why = if kept { " (it differs from the declaration)".to_string() } else { format!("\n  keep the original as\n    {}", backup(&path).display()) };
+                plan.lines[1].push((p.clone(), format!("change home file {p}{why}{value}")));
+                plan.replace.push((p, kept));
+            } else if std::fs::canonicalize(&path).ok() != std::fs::canonicalize(&file).ok() {
+                plan.lines[1].push((p.clone(), format!("change home file {p}{value}")));
             }
         }
         for rel in old.map(|o| home_files(&o)).unwrap_or_default() {
             let path = home.join(&rel);
-            if !new.contains(&rel) && backup(&path).symlink_metadata().is_ok() {
+            if new.contains(&rel) {
+                continue;
+            }
+            if backup(&path).symlink_metadata().is_ok() {
                 plan.originals.push(path.display().to_string());
+            } else if path.symlink_metadata().is_ok() {
+                plan.lines[2].push((path.display().to_string(), format!("delete home file {} (the home configuration created it)", path.display())));
             }
         }
         plan.activate.push((user.clone(), out));

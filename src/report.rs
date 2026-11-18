@@ -18,7 +18,7 @@ const RETRY: &str = "/var/lib/pacnix/retry.json";
 /// the run, and the reasons to reboot at the start of the run.
 static RUN: Mutex<Option<(String, Instant, u64, Vec<String>)>> = Mutex::new(None);
 /// The number of planned changes of each kind, for the last line.
-static PLANNED: Mutex<Vec<((&str, &str), usize)>> = Mutex::new(Vec::new());
+static PLANNED: Mutex<Vec<((&str, &str), Vec<String>)>> = Mutex::new(Vec::new());
 /// The number of the stage that runs, 0 without a stage.
 static STAGE: Mutex<u64> = Mutex::new(0);
 /// Set before the first change of the system. Before it, an interrupt stops
@@ -127,11 +127,38 @@ pub fn begin() {
 
 /// Writes the step that starts to the output.
 pub fn progress(step: &str) {
-    println!("pacnix: {step}");
+    say!("pacnix: {step}");
     if let Some((s, start, _, _)) = RUN.lock().unwrap().as_mut() {
         *s = step.to_string();
         *start = Instant::now();
     }
+}
+
+/// The text with each line longer than 80 columns broken between words. The
+/// next parts of a broken line have two more spaces of indent.
+pub fn wrap(text: &str) -> String {
+    let lines = text.split('\n').map(|line| {
+        if line.chars().count() <= 80 {
+            return line.to_string();
+        }
+        let indent = line.len() - line.trim_start().len();
+        let (mut out, mut col) = (" ".repeat(indent), indent);
+        for (i, word) in line.split_whitespace().enumerate() {
+            let len = word.chars().count();
+            if i > 0 && col + 1 + len > 80 {
+                out.push('\n');
+                out.push_str(&" ".repeat(indent + 2));
+                col = indent + 2;
+            } else if i > 0 {
+                out.push(' ');
+                col += 1;
+            }
+            out.push_str(word);
+            col += len;
+        }
+        out
+    });
+    lines.collect::<Vec<_>>().join("\n")
 }
 
 /// Ends the stage when it goes out of scope.
@@ -162,30 +189,41 @@ pub fn stage(step: &str) -> Stage {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(2));
         if *STAGE.lock().unwrap() == id {
-            println!("pacnix: {step}");
+            say!("pacnix: {step}");
         }
     });
     Stage(id)
 }
 
 /// The number of planned changes of each kind, for the last line.
-pub fn planned(kinds: Vec<((&'static str, &'static str), usize)>) {
+pub fn planned(kinds: Vec<((&'static str, &'static str), Vec<String>)>) {
     *PLANNED.lock().unwrap() = kinds;
 }
 
-/// The packages that the pacman transactions of the run changed, from the pacman log.
-fn packages() -> Vec<String> {
-    let Some(offset) = RUN.lock().unwrap().as_ref().map(|r| r.2) else { return vec![] };
+/// The end of the pacman log, as the start of a later read.
+pub fn log_end() -> u64 {
+    std::fs::metadata(PACMAN_LOG).map_or(0, |m| m.len())
+}
+
+/// The packages that pacman changed after the offset in the pacman log, by verb.
+pub fn changed_packages(offset: u64) -> Vec<(&'static str, Vec<String>)> {
     let mut text = String::new();
     if let Ok(mut f) = std::fs::File::open(PACMAN_LOG) {
         let _ = f.seek(std::io::SeekFrom::Start(offset)).and_then(|_| f.read_to_string(&mut text));
     }
     ["installed", "upgraded", "downgraded", "reinstalled", "removed"]
-        .iter()
-        .filter_map(|verb| {
-            let n = text.lines().filter(|l| l.contains(&format!("[ALPM] {verb} "))).count();
-            (n > 0).then(|| format!("{} {verb}", crate::count(n, "package")))
-        })
+        .into_iter()
+        .map(|verb| (verb, text.lines().filter_map(|l| l.split_once(&format!("[ALPM] {verb} "))).map(|(_, r)| r.split(' ').next().unwrap_or(r).to_string()).collect::<Vec<_>>()))
+        .filter(|(_, names)| !names.is_empty())
+        .collect()
+}
+
+/// The packages that the pacman transactions of the run changed, from the pacman log.
+fn packages() -> Vec<String> {
+    let Some(offset) = RUN.lock().unwrap().as_ref().map(|r| r.2) else { return vec![] };
+    changed_packages(offset)
+        .into_iter()
+        .map(|(verb, names)| crate::named("package", verb, &names))
         .collect()
 }
 
@@ -196,24 +234,24 @@ pub fn close(verb: &str, ok: bool) -> i32 {
     let code = if interrupted() { 130 } else if !ok { 1 } else if failed > 0 { 4 } else { 0 };
     if !CHANGING.load(Relaxed) {
         if code != 0 {
-            println!("pacnix: {verb} stopped before any change. Exit status {code}.");
+            say!("pacnix: {verb} stopped before any change. Exit status {code}.");
         }
         return code;
     }
     let mut changes = packages();
     if code == 0 || code == 4 {
-        changes.extend(PLANNED.lock().unwrap().iter().filter(|(_, n)| *n > 0).map(|((noun, verb), n)| format!("{} {verb}", crate::count(*n, noun)).trim_end().to_string()));
+        changes.extend(PLANNED.lock().unwrap().iter().filter(|(_, items)| !items.is_empty()).map(|((noun, verb), items)| crate::named(noun, verb, items)));
     }
     let changes = match changes.is_empty() {
         true if code == 0 || code == 4 => "No changes.".to_string(),
         true => String::new(),
-        false => format!("Changes: {}.", changes.join(", ")),
+        false => format!("Changes: {}.", changes.join("; ")),
     };
     let step = RUN.lock().unwrap().as_ref().map(|r| r.0.clone()).unwrap_or_default();
     match code {
-        0 => println!("pacnix: {verb} done. {changes} Exit status 0."),
-        4 => println!("pacnix: {verb} done, but {} failed. {changes} The next apply does the failed steps again. Exit status 4.", crate::count(failed, "step")),
-        _ => println!(
+        0 => say!("pacnix: {verb} done. {changes} Exit status 0."),
+        4 => say!("pacnix: {verb} done, but {} failed. {changes} The next apply does the failed steps again. Exit status 4.", crate::count(failed, "step")),
+        _ => say!(
             "pacnix: {verb} {} at the step: {step}. The steps before it are done.{}{changes} Run pacnix {verb} again to complete it. Exit status {code}.",
             if code == 130 { "interrupted" } else { "stopped" },
             if changes.is_empty() { "" } else { " " }
@@ -270,9 +308,9 @@ pub fn meter() -> bool {
     let state = format!("{} of {}, {} of {} MiB", complete.len(), crate::count(d.files.len(), "package"), mib(done), mib(total));
     if done != d.done {
         (d.done, d.changed) = (done, Instant::now());
-        println!("pacnix: {}: {state}", d.label);
+        say!("pacnix: {}: {state}", d.label);
     } else if d.changed.elapsed() >= Duration::from_secs(60) {
-        println!("pacnix: {}: no data arrived for {} min: {state}", d.label, d.changed.elapsed().as_secs() / 60);
+        say!("pacnix: {}: no data arrived for {} min: {state}", d.label, d.changed.elapsed().as_secs() / 60);
     }
     true
 }
@@ -310,8 +348,8 @@ pub fn passed(step: &str) -> bool {
 /// Records and shows a step that failed, so that the next apply does it again,
 /// also when this run stops later. Returns false.
 pub fn failure(step: &str, reason: &str) -> bool {
-    println!("pacnix: error: {step}: {reason}");
-    println!("pacnix: the apply continues without this step");
+    say!("pacnix: error: {step}: {reason}");
+    say!("pacnix: the apply continues without this step");
     FAILED.lock().unwrap().push(step.to_string());
     let mut steps = retries();
     if steps.insert(step.to_string()) {
@@ -365,8 +403,8 @@ pub fn heartbeat(command: &str, minutes: u64, meter: &str) {
         _ => (command.to_string(), minutes),
     };
     match meter.trim() {
-        "" => println!("pacnix: the step continues after {minutes} min without output: {step}"),
-        meter => println!("pacnix: the step continues after {minutes} min: {step}: {meter}"),
+        "" => say!("pacnix: the step continues after {minutes} min without output: {step}"),
+        meter => say!("pacnix: the step continues after {minutes} min: {step}: {meter}"),
     }
 }
 
@@ -411,19 +449,19 @@ pub fn summary() {
     let fresh: BTreeMap<String, String> = notes.into_iter().filter(|(p, n)| saved.scriptlets.get(p) != Some(n)).collect();
     let reboot: Vec<String> = reboot_reasons().into_iter().filter(|r| !before.contains(r)).collect();
     if !reboot.is_empty() {
-        println!("pacnix: reboot to use the changes: {}", reboot.join("; "));
+        say!("pacnix: reboot to use the changes: {}", reboot.join("; "));
     }
     for (pkg, note) in &fresh {
-        println!("pacnix: install note of {pkg}:\n  {}", note.trim_end().replace('\n', "\n  "));
+        say!("pacnix: install note of {pkg}:\n  {}", note.trim_end().replace('\n', "\n  "));
     }
     for f in &pacnew {
-        println!("pacnix: new file {f}: merge it with {}", f.trim_end_matches(".pacnew"));
+        say!("pacnix: new file {f}: merge it with {}", f.trim_end_matches(".pacnew"));
     }
     for l in LAST.lock().unwrap().iter() {
-        println!("{l}");
+        say!("{l}");
     }
     for f in FAILED.lock().unwrap().iter() {
-        println!("pacnix: failed step: {f}");
+        say!("pacnix: failed step: {f}");
     }
     if !fresh.is_empty() {
         saved.scriptlets.extend(fresh.clone());

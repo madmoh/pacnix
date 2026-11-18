@@ -26,23 +26,23 @@ impl Plan {
     }
 
     /// The plan lines: created, changed, deleted and restored files.
-    pub fn print(&self, l: [&mut Vec<String>; 4]) {
+    pub fn print(&self, l: [&mut crate::generation::Lines; 4]) {
         let [created, changed, deleted, restored] = l;
         for (p, why) in &self.write {
-            match why.as_str() {
-                "create" => created.push(format!("create file {p}")),
-                why => changed.push(format!("change file {p}{why}")),
+            match why.strip_prefix("create") {
+                Some(value) => created.push((p.clone(), format!("create file {p}{value}"))),
+                None => changed.push((p.clone(), format!("change file {p}{why}"))),
             }
         }
-        changed.extend(self.restore.iter().map(|(p, pkg)| format!("change file {p} back to the file of package {pkg}")));
-        deleted.extend(self.delete.iter().map(|p| format!("delete file {p}")));
-        deleted.extend(self.pacnew.iter().map(|p| format!("delete file {p}.pacnew (the declared content replaces it)")));
-        restored.extend(self.originals.iter().map(|p| format!("restore the original of file {p}")));
+        changed.extend(self.restore.iter().map(|(p, pkg)| (p.clone(), format!("change file {p} back to the file of package {pkg}"))));
+        deleted.extend(self.delete.iter().map(|p| (p.clone(), format!("delete file {p} (pacnix created it)"))));
+        deleted.extend(self.pacnew.iter().map(|p| (format!("{p}.pacnew"), format!("delete file {p}.pacnew (the declared content replaces it)"))));
+        restored.extend(self.originals.iter().map(|p| (p.clone(), format!("restore the original of file {p}"))));
     }
 
     /// The paths of the plan lines, by verb.
     fn steps(&self) -> [(&'static str, Vec<String>); 4] {
-        let (created, changed): (Vec<_>, Vec<_>) = self.write.iter().partition(|(_, why)| why == "create");
+        let (created, changed): (Vec<_>, Vec<_>) = self.write.iter().partition(|(_, why)| why.starts_with("create"));
         [
             ("create", created.into_iter().map(|w| w.0.clone()).collect()),
             ("change", changed.into_iter().chain(&self.restore).map(|w| w.0.clone()).collect()),
@@ -50,6 +50,27 @@ impl Plan {
             ("restore the original of", self.originals.clone()),
         ]
     }
+}
+
+/// The new value of a file for its plan line: the target of a link, or the
+/// lines of a text file that leave and that come, six at most, compared with
+/// the file at the path.
+pub fn value(path: &Path, new: &Path, link: bool) -> String {
+    if link {
+        return format!("\n  link to {}", new.display());
+    }
+    let Ok(text) = std::fs::read_to_string(new) else { return String::new() };
+    let old = std::fs::read_to_string(path).unwrap_or_default();
+    let (before, after): (BTreeSet<&str>, BTreeSet<&str>) = (old.lines().collect(), text.lines().collect());
+    let mut lines: Vec<String> = old.lines().filter(|l| !after.contains(l)).map(|l| format!("- {l}")).collect();
+    lines.extend(text.lines().filter(|l| !before.contains(l)).map(|l| format!("+ {l}")));
+    let more = lines.len().saturating_sub(6);
+    lines.truncate(6);
+    if more > 0 {
+        lines.push(format!("and {more} more changed lines"));
+    }
+    let end = if !text.is_empty() && !text.ends_with('\n') { " (no newline at the end)" } else { "" };
+    format!("{end}{}", lines.iter().map(|l| format!("\n  {l}")).collect::<String>())
 }
 
 pub fn sha256(path: &Path) -> Option<Vec<u8>> {
@@ -163,14 +184,16 @@ pub fn plan(_ctx: &Ctx, g: &Generation, ledger: &[Generation]) -> Result<Plan> {
             }
             continue;
         }
+        let value = value(Path::new(path), spec.target.as_deref().map(Path::new).unwrap_or(Path::new(&spec.source)), spec.target.is_some());
         let why = if std::fs::symlink_metadata(path).is_err() {
-            "create".to_string()
+            format!("create{value}")
         } else if ours(path) {
-            if previous.and_then(|f| f.get(path)) == Some(spec) { " (it differs from the declaration)" } else { "" }.to_string()
+            let drift = if previous.and_then(|f| f.get(path)) == Some(spec) { " (it differs from the declaration)" } else { "" };
+            format!("{drift}{value}")
         } else {
             plan.adopt.push(path.clone());
             let of = owner.get(path).map(|pkg| format!(" of package {pkg}")).unwrap_or_default();
-            format!(", keep the original{of} as {}", original(path).display())
+            format!("\n  keep the original{of} as\n    {}{value}", original(path).display())
         };
         plan.write.push((path.clone(), why));
     }
@@ -386,11 +409,12 @@ fn changes(plan: &Plan) -> Vec<String> {
     plan.write.iter().map(|w| w.0.clone()).chain(plan.restore.iter().map(|r| r.0.clone())).chain(plan.originals.iter().cloned()).chain(plan.delete.iter().cloned()).collect()
 }
 
-pub fn print_triggers(plan: &Plan, triggers: &mut Vec<String>, units: &mut Vec<String>) {
+pub fn print_triggers(plan: &Plan, triggers: &mut crate::generation::Lines, units: &mut crate::generation::Lines) {
     let changed = changes(plan);
-    triggers.extend(triggered(plan, &changed).into_iter().map(|(n, c)| format!("run trigger {n}: {c}")));
-    units.extend(crate::units::changed_units(&changed).into_iter().map(|u| format!("restart unit {u} if it runs")));
-    units.extend(crate::report::retries().into_iter().filter_map(|s| s.strip_prefix("systemctl try-restart ").map(|u| format!("restart unit {u} if it runs (the last apply did not complete it)"))));
+    triggers.extend(triggered(plan, &changed).into_iter().map(|(n, c)| (n.clone(), format!("run trigger {n}: {c}"))));
+    units.extend(crate::units::changed_units(&changed).into_iter().map(|u| (u.clone(), format!("restart unit {u} if it runs"))));
+    let retries = crate::report::retries().into_iter().filter_map(|s| s.strip_prefix("systemctl try-restart ").map(String::from));
+    units.extend(retries.map(|u| (u.clone(), format!("restart unit {u} if it runs (the last apply did not complete it)"))));
 }
 
 /// Runs the triggers of the changed files and the triggers that failed at an

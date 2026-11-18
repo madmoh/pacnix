@@ -151,23 +151,23 @@ pub struct Plan {
 }
 
 impl Plan {
-    pub fn print(&self, l: &mut Vec<String>) {
+    pub fn print(&self, l: &mut crate::generation::Lines) {
         if self.keys {
-            l.push("create the Secure Boot keys of this host with sbctl".to_string());
+            l.push(("keys".to_string(), "create the Secure Boot keys of this host with sbctl".to_string()));
         }
-        l.extend(self.sign.iter().map(|(p, o)| if p == o { format!("sign boot file {p}") } else { format!("sign boot file {p} as {o}") }));
-        l.extend(self.forget.iter().map(|p| format!("stop signing file {p}, which is not a boot file of the configuration")));
+        l.extend(self.sign.iter().map(|(p, o)| (p.clone(), if p == o { format!("sign boot file {p}") } else { format!("sign boot file {p} as {o}") })));
+        l.extend(self.forget.iter().map(|p| (p.clone(), format!("stop signing file {p}, which is not a boot file of the configuration"))));
         if let Some(additions) = &self.enroll {
             let with = if additions.is_empty() { "without db additions".to_string() } else { format!("with {}", additions.join(", ")) };
-            l.push(format!("enroll the Secure Boot keys of this host in the firmware, {with}"));
+            l.push(("firmware keys".to_string(), format!("enroll the Secure Boot keys of this host in the firmware, {with}")));
         }
         for (name, _, action) in &self.tpm {
-            l.push(match action {
+            l.push((name.clone(), match action {
                 Action::Enroll(why) => format!("enroll the TPM2 key of LUKS device {name}: {why}"),
                 Action::Wipe => format!("remove the TPM2 key of LUKS device {name}"),
                 Action::Recovery => format!("enroll a recovery key for LUKS device {name}"),
                 Action::Wait(why) => format!("note: the TPM2 key of LUKS device {name} waits: {why}"),
-            });
+            }));
         }
     }
 }
@@ -272,7 +272,7 @@ pub fn ask_secrets(g: &Generation, plan: &Plan) -> Result<()> {
             if c.wait()?.success() {
                 break p;
             }
-            println!("The passphrase is wrong. Type it again.");
+            say!("The passphrase is wrong. Type it again.");
         };
         let mut pin = String::new();
         while g.m.boot.luks[name].tpm2.pin && plan.tpm.iter().any(|(n, _, a)| n == name && matches!(a, Action::Enroll(_))) && pin.is_empty() {
@@ -280,7 +280,7 @@ pub fn ask_secrets(g: &Generation, plan: &Plan) -> Result<()> {
             if first == rpassword::prompt_password(format!("New TPM2 PIN of the LUKS device {name} again: "))? && !first.is_empty() {
                 pin = first;
             } else {
-                println!("The PINs are empty or not equal. Type them again.");
+                say!("The PINs are empty or not equal. Type them again.");
             }
         }
         secrets.insert(name.clone(), (passphrase, pin));
@@ -374,7 +374,7 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
                 })?;
                 // At once, because the summary does not show when a later step stops the apply.
                 if !key.is_empty() {
-                    println!("pacnix: the recovery key of LUKS device {name}: {key}\n  Write it down and keep it away from this computer. pacnix does not show it again");
+                    say!("pacnix: the recovery key of LUKS device {name}: {key}\n  Write it down and keep it away from this computer. pacnix does not show it again");
                 }
             }
         }

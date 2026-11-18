@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use crate::{Ctx, ask, audit, cmd, files, forward, home, packages, report, run_cmd, run_hidden, run_quiet, secure, trust, units, users};
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -295,27 +296,45 @@ impl Plan {
         Ok(Plan { target, packages, users, files, units, home, secure, data })
     }
 
-    /// The lines of the plan, by kind of change: the noun and the verb of the last line of the run.
-    fn sections(&self) -> Vec<((&'static str, &'static str), Vec<String>)> {
-        let kinds = [("package", ""), ("user", "changed"), ("file", "created"), ("file", "changed"), ("file", "deleted"), ("original", "restored"), ("trigger", "run"), ("unit", "changed"), ("home change", ""), ("Secure Boot step", ""), ("removed feature", "")];
-        let mut s: Vec<((&'static str, &'static str), Vec<String>)> = kinds.map(|k| (k, Vec::new())).into();
-        let [packages, users, created, changed, deleted, restored, triggers, units, home, secure, data] = &mut s[..] else { unreachable!() };
-        self.packages.print(&mut packages.1);
+    /// The items and lines of the plan, by kind of change: the noun and the verb of the last line of the run.
+    fn sections(&self) -> Vec<((&'static str, &'static str), Lines)> {
+        let kinds = [
+            ("package", ""),
+            ("package", "marked"),
+            ("user", "changed"),
+            ("file", "created"),
+            ("file", "changed"),
+            ("file", "deleted"),
+            ("file", "restored"),
+            ("trigger", "run"),
+            ("unit", "changed"),
+            ("home configuration", "activated"),
+            ("home file", "created"),
+            ("home file", "changed"),
+            ("home file", "deleted"),
+            ("home file", "restored"),
+            ("Secure Boot step", ""),
+            ("removed feature", ""),
+        ];
+        let mut s: Vec<((&'static str, &'static str), Lines)> = kinds.map(|k| (k, Vec::new())).into();
+        let [packages, marks, users, created, changed, deleted, restored, triggers, units, activate, home_created, home_changed, home_deleted, home_restored, secure, data] = &mut s[..] else { unreachable!() };
+        self.packages.print(&mut packages.1, &mut marks.1);
         self.users.print(&mut users.1);
         self.files.print([&mut created.1, &mut changed.1, &mut deleted.1, &mut restored.1]);
         files::print_triggers(&self.files, &mut triggers.1, &mut units.1);
         self.units.print(&mut units.1);
-        self.home.print(&mut home.1);
+        self.home.print([&mut activate.1, &mut home_created.1, &mut home_changed.1, &mut home_deleted.1, &mut home_restored.1]);
         self.secure.print(&mut secure.1);
-        data.1.extend(self.data.iter().map(|(f, paths)| format!("delete the data of removed feature {f}: {}", paths.join(", "))));
+        data.1.extend(self.data.iter().map(|(f, paths)| (f.clone(), format!("delete the data of removed feature {f}: {}", paths.join(", ")))));
         s
     }
 
     /// The upgrade, the changes, the declared items that need no change, and a last line.
     fn print(&self) {
-        println!("upgrade the system with pacman -Syu (not with pacnix apply --offline)");
-        let lines: Vec<String> = self.sections().into_iter().flat_map(|s| s.1).collect();
-        lines.iter().for_each(|l| println!("{l}"));
+        say!("{UPGRADE} (pacnix apply --offline does not upgrade)");
+        let sections = self.sections();
+        let lines: Vec<&(String, String)> = sections.iter().flat_map(|s| &s.1).collect();
+        lines.iter().for_each(|l| say!("{}", l.1));
         let m = &self.target.m;
         let declared: [(&str, Vec<&String>); 4] = [
             ("package", m.packages.repo.iter().chain(&m.packages.aur).chain(m.packages.local.keys()).collect()),
@@ -323,16 +342,27 @@ impl Plan {
             ("file", m.files.keys().collect()),
             ("unit", m.units.enable.iter().chain(&m.units.disable).chain(&m.units.mask).collect()),
         ];
-        let named = |item: &str| lines.iter().any(|l| l.split([' ', ',', ':']).any(|w| w == item));
-        let same: Vec<String> = declared.iter().map(|(noun, items)| (noun, items.iter().filter(|i| !named(i)).count())).filter(|(_, n)| *n > 0).map(|(noun, n)| crate::count(n, noun)).collect();
+        let changed: BTreeSet<&String> = lines.iter().map(|l| &l.0).collect();
+        let same: Vec<String> = declared
+            .iter()
+            .map(|(noun, items)| (noun, items.iter().filter(|i| !changed.contains(*i)).map(|i| i.as_str()).collect::<Vec<_>>()))
+            .filter(|(_, items)| !items.is_empty())
+            .map(|(noun, items)| if items.len() > 3 { crate::count(items.len(), noun) } else { items.join(", ") })
+            .collect();
         if !same.is_empty() {
-            println!("already as declared: {}", same.join(", "));
+            say!("already as declared: {}", same.join(", "));
         }
-        println!("pacnix: plan done: {} and the system upgrade. Nothing changed.", crate::count(lines.len(), "change"));
+        say!("pacnix: plan done: {} and the system upgrade. Nothing changed.", crate::count(lines.len(), "change"));
     }
 }
 
 /// The file and line of the first line in the *.nix files of a local flake that contains the text.
+/// The lines of a kind of change, each with its item: a package, a path, a unit or a name.
+pub type Lines = Vec<(String, String)>;
+
+/// The system upgrade, in plan and in apply.
+pub const UPGRADE: &str = "system upgrade: refresh the sync databases, then upgrade the packages";
+
 pub fn locate(ctx: &Ctx, text: &str) -> Option<String> {
     if ctx.flake.contains(':') {
         return None;
@@ -400,7 +430,7 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
     let delete = ask(&[packages::removals(&plan.packages), builds.asks.clone()].concat(), &audit::asks(&plan.data), &ctx.opts)?;
     users::ask_passwords(&plan.users, &ctx.opts)?;
     secure::ask_secrets(&plan.target, &plan.secure)?;
-    report::planned(plan.sections().into_iter().skip(1).map(|(kind, lines)| (kind, lines.len())).collect());
+    report::planned(plan.sections().into_iter().skip(1).map(|(kind, lines)| (kind, lines.into_iter().map(|l| l.0).collect())).collect());
     report::changing();
     let current = std::fs::canonicalize(PENDING).ok();
     if current.as_deref() != Some(Path::new(&plan.target.path)) {

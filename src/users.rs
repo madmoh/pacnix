@@ -23,12 +23,12 @@ pub struct Plan {
 }
 
 impl Plan {
-    pub fn print(&self, l: &mut Vec<String>) {
-        l.extend(self.groupadd.iter().map(|(g, _)| format!("create group {g}")));
-        l.extend(self.useradd.iter().map(|(u, _)| format!("create user {u}")));
-        l.extend(self.usermod.iter().map(|(u, _, what)| format!("change user {u}: {}", what.join(", "))));
-        l.extend(self.userdel.iter().map(|u| format!("delete user {u} (the home directory stays)")));
-        l.extend(self.groupdel.iter().map(|g| format!("delete group {g}")));
+    pub fn print(&self, l: &mut crate::generation::Lines) {
+        l.extend(self.groupadd.iter().map(|(g, _)| (g.clone(), format!("create group {g}"))));
+        l.extend(self.useradd.iter().map(|(u, _)| (u.clone(), format!("create user {u}"))));
+        l.extend(self.usermod.iter().map(|(u, _, what)| (u.clone(), format!("change user {u}: {}", what.join(", ")))));
+        l.extend(self.userdel.iter().map(|u| (u.clone(), format!("delete user {u} (the home directory stays)"))));
+        l.extend(self.groupdel.iter().map(|g| (g.clone(), format!("delete group {g}"))));
     }
 }
 
@@ -135,7 +135,7 @@ pub fn ask_passwords(plan: &Plan, opts: &Opts) -> Result<()> {
             if first == again && !first.is_empty() {
                 passwords.insert(name.clone(), first);
             } else {
-                println!("The passwords are empty or not equal. Type them again.");
+                say!("The passwords are empty or not equal. Type them again.");
             }
         }
     }

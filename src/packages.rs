@@ -65,16 +65,17 @@ impl Plan {
         skip
     }
 
-    pub fn print(&self, l: &mut Vec<String>) {
-        let mut add = |prefix: &str, list: &[String]| l.extend(list.iter().map(|p| format!("{prefix} {p}")));
+    /// The lines of the packages, and the lines of the changes of their install reason.
+    pub fn print(&self, l: &mut crate::generation::Lines, marks: &mut crate::generation::Lines) {
+        let mut add = |prefix: &str, list: &[String]| l.extend(list.iter().map(|p| (p.clone(), format!("{prefix} {p}"))));
         add("build AUR package", &self.build);
         add("build local package", &self.local);
         add("drop from local repository", &self.drop);
         add("install package", &self.install);
         add("install package from the Arch Linux Archive", &self.archive);
-        add("mark package explicit", &self.explicit);
-        add("mark package as dependency", &self.deps);
         add("remove package", &self.remove);
+        marks.extend(self.explicit.iter().map(|p| (p.clone(), format!("mark {p} as explicitly installed (it is installed as a dependency)"))));
+        marks.extend(self.deps.iter().map(|p| (p.clone(), format!("mark {p} as installed as a dependency"))));
     }
 }
 
@@ -368,7 +369,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
     let repo_names: BTreeSet<String> = repo.iter().map(|i| i.name.clone()).collect();
     let local_names: Vec<String> = p.local.keys().cloned().collect();
     let (declared, unknown) = declared(g, &sync)?;
-    plan.unknown = unknown;
+    plan.unknown = unknown.into_iter().map(|n| suggest(n, &sync)).collect();
     let locals = local_dirs(g);
     let mut built_aur = built_aur(g);
     built_aur.extend(p.providers.values().filter(|v| !sync.contains(*v) && !locals.contains_key(*v)).cloned());
@@ -620,9 +621,22 @@ fn uname() -> String {
 }
 
 /// Refuses a plan that is not safe. Runs before any change.
+/// The name with the sync packages of the closest names, for a name that does not exist.
+fn suggest(name: String, sync: &BTreeSet<String>) -> String {
+    let mut close: Vec<(usize, &String)> = sync.iter().map(|s| (strsim::levenshtein(&name, s), s)).filter(|(d, _)| *d <= 2).collect();
+    close.sort();
+    match close.len() {
+        0 => name,
+        _ => format!("{name} (did you mean {}?)", close.iter().take(3).map(|c| c.1.as_str()).collect::<Vec<_>>().join(", ")),
+    }
+}
+
 pub fn check(ctx: &Ctx, plan: &Plan) -> Result<()> {
     if !plan.unknown.is_empty() {
-        let at = |n: &String| crate::generation::locate(ctx, &format!("\"{n}\"")).map(|at| format!("{n} ({at})")).unwrap_or(n.clone());
+        let at = |n: &String| {
+            let name = n.split(' ').next().unwrap_or(n);
+            crate::generation::locate(ctx, &format!("\"{name}\"")).map_or(n.clone(), |at| format!("{n}, in {at}"))
+        };
         bail!("{}: {}. Correct the names in the configuration", match plan.unknown.len() { 1 => "unknown package", _ => "unknown packages" }, plan.unknown.iter().map(at).collect::<Vec<_>>().join(", "));
     }
     if !plan.conflicts.is_empty() {
@@ -671,7 +685,11 @@ fn download(args: &[&str]) -> Result<()> {
         return Ok(());
     }
     let label = format!("download {}", count(files.len(), "package"));
-    report::progress(&format!("{label}: {:.1} MiB", files.iter().map(|f| f.1).sum::<u64>() as f64 / 1048576.0));
+    let size = files.iter().map(|f| f.1).sum::<u64>() as f64;
+    report::progress(&match size < 1048576.0 {
+        true => format!("{label}: {:.0} KiB", (size / 1024.0).ceil()),
+        false => format!("{label}: {:.1} MiB", size / 1048576.0),
+    });
     let cache = output(cmd("pacman-conf", &["--config", CONF, "CacheDir"]))?.lines().next().unwrap_or("/var/cache/pacman/pkg/").to_string();
     report::download(&label, &cache, Some(files));
     let result = run_hidden(pacman(&["-Sw", "--noconfirm", "--ask=4", "--config", CONF]).args(args));
@@ -968,7 +986,7 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<BTreeSet<String>> {
         // Without a record of a build, the changes start at the empty tree of Git: all files.
         let old = record.as_ref().map(|r| r.head.clone()).filter(|h| !h.is_empty()).unwrap_or("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string());
         if !local && old != head {
-            println!("pacnix: changes of the AUR package {name} since its last build:");
+            say!("pacnix: changes of the AUR package {name} since its last build:");
             run_cmd(as_builder(&["git", "-C", dir, "--no-pager", "diff", "--stat", "--patch", &old, &head]))?;
         }
         if *local || !names.iter().all(|n| built.get(n) == Some(&version)) {
@@ -1045,12 +1063,12 @@ pub fn recover_lock() -> Result<()> {
         if running {
             bail!("pacman is running");
         }
-        eprintln!("pacnix: remove the stale pacman lock of an interrupted transaction");
+        esay!("pacnix: remove the stale pacman lock of an interrupted transaction");
         std::fs::remove_file(lock)?;
     }
     for e in std::fs::read_dir("/var/lib/pacman/local")?.flatten() {
         if e.path().is_dir() && !(e.path().join("desc").exists() && e.path().join("files").exists()) {
-            eprintln!("pacnix: remove the incomplete database entry {}", e.path().display());
+            esay!("pacnix: remove the incomplete database entry {}", e.path().display());
             std::fs::remove_dir_all(e.path())?;
         }
     }
@@ -1147,7 +1165,7 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
         transaction(&args)?;
     }
     if !plan.explicit.is_empty() {
-        run_cmd(pacman(&["-D", "--asexplicit"]).args(&plan.explicit))?;
+        run_hidden(pacman(&["-D", "--asexplicit"]).args(&plan.explicit))?;
     }
     if !skip.is_empty() {
         if !plan.remove.is_empty() || !plan.deps.is_empty() {
@@ -1157,7 +1175,7 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
         return save_made(plan);
     }
     if !plan.deps.is_empty() {
-        run_cmd(pacman(&["-D", "--asdeps"]).args(&plan.deps))?;
+        run_hidden(pacman(&["-D", "--asdeps"]).args(&plan.deps))?;
     }
     if !plan.remove.is_empty() {
         report::progress(&format!("remove {}: {}", count(plan.remove.len(), "package"), plan.remove.join(", ")));
@@ -1207,14 +1225,16 @@ pub fn databases() -> Vec<Option<std::time::SystemTime>> {
 pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
     write_confs(g)?;
     trust_server(g)?;
-    report::progress("refresh the sync databases");
+    report::progress(crate::generation::UPGRADE);
     recover_lock()?;
     let pins = pinned(g);
     let pins: Vec<&str> = pins.iter().map(String::as_str).collect();
     run_hidden(pacman(&["-Sy", "--config", CONF]))?;
+    let start = report::log_end();
     download(&[&["-u"][..], &pins].concat())?;
-    report::progress("upgrade the system with pacman -Su");
     transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
+    let done: Vec<String> = report::changed_packages(start).into_iter().map(|(verb, names)| crate::named("package", verb, &names)).collect();
+    say!("pacnix: system upgrade: {}", if done.is_empty() { "the packages are up to date".to_string() } else { done.join(", ") });
     if !builds.queue.is_empty() {
         ensure_chroot()?;
         // An AUR package that did not build stays at its installed version.

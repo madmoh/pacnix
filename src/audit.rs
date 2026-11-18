@@ -108,12 +108,12 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
 
     home(&g, &origins, &mut report)?;
     if let Some(state) = crate::secure::audit(&g, &mut report)? {
-        println!("{state}");
+        say!("{state}");
     }
     print(&report);
     let mut notes = Vec::new();
     crate::report::audit(&mut notes);
-    notes.iter().for_each(|n| println!("pacnix: {n}"));
+    notes.iter().for_each(|n| say!("pacnix: {n}"));
     Ok(())
 }
 
@@ -121,7 +121,7 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
 /// each kind, and at the end one line that tells what to do.
 fn print(report: &[String]) {
     if report.is_empty() {
-        println!("pacnix: the system agrees with the configuration.");
+        say!("pacnix: the system agrees with the configuration.");
         return;
     }
     let mut kinds: Vec<(&str, Vec<&str>)> = Vec::new();
@@ -132,12 +132,12 @@ fn print(report: &[String]) {
             None => kinds.push((kind, vec![item])),
         }
     }
-    println!("pacnix: items that differ from the configuration: {}", report.len());
+    say!("pacnix: items that differ from the configuration: {}", report.len());
     for (kind, items) in &kinds {
-        println!("{kind} ({}):", items.len());
-        items.iter().for_each(|i| println!("  {}", i.replace('\n', "\n  ")));
+        say!("{kind} ({}):", items.len());
+        items.iter().for_each(|i| say!("  {}", i.replace('\n', "\n  ")));
     }
-    println!("pacnix apply corrects the managed files, the declared units, the boot files and the TPM2 keys. Declare each other item, add it to claims or audit.ignore, or remove it.");
+    say!("pacnix apply corrects the managed files, the declared units, the boot files and the TPM2 keys. Declare each other item, add it to claims or audit.ignore, or remove it.");
 }
 
 /// Lists entries of ~/.config, ~/.local/share, ~/.cache and dot entries of

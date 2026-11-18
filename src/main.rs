@@ -1,3 +1,13 @@
+/// Prints a line that breaks between words before column 80.
+macro_rules! say {
+    ($($t:tt)*) => { println!("{}", crate::report::wrap(&format!($($t)*))) };
+}
+
+/// As say!, to standard error.
+macro_rules! esay {
+    ($($t:tt)*) => { eprintln!("{}", crate::report::wrap(&format!($($t)*))) };
+}
+
 mod audit;
 mod files;
 mod generation;
@@ -25,7 +35,7 @@ struct Cli {
     /// The flake [default: /etc/pacnix]
     #[arg(long, global = true, default_value = "/etc/pacnix", hide_default_value = true)]
     flake: String,
-    /// The host in the flake [default: /etc/hostname]
+    /// The host in the flake [default: the host name in /etc/hostname]
     #[arg(long, global = true)]
     host: Option<String>,
     #[command(subcommand)]
@@ -90,7 +100,7 @@ fn main() {
     let result = run(cli);
     if let Err(e) = &result {
         if !report::interrupted() {
-            eprintln!("pacnix: error: {e:#}");
+            esay!("pacnix: error: {e:#}");
         }
     }
     std::process::exit(report::close(verb, result.is_ok()));
@@ -126,7 +136,7 @@ fn run(cli: Cli) -> Result<()> {
     if !flake.contains(':') && !std::path::Path::new(&flake).join("flake.nix").exists() {
         bail!("{flake} has no flake.nix. Make the configuration as \"First configuration\" of the README tells, or give --flake with the directory of the configuration");
     }
-    println!("pacnix: host {host} of the flake {flake}");
+    say!("pacnix: host {host} of the flake {flake}");
     let ctx = |opts| Ctx { flake: flake.clone(), host: host.clone(), opts };
     match cli.verb {
         Verb::Plan => generation::plan(&ctx(Opts::default())),
@@ -265,7 +275,7 @@ pub fn ask(items: &[String], data: &[String], opts: &Opts) -> Result<bool> {
         return Ok(DELETE.load(Relaxed));
     }
     for i in items.iter().chain(data) {
-        println!("{i}");
+        say!("{i}");
     }
     if !opts.yes && !std::io::stdin().is_terminal() {
         bail!("these items need a confirmation. Give --yes to continue without a terminal");
@@ -509,6 +519,17 @@ pub fn count(n: usize, noun: &str) -> String {
         1 => format!("1 {noun}"),
         _ => format!("{n} {noun}s"),
     }
+}
+
+/// The items with their noun and verb, for example "file created: /etc/motd".
+/// More than three items show as their number, for example "4 files created".
+pub fn named(noun: &str, verb: &str, items: &[String]) -> String {
+    let text = match items.len() {
+        1 => format!("{noun} {verb}: {}", items[0]),
+        2 | 3 => format!("{noun}s {verb}: {}", items.join(", ")),
+        n => format!("{} {verb}", count(n, noun)),
+    };
+    text.replace("  ", " ").replace(" :", ":").trim_end().to_string()
 }
 
 pub fn cmd(program: &str, args: &[&str]) -> Command {
