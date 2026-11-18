@@ -11,7 +11,7 @@ packages_match $h
 for u in sshd.service nix-daemon.socket systemd-networkd.service; do
 	check $h "systemctl is-enabled $u" "$u is not enabled"
 done
-check $h "test \$(systemctl is-enabled systemd-time-wait-sync.service) = disabled" "an undeclared unit stays enabled"
+check $h "test \$(systemctl is-enabled systemd-time-wait-sync.service) = enabled" "a unit that the configuration does not declare changed"
 pass
 name=02-idempotency
 step "second apply changes nothing"

@@ -2,7 +2,8 @@
 - Nix decides, Arch executes: Nix evaluates and records the configuration; pacman, makepkg and systemd make every change.
 - No software from nixpkgs runs on the host, apart from what Home Manager needs to evaluate and activate.
 - Reuse mature Arch and NixOS components; build only the missing part. Ask before you depend on a young or single-maintainer project.
-- Apply is idempotent and reconciles: a removed declaration leaves the system, and the config explains the system.
+- pacnix touches only what the configuration declares. When the configuration declares nothing about an area (packages, units, Secure Boot, TPM2 keys, boot loaders, users, mounts, anything), pacnix does not add, remove, change, or even check that area. An empty configuration, or one with a single package, gives a plan with only that package.
+- Apply is idempotent and reconciles only what pacnix made: a removed declaration takes away what pacnix itself made from it, and nothing else. The audit shows the rest.
 - Support what Arch supports (desktops, kernels, network stacks, boot loaders). pacman is the only fixed part. Never assume the author's stack.
 - When pacman or systemd already lets a user choose something (providers, presets, drop-ins), expose that choice instead of a new concept.
 - Call the pacman and systemctl commands, not libalpm, so that upstream releases do not break pacnix.

@@ -17,6 +17,7 @@ const TPM: &str = "/sys/class/tpm/tpm0";
 static SECRETS: Mutex<BTreeMap<String, (String, String)>> = Mutex::new(BTreeMap::new());
 
 /// The Secure Boot state of the firmware and the keys of sbctl.
+#[derive(Default)]
 struct Firmware {
     /// The firmware checks the signatures.
     enforced: bool,
@@ -163,6 +164,9 @@ impl Plan {
 /// Secure Boot while the firmware checks the signatures.
 pub fn check(target: &Generation, old: &Generation) -> Result<()> {
     let sb = &target.m.boot.secure_boot;
+    if !sb.enable && !old.m.boot.secure_boot.enable {
+        return Ok(());
+    }
     let fw = firmware();
     if sb.enable && fw.enforced && !fw.ours {
         bail!("the firmware checks Secure Boot signatures with keys that are not the keys of this host, thus a boot file that pacnix signs does not boot. Reset Secure Boot to Setup Mode in the firmware, or turn off Secure Boot, then run pacnix again");
@@ -176,9 +180,12 @@ pub fn check(target: &Generation, old: &Generation) -> Result<()> {
     Ok(())
 }
 
-pub fn plan(g: &Generation) -> Result<Plan> {
+/// The steps for Secure Boot and the LUKS devices. pacnix reads the firmware
+/// only when the configuration declares Secure Boot or a TPM2 key, and
+/// removes only the TPM2 keys of an earlier declaration.
+pub fn plan(g: &Generation, old: &Generation) -> Result<Plan> {
     let sb = &g.m.boot.secure_boot;
-    let fw = firmware();
+    let fw = if sb.enable || g.m.boot.luks.values().any(|l| l.tpm2.enable) { firmware() } else { Firmware::default() };
     let mut plan = Plan::default();
     if sb.enable {
         plan.keys = !fw.keys;
@@ -186,7 +193,9 @@ pub fn plan(g: &Generation) -> Result<Plan> {
         plan.forget = forgotten(g);
         plan.enroll = fw.setup.then(|| sb.db_additions.clone());
     }
-    for (name, l) in &g.m.boot.luks {
+    let earlier = |name: &String| old.m.boot.luks.get(name).is_some_and(|o| o.tpm2.enable);
+    let gone = old.m.boot.luks.iter().filter(|(n, o)| o.tpm2.enable && !g.m.boot.luks.contains_key(*n)).map(|(n, o)| (n, o, false));
+    for (name, l, declared) in g.m.boot.luks.iter().map(|(n, l)| (n, l, true)).chain(gone) {
         let dev = device(&l.device);
         if !Path::new(&dev).exists() {
             continue;
@@ -195,8 +204,8 @@ pub fn plan(g: &Generation) -> Result<Plan> {
         let tokens: Vec<&serde_json::Value> = meta["tokens"].as_object().into_iter().flat_map(|t| t.values()).collect();
         let tpm: Vec<&&serde_json::Value> = tokens.iter().filter(|t| t["type"] == "systemd-tpm2").collect();
         let mut add = |a| plan.tpm.push((name.clone(), dev.clone(), a));
-        if !l.tpm2.enable {
-            if !tpm.is_empty() {
+        if !declared || !l.tpm2.enable {
+            if !tpm.is_empty() && earlier(name) {
                 add(Action::Wipe);
             }
         } else {
@@ -219,7 +228,7 @@ pub fn plan(g: &Generation) -> Result<Plan> {
                 Some(why) => add(Action::Enroll(why.to_string())),
             }
         }
-        if l.recovery_key && !tokens.iter().any(|t| t["type"] == "systemd-recovery") {
+        if declared && l.recovery_key && !tokens.iter().any(|t| t["type"] == "systemd-recovery") {
             add(Action::Recovery);
         }
     }
@@ -368,7 +377,7 @@ pub fn audit(g: &Generation, report: &mut Vec<String>) -> Result<Option<String>>
     if fw.keys {
         report.extend(unsigned(g).into_iter().map(|(f, _)| format!("boot file without a signature of this host: {f}")));
     }
-    for (name, action) in plan(g)?.tpm.into_iter().map(|(n, _, a)| (n, a)) {
+    for (name, action) in plan(g, g)?.tpm.into_iter().map(|(n, _, a)| (n, a)) {
         report.push(match action {
             Action::Enroll(why) => format!("TPM2 key of LUKS device {name}: not current, {why}"),
             Action::Wait(why) => format!("TPM2 key of LUKS device {name}: waits, {why}"),

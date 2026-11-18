@@ -12,6 +12,8 @@ scenario $h '{ features.desktop = "i3"; }'
 apply $h >/dev/null || fail "apply failed"
 check $h 'test "$(readlink /etc/systemd/system/display-manager.service)" = /usr/lib/systemd/system/lightdm.service' "lightdm is not the display manager"
 packages_match $h
+# The cloud image installed the kernel and mkinitcpio. Here pacnix installed them, thus they go with their declaration.
+made $h linux mkinitcpio
 step "switch the stack"
 switch='{ features.desktop = "fluxbox"; features.base = { kernel = "linux-lts"; network = "NetworkManager"; }; packages.providers.initramfs = "booster"; }'
 scenario $h "$switch"

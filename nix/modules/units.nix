@@ -8,7 +8,7 @@ in
     enable = mkOption {
       type = types.listOf types.str;
       default = [ ];
-      description = "systemd system units that are enabled and started. The vendor presets of the packages decide the units that are not in enable or disable.";
+      description = "systemd system units that are enabled and started. pacnix does not change the units that are not in enable, disable or mask.";
     };
     disable = mkOption {
       type = types.listOf types.str;

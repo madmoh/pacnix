@@ -10,6 +10,9 @@ const BUILD: &str = "/var/lib/pacnix/build";
 const CONF: &str = "/var/lib/pacnix/pacman.conf";
 const LOCAL_CONF: &str = "/var/lib/pacnix/pacman-local.conf";
 const SOURCES: &str = "/var/lib/pacnix/local-sources.json";
+/// The packages that pacnix installed or marked explicit for a declaration.
+/// Only these become dependencies again when their declaration goes.
+const MADE: &str = "/var/lib/pacnix/packages.json";
 /// The signing key of the local repository, which only root reads. Hosts that
 /// install from this repository check the fingerprint of its public key.
 const GNUPG: &str = "/var/lib/pacnix/gnupg";
@@ -30,7 +33,10 @@ pub struct Plan {
     deps: Vec<String>,
     remove: Vec<String>,
     protected: Vec<String>,
-    declared: usize,
+    /// The record of the packages that pacnix made.
+    made: BTreeSet<String>,
+    /// The orphans before the apply, which stay.
+    orphans: BTreeSet<String>,
     /// The dependencies of the packages that are not installed.
     depends: HashMap<String, Vec<String>>,
 }
@@ -335,7 +341,26 @@ fn local_dirs(g: &Generation) -> BTreeMap<String, String> {
     map
 }
 
-pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
+/// The record of the packages that pacnix made. Without the record, the
+/// packages of the earlier generation, which pacnix 0.10 made explicit.
+fn made(old: &BTreeSet<String>) -> BTreeSet<String> {
+    std::fs::read(MADE).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| old.clone())
+}
+
+/// Writes the record: the earlier record and the packages of this apply, less
+/// the packages that are no longer explicitly installed.
+fn save_made(plan: &Plan) -> Result<()> {
+    let explicit: BTreeSet<String> = output_any(&mut pacman(&["-Qqe"]))?.split_whitespace().map(String::from).collect();
+    let list: BTreeSet<&String> = plan.made.iter().chain(&plan.install).chain(&plan.explicit).filter(|n| explicit.contains(*n)).collect();
+    std::fs::write(MADE, serde_json::to_vec(&list)?)?;
+    Ok(())
+}
+
+/// pacnix changes only the declared packages and the packages that it made:
+/// these become dependencies again when their declaration goes, and pacman
+/// removes the orphans that this makes. The other packages and the orphans of
+/// before stay.
+pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
     let p = &g.m.packages;
     let mut plan = Plan::default();
     write_confs(g)?;
@@ -344,7 +369,6 @@ pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
     let repo_names: BTreeSet<String> = repo.iter().map(|i| i.name.clone()).collect();
     let local_names: Vec<String> = p.local.keys().cloned().collect();
     let (declared, unknown) = declared(g, &sync)?;
-    plan.declared = declared.len();
     plan.unknown = unknown;
     let locals = local_dirs(g);
     let mut built_aur = built_aur(g);
@@ -393,10 +417,12 @@ pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
 
     // Reconciliation of the installed packages.
     let inst = installed()?;
+    plan.made = made(&self::declared(old, &sync)?.0);
     plan.install = declared.iter().filter(|n| !inst.contains_key(*n)).cloned().collect();
     plan.explicit = declared.iter().filter(|n| inst.get(*n).is_some_and(|i| !i.explicit)).cloned().collect();
-    plan.deps = inst.values().filter(|i| i.explicit && !declared.contains(&i.name)).map(|i| i.name.clone()).collect();
+    plan.deps = inst.values().filter(|i| i.explicit && !declared.contains(&i.name) && plan.made.contains(&i.name)).map(|i| i.name.clone()).collect();
     plan.deps.sort();
+    plan.orphans = output_any(&mut pacman(&["-Qqdtt"]))?.split_whitespace().map(String::from).collect();
     pin(g, &mut plan, &inst, &sync, &repo)?;
 
     // The local or served repository database is current, the synced copy of it can be older.
@@ -426,6 +452,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
     let mut keep: BTreeSet<String> = BTreeSet::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut queue: Vec<String> = declared.iter().cloned().collect();
+    queue.extend(inst.values().filter(|i| i.explicit && !plan.deps.contains(&i.name)).map(|i| i.name.clone()));
     let mut pending_sync: Vec<String> = Vec::new();
     let mut chosen: BTreeSet<String> = BTreeSet::new();
     loop {
@@ -489,7 +516,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation) -> Result<Plan> {
     plan.deps.extend(chosen);
     plan.unknown.extend(wrong_providers(g, &repo, &sync)?);
     plan.depends = universe.into_iter().map(|(n, i)| (n, i.depends.iter().map(|d| dep_name(d).to_string()).collect())).collect();
-    plan.remove = inst.keys().filter(|n| !keep.contains(*n)).cloned().collect();
+    plan.remove = inst.keys().filter(|n| !keep.contains(*n) && !plan.orphans.contains(*n)).cloned().collect();
     plan.remove.sort();
     let kernel = output_any(pacman(&["-Qqo", &format!("/usr/lib/modules/{}/vmlinuz", uname())]))?;
     plan.protected = plan
@@ -585,9 +612,6 @@ fn uname() -> String {
 
 /// Refuses a plan that is not safe. Runs before any change.
 pub fn check(ctx: &Ctx, plan: &Plan) -> Result<()> {
-    if plan.declared == 0 {
-        bail!("the configuration declares no packages; pacnix refuses to remove every package");
-    }
     if !plan.unknown.is_empty() {
         bail!("unknown packages: {}", plan.unknown.join(", "));
     }
@@ -1065,6 +1089,10 @@ pub fn prepare(g: &Generation, plan: &Plan, builds: Builds) -> Result<BTreeSet<S
 /// wait: a skipped package can be the replacement of a package that leaves,
 /// for example of a network service.
 pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
+    // The record has the packages of this apply before the transaction, so that an interruption does not lose them.
+    let mut list: BTreeSet<&String> = plan.made.iter().chain(&plan.install).chain(&plan.explicit).collect();
+    list.retain(|n| !plan.deps.contains(*n) || plan.made.contains(*n));
+    std::fs::write(MADE, serde_json::to_vec(&list)?)?;
     let targets = plan.targets(skip);
     if !targets.is_empty() {
         report::progress(&format!("install {} packages", targets.len()));
@@ -1087,7 +1115,7 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
             let step = "remove the packages that the configuration does not declare";
             report::failure(step, "it waits until each declared package builds, because a package that did not build can replace a package that leaves");
         }
-        return Ok(());
+        return save_made(plan);
     }
     if !plan.deps.is_empty() {
         run_cmd(pacman(&["-D", "--asdeps"]).args(&plan.deps))?;
@@ -1097,12 +1125,12 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
         transaction(&[&["-Rns", "--noconfirm"][..], &plan.remove.iter().map(String::as_str).collect::<Vec<_>>()].concat())?;
     }
     let orphans = output_any(&mut pacman(&["-Qqdtt"]))?;
-    let orphans: Vec<&str> = orphans.split_whitespace().collect();
+    let orphans: Vec<&str> = orphans.split_whitespace().filter(|n| !plan.orphans.contains(*n)).collect();
     if !orphans.is_empty() {
         eprintln!("pacnix: remove packages that no declared package needs: {}", orphans.join(" "));
         transaction(&[&["-Rns", "--noconfirm"][..], &orphans].concat())?;
     }
-    Ok(())
+    save_made(plan)
 }
 
 /// The AUR packages that upgrade, before any change, with their records and the

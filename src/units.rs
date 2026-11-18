@@ -6,15 +6,17 @@ use std::io::Write;
 use std::path::Path;
 
 /// The preset file of pacnix. It has priority over the vendor presets of the
-/// packages, so the enabled units are the declared units plus the units that
-/// vendor presets enable, less the declared disabled units. The Arch preset
-/// 99-default.preset disables the rest.
+/// packages. pacnix runs systemctl preset only for the declared units and the
+/// units of the earlier generation: when a declaration goes, the vendor preset
+/// decides the unit again, and the other units stay as they are.
 pub const PRESET: &str = "/etc/systemd/system-preset/00-pacnix.preset";
 const SCRATCH: &str = "/run/pacnix/preset-root";
 
 #[derive(Default)]
 pub struct Plan {
     preset: String,
+    /// The units that systemctl preset gets: the declared units and the units of the earlier generation.
+    touched: Vec<String>,
     now: BTreeSet<String>,
     /// The units of units.enable. Only these start at the apply; a unit that a
     /// vendor preset enables starts at the next boot, in its own target.
@@ -70,7 +72,11 @@ pub fn template(unit: &str) -> String {
     }
 }
 
+/// The preset file of the declared units, empty without units.
 fn preset_text(g: &Generation) -> String {
+    if g.m.units.enable.is_empty() && g.m.units.disable.is_empty() {
+        return String::new();
+    }
     let mut lines: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for u in &g.m.units.enable {
         let instance = u.split_once('@').and_then(|(_, rest)| rest.rsplit_once('.')).map(|(i, _)| i.to_string());
@@ -87,10 +93,11 @@ fn preset_text(g: &Generation) -> String {
     text
 }
 
-/// Runs preset-all in a copy of the unit directories with the target preset
-/// file and the target unit files. systemd computes the result, so Also=,
-/// Alias= and DefaultInstance= work as they do on the live system.
-fn simulate(g: &Generation, old: &Generation, preset: &str) -> Result<BTreeSet<String>> {
+/// Runs systemctl preset for the units, or preset-all without units, in a
+/// copy of the unit directories with the target preset file and the target
+/// unit files. systemd computes the result, so Also=, Alias= and
+/// DefaultInstance= work as they do on the live system.
+fn simulate(g: &Generation, old: &Generation, preset: &str, units: Option<&[String]>) -> Result<BTreeSet<String>> {
     let root = Path::new(SCRATCH);
     let _ = std::fs::remove_dir_all(root);
     for dir in ["etc/systemd/system", "etc/systemd/system-preset", "usr/lib/systemd/system", "usr/lib/systemd/system-preset"] {
@@ -114,19 +121,42 @@ fn simulate(g: &Generation, old: &Generation, preset: &str) -> Result<BTreeSet<S
         }
     }
     std::fs::write(root.join(PRESET.trim_start_matches('/')), preset)?;
-    run_silent(cmd("systemctl", &["--root", SCRATCH, "preset-all"]))?;
+    match units {
+        Some(units) => run_silent(cmd("systemctl", &["--root", SCRATCH, "preset"]).args(units))?,
+        None => run_silent(cmd("systemctl", &["--root", SCRATCH, "preset-all"]))?,
+    }
     let enabled = unit_states(Some(SCRATCH)).map(|s| in_state(&s, "enabled"));
     std::fs::remove_dir_all(root)?;
     enabled
 }
 
-/// The units that preset-all enables and disables. Declared units of packages
-/// that are not installed yet are listed as well.
-pub fn plan(g: &Generation, old: &Generation) -> Result<Plan> {
+/// The declared units and the units of the earlier generation whose unit file
+/// exists and stays: a unit whose declared unit file goes stops with it.
+fn touched(g: &Generation, old: &Generation, states: &BTreeMap<String, String>) -> Vec<String> {
+    let gone = |u: &str| [u.to_string(), template(u)].iter().any(|f| {
+        let path = format!("/etc/systemd/system/{f}");
+        old.m.files.contains_key(&path) && !g.m.files.contains_key(&path)
+    });
+    let all = [g, old].into_iter().flat_map(|x| x.m.units.enable.iter().chain(&x.m.units.disable));
+    let mut units: Vec<String> = all.filter(|u| (states.contains_key(*u) || states.contains_key(&template(u))) && !gone(u)).cloned().collect();
+    units.sort();
+    units.dedup();
+    units
+}
+
+/// The units that systemctl preset enables and disables. Declared units of
+/// packages that are not installed yet are listed as well. With `all`, for the
+/// audit, the result of preset-all: the state that the vendor presets give.
+pub fn plan(g: &Generation, old: &Generation, all: bool) -> Result<Plan> {
     let mut plan = Plan { preset: preset_text(g), declared: g.m.units.enable.iter().cloned().collect(), ..Default::default() };
     let states = unit_states(None)?;
     let now = in_state(&states, "enabled");
-    let after = simulate(g, old, &plan.preset)?;
+    plan.touched = touched(g, old, &states);
+    let after = match (all, plan.touched.is_empty()) {
+        (true, _) => simulate(g, old, &plan.preset, None)?,
+        (false, true) => now.clone(),
+        (false, false) => simulate(g, old, &plan.preset, Some(&plan.touched))?,
+    };
     let known = in_state(&states, "disabled");
     plan.enable = after.difference(&now).cloned().collect();
     plan.enable.extend(
@@ -164,10 +194,13 @@ fn systemctl(step: &str, args: &[&str]) -> Result<bool> {
     isolated(step, || run_cmd(cmd("systemctl", args)))
 }
 
-/// Writes the preset file and runs systemctl preset-all, then starts the
-/// declared units that it enabled and stops the units that it disabled.
+/// Writes the preset file and runs systemctl preset for the declared units and
+/// the units of the earlier generation, then starts the declared units that it
+/// enabled and stops the units that it disabled.
 pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
-    if std::fs::read_to_string(PRESET).unwrap_or_default() != plan.preset {
+    if plan.preset.is_empty() {
+        let _ = std::fs::remove_file(PRESET);
+    } else if std::fs::read_to_string(PRESET).unwrap_or_default() != plan.preset {
         std::fs::create_dir_all(Path::new(PRESET).parent().unwrap())?;
         let tmp = format!("{PRESET}.pacnix-new");
         let mut f = std::fs::File::create(&tmp)?;
@@ -185,7 +218,11 @@ pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
         systemctl(&format!("systemctl mask --now {u}"), &["mask", "--now", u])?;
     }
     let before = &plan.now;
-    run_silent(cmd("systemctl", &["preset-all"]))?;
+    // The package transaction can add the unit files of declared units after the plan.
+    let units = touched_now(plan)?;
+    if !units.is_empty() {
+        run_silent(cmd("systemctl", &["preset"]).args(&units))?;
+    }
     let states = unit_states(None)?;
     let after = in_state(&states, "enabled");
     // The list from the plan is older than the package transaction: skip the
@@ -219,8 +256,17 @@ pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn touched_now(plan: &Plan) -> Result<Vec<String>> {
+    let states = unit_states(None)?;
+    let declared = plan.declared.iter().chain(&plan.touched).chain(&plan.enable).filter(|u| states.contains_key(*u) || states.contains_key(&template(u)));
+    let mut units: Vec<String> = declared.cloned().collect();
+    units.sort();
+    units.dedup();
+    Ok(units)
+}
+
 /// The units that leave, which stop before packages and files change: the
-/// units that preset-all will disable and the units whose unit file goes away.
+/// units that systemctl preset will disable and the units whose unit file goes away.
 /// Without their unit file, systemd can no longer stop them.
 pub fn leaving(plan: &Plan, deleted: &[String]) -> Vec<String> {
     let gone: Vec<String> = deleted.iter().filter(|p| p.starts_with("/etc/systemd/system/") && p.matches('/').count() == 4).cloned().collect();

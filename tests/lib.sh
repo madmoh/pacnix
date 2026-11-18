@@ -40,13 +40,13 @@ plan() { pacnix "$1" plan; }
 apply() { local h=$1; shift; pacnix "$h" apply --yes "$@"; }
 # Declared packages of the active generation, sorted.
 declared() { on "$1" "jq -r '.packages.repo[], .packages.aur[], (.packages.local|keys[])' /nix/var/nix/profiles/pacnix | sort -u"; }
-# Fails unless the explicit packages equal the declared packages and no orphan exists.
+# Fails unless each declared package is explicitly installed and no orphan exists.
 packages_match() {
 	local d e
 	d=$(declared "$1") e=$(on "$1" 'pacman -Qqe | sort')
-	if [[ $d != "$e" ]]; then
-		diff <(echo "$d") <(echo "$e") || true
-		fail "explicit packages of $1 differ from the declaration"
+	if [[ -n $(comm -23 <(echo "$d") <(echo "$e")) ]]; then
+		comm -23 <(echo "$d") <(echo "$e")
+		fail "declared packages of $1 are not explicitly installed"
 	fi
 	if [[ -n $(on "$1" 'pacman -Qqdtt' || true) ]]; then fail "$1 has orphan packages"; fi
 }
@@ -59,6 +59,9 @@ empty_plan() {
 		fail "the plan of $1 is not empty"
 	fi
 }
+# Adds packages to the record of the packages that pacnix made, as on a host
+# where pacnix installed them: made <host> <package>...
+made() { local h=$1; shift; on "$h" "sudo jq -c '. + \$ARGS.positional | unique' --args $* </var/lib/pacnix/packages.json | sudo tee /var/lib/pacnix/packages.json.new >/dev/null && sudo mv /var/lib/pacnix/packages.json.new /var/lib/pacnix/packages.json"; }
 check() { if ! on "$1" "$2" >/dev/null 2>&1; then fail "$3"; fi; }
 refute() { if on "$1" "$2" >/dev/null 2>&1; then fail "$3"; fi; }
 fail() { printf 'FAIL %s: %s\n' "$name" "$*"; exit 1; }

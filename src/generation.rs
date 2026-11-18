@@ -267,12 +267,12 @@ impl Plan {
         let ledger: Vec<Generation> = std::iter::once(old.clone()).chain(pending()).collect();
         // Before any change, also before the upgrade: Secure Boot must keep the system bootable.
         secure::check(&target, &old)?;
-        let packages = packages::plan(ctx, &target)?;
+        let packages = packages::plan(ctx, &target, &old)?;
         let users = users::plan(&target, &old)?;
         let files = files::plan(ctx, &target, &ledger)?;
-        let units = units::plan(&target, &old)?;
+        let units = units::plan(&target, &old, false)?;
         let home = home::plan(&target)?;
-        let secure = secure::plan(&target)?;
+        let secure = secure::plan(&target, &old)?;
         let data = audit::leftovers(&old, &target)?;
         Ok(Plan { target, packages, users, files, units, home, secure, data })
     }

@@ -14,8 +14,9 @@
 # change PCR 7, and the apply enrolls the TPM2 key again. A file that sbctl
 # cannot sign and the removal of Secure Boot while the firmware checks the
 # signatures are refused before any change. A TPM2 key without a PIN on PCRs 0
-# and 7 unlocks with no prompt. Without the TPM2 declaration, the TPM2 key goes;
-# sbctl stops signing the files that are not boot files of the configuration.
+# and 7 unlocks with no prompt. Without the TPM2 declaration, the TPM2 key that
+# pacnix enrolled goes, and sbctl stops signing the files that are not boot
+# files of the configuration. A TPM2 key that the user enrolls by hand stays.
 size=(4 4096 1)
 source "$(dirname "$0")/../lib.sh"
 fresh sblive "$cache/base-20261101.620452.qcow2"
@@ -191,5 +192,9 @@ refute sbbox 'sudo systemd-cryptenroll /dev/vda2 | grep -q tpm2' "the TPM2 key s
 signed 4 "sbctl did not stop signing the files that are not boot files"
 check sbbox "sudo sbctl sign-all -g" "the pacman hook of sbctl fails"
 reboot_with "Please enter" pass1
+empty_plan sbbox
+
+step "a TPM2 key that the user enrolled stays"
+on sbbox 'sudo env PASSWORD=pass1 systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 /dev/vda2 >/dev/null 2>&1' || fail "the enrollment by hand failed"
 empty_plan sbbox
 pass

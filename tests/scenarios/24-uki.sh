@@ -81,7 +81,7 @@ uki() { on ukibox "sudo bootctl list --json=short | jq -r '.[] | select(.id == \
 [[ $(uki) == "$cmdline" ]] || { uki; fail "the UKI does not have the complete command line"; }
 check ukibox 'sudo grep -qx "default arch-linux.efi" /boot/loader/loader.conf && sudo test -e /boot/loader/entries/arch-old.conf' "loader.conf is wrong, or the unmanaged entry is gone"
 check ukibox 'sudo test ! -e /boot/initramfs-linux.img && sudo test ! -e /boot/loader/entries/linux.conf' "an image or entry of the other format exists"
-check ukibox 'systemctl is-enabled -q systemd-tpm2-clear.service && test "$(sudo cat /sys/class/tpm/tpm0/ppi/request)" = 0' "the apply started a unit of a vendor preset, which asks the firmware to clear the TPM"
+check ukibox '! systemctl is-enabled -q systemd-tpm2-clear.service && test "$(sudo cat /sys/class/tpm/tpm0/ppi/request)" = 0' "the apply enabled or started a unit that the configuration does not declare, which asks the firmware to clear the TPM"
 empty_plan ukibox
 
 step "reboot into the UKI"

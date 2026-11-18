@@ -2,7 +2,7 @@
 
 pacnix manages an Arch Linux system from a declarative configuration. You write the packages, users, mounts, boot loader, files, services and home configuration of each host in the Nix language. `pacnix apply` then makes the system agree with that configuration. pacman, makepkg and systemd make all the changes. The system stays a normal Arch Linux system.
 
-pacnix is idempotent and it reconciles: when you remove a declaration, its package, file or service also leaves the system. When you read the configuration, you can find the cause of each item on the system.
+pacnix changes only what the configuration declares. When the configuration declares nothing about an area, for example units, users or Secure Boot, pacnix does not change or check that area. A configuration with one package gives a plan with only that package. pacnix is idempotent and it reconciles: when you remove a declaration, pacnix removes what it made from that declaration, and nothing else. `pacnix audit` shows the state that the configuration does not declare.
 
 ## Installation
 
@@ -96,7 +96,7 @@ Each file in `modules` is a module of the [NixOS module system](https://nixos.or
 | `packages.serverKey` | The fingerprint of the key that signs the repository of `packages.server`. |
 | `packages.serve.aur`, `packages.serve.local` | Packages that this host builds only for other hosts. |
 
-After an apply, the explicitly installed packages are equal to the declared packages, and no orphan packages stay installed. pacnix uses aurutils to build AUR and local packages in a [clean chroot](https://wiki.archlinux.org/title/DeveloperWiki:Building_in_a_clean_chroot) with the settings of `/etc/makepkg.conf`, for example the compression, `MAKEFLAGS` and debug packages. Declare this file to change them, see [makepkg](https://wiki.archlinux.org/title/Makepkg). The packages go into the local repository `/var/lib/pacnix/repo`.
+After an apply, each declared package is explicitly installed. When a declaration goes, pacnix marks the package as a dependency, and pacman removes the packages that no other package needs. A package that was explicitly installed before its first declaration stays as it is. pacnix does not change the packages that no configuration declared, and the orphans that were installed before the apply stay. pacnix uses aurutils to build AUR and local packages in a [clean chroot](https://wiki.archlinux.org/title/DeveloperWiki:Building_in_a_clean_chroot) with the settings of `/etc/makepkg.conf`, for example the compression, `MAKEFLAGS` and debug packages. Declare this file to change them, see [makepkg](https://wiki.archlinux.org/title/Makepkg). The packages go into the local repository `/var/lib/pacnix/repo`.
 
 The PKGBUILD of a package runs on the host as the user `pacnix`, for example to download the sources, and in the clean chroot for the build. On the host, it runs in a private [mount namespace](https://man.archlinux.org/man/unshare.1): the file system is read-only, apart from the build directory `/var/lib/pacnix/build`, the home directories are not visible, and `/tmp`, `/var/tmp` and `/dev/shm` are private. The user `pacnix` has no sudo rule: root starts the clean chroot and adds the packages to the repository, which the user `pacnix` cannot change.
 
@@ -212,7 +212,7 @@ To remove Secure Boot, turn off Secure Boot in the firmware first. pacnix stops 
 
 ### Services
 
-`units.enable`, `units.disable` and `units.mask` contain systemd system units. pacnix writes them as a [preset](https://man.archlinux.org/man/systemd.preset.5) file and runs `systemctl preset-all`. The vendor presets of the packages control the units that are not in the configuration. pacnix starts the units of `units.enable` at the apply. A unit that only a vendor preset enables starts at the next boot.
+`units.enable`, `units.disable` and `units.mask` contain systemd system units. pacnix writes them as a [preset](https://man.archlinux.org/man/systemd.preset.5) file and runs `systemctl preset` for these units. When a unit goes from the configuration, pacnix runs `systemctl preset` for it again, and its vendor preset decides its state. pacnix does not change the other units. pacnix starts the units of `units.enable` at the apply.
 
 ### Home
 
