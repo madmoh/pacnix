@@ -30,12 +30,12 @@ use std::time::{Duration, Instant};
 
 /// Make an Arch Linux system agree with its configuration in a Nix flake.
 #[derive(Parser)]
-#[command(version)]
+#[command(version, after_help = "To start, see \"First configuration\" in /usr/share/doc/pacnix/README.md")]
 struct Cli {
     /// The flake [default: /etc/pacnix]
     #[arg(long, global = true, default_value = "/etc/pacnix", hide_default_value = true)]
     flake: String,
-    /// The host in the flake [default: the host name in /etc/hostname]
+    /// The host in the flake [default: this host name]
     #[arg(long, global = true)]
     host: Option<String>,
     #[command(subcommand)]

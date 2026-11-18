@@ -238,8 +238,8 @@ fn eval_error(ctx: &Ctx, lines: &[String]) -> String {
     if let Some(i) = lines.iter().position(|l| l.trim_start().starts_with("Did you mean")) {
         let hint = lines.remove(i).trim_start();
         let first = lines[0].split_once(" Definition values:").map(|(head, _)| head).unwrap_or(lines[0]);
-        let rest = if first.len() < lines[0].len() { vec!["Definition values:"] } else { vec![] };
-        lines = [vec![first, hint], rest, lines[1..].to_vec()].concat();
+        let at = lines[1..].iter().filter(|l| l.trim_start().starts_with("- In `")).map(|l| l.trim_start());
+        lines = [first, hint].into_iter().chain(at).collect();
     }
     format!("the configuration has an error:\n  {}", lines.join("\n").replace('\n', "\n  "))
 }
@@ -339,14 +339,14 @@ impl Plan {
 
     /// The upgrade, the changes, the declared items that need no change, and a last line.
     fn print(&self) {
-        say!("apply will refresh the sync databases and upgrade the packages (not with --offline)");
+        say!("system upgrade: apply refreshes the sync databases and upgrades the packages");
         let sections = self.sections();
         let lines: Vec<&(String, String)> = sections.iter().flat_map(|s| &s.1).collect();
         lines.iter().for_each(|l| say!("{}", l.1));
         self.same();
         match lines.len() {
-            0 => say!("pacnix: plan done: the system agrees with the configuration, and apply only upgrades the packages. Nothing changed."),
-            n => say!("pacnix: plan done: {}, and apply also upgrades the packages. Nothing changed.", crate::count(n, "change")),
+            0 => say!("pacnix: plan done: no change, only the system upgrade. The system is unchanged."),
+            n => say!("pacnix: plan done: {} and the system upgrade. The system is unchanged.", crate::count(n, "change")),
         }
     }
 
@@ -377,9 +377,6 @@ impl Plan {
 
 /// The lines of a kind of change, each with its item: a package, a path, a unit or a name.
 pub type Lines = Vec<(String, String)>;
-
-/// The system upgrade step of apply.
-pub const UPGRADE: &str = "system upgrade: refresh the sync databases, then upgrade the packages";
 
 /// The file and line of the first line in the *.nix files of a local flake that contains the text.
 pub fn locate(ctx: &Ctx, text: &str) -> Option<String> {
@@ -460,7 +457,6 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
         let _ = std::fs::remove_file(PENDING);
         run_hidden(cmd("nix-store", &["--add-root", PENDING, "--realise", &plan.target.path]))?;
     }
-    plan.same();
     let leaving = units::leaving(&plan.units, &plan.files.deleted());
     let skip = packages::prepare(&plan.target, &plan.packages, builds)?;
     units::stop(&leaving)?;
@@ -471,6 +467,7 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
     secure::apply(&plan.target, &plan.secure)?;
     units::apply(&plan.units, &changed)?;
     home::apply(&plan.target, &plan.home)?;
+    plan.same();
     keep_or_delete(&plan.target, &plan.data, delete)?;
     report::save_retries();
     Ok(())

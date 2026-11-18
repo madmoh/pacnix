@@ -19,6 +19,8 @@ const RETRY: &str = "/var/lib/pacnix/retry.json";
 static RUN: Mutex<Option<(String, Instant, u64, Vec<String>)>> = Mutex::new(None);
 /// The number of planned changes of each kind, for the last line.
 static PLANNED: Mutex<Vec<((&str, &str), Vec<String>)>> = Mutex::new(Vec::new());
+/// The start of the run, in seconds since the epoch, less one.
+static STARTED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MAX);
 /// The number of the stage that runs, 0 without a stage.
 static STAGE: Mutex<u64> = Mutex::new(0);
 /// Set before the first change of the system. Before it, an interrupt stops
@@ -121,6 +123,7 @@ struct Notes {
 
 /// Starts a run that changes the system: progress lines and a summary at the end.
 pub fn begin() {
+    STARTED.store(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64 - 1), Relaxed);
     let offset = std::fs::metadata(PACMAN_LOG).map_or(0, |m| m.len());
     *RUN.lock().unwrap() = Some((String::new(), Instant::now(), offset, reboot_reasons()));
 }
@@ -457,8 +460,8 @@ pub fn summary() {
     let reboot: Vec<String> = reboot_reasons().into_iter().filter(|r| !before.contains(r)).collect();
     if !reboot.is_empty() {
         say!("pacnix: reboot to use the changes: {}", reboot.join("; "));
-    } else if before.is_empty() && !changed_packages(offset).is_empty() {
-        say!("pacnix: no reboot is necessary for the kernel, the boot images and the DKMS modules");
+    } else if reboot_reasons().is_empty() && !reasons(STARTED.load(Relaxed)).is_empty() {
+        say!("pacnix: no reboot is necessary");
     }
     for (pkg, note) in &fresh {
         say!("pacnix: install note of {pkg}:\n  {}", note.trim_end().replace('\n', "\n  "));
@@ -497,13 +500,18 @@ fn boot_time() -> i64 {
 /// changed after the boot, or a DKMS module was built after the boot, for a
 /// kernel that does not run or that did not load it.
 fn reboot_reasons() -> Vec<String> {
+    reasons(boot_time())
+}
+
+/// The reasons to reboot from the changes after a time: the kernel, the boot
+/// images and the DKMS modules.
+fn reasons(since: i64) -> Vec<String> {
     let release = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default().trim().to_string();
     let mut reasons = Vec::new();
     if !Path::new(&format!("/usr/lib/modules/{release}/vmlinuz")).exists() {
         reasons.push(format!("the running kernel {release} is not installed"));
     }
-    let boot = boot_time();
-    let newer = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.mtime() > boot);
+    let newer = |p: &Path| std::fs::metadata(p).is_ok_and(|m| m.mtime() > since);
     for dir in ["/boot", "/efi"] {
         for e in walkdir::WalkDir::new(dir).max_depth(4).into_iter().flatten() {
             let name = e.file_name().to_string_lossy();

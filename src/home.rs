@@ -114,14 +114,10 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
     // An activation is an isolated step: a failure does not stop the other users and the apply.
     for (user, out) in &plan.activate {
         let h = &g.m.home[user];
-        let files: Vec<String> = ["created", "changed", "deleted"]
-            .into_iter()
-            .zip(&plan.lines)
-            .map(|(verb, lines)| (verb, lines.iter().filter(|l| Path::new(&l.0).starts_with(&h.directory)).map(|l| l.0.clone()).collect::<Vec<_>>()))
-            .filter(|(_, items)| !items.is_empty())
-            .map(|(verb, items)| crate::named("home file", verb, &items))
-            .collect();
-        crate::report::progress(&format!("{}{}", step(user), if files.is_empty() { String::new() } else { format!(": {}", files.join("; ")) }));
+        crate::report::progress(&step(user));
+        for (_, line) in plan.lines.iter().flatten().filter(|l| Path::new(&l.0).starts_with(&h.directory)) {
+            say!("  {}", line.replace('\n', "\n  "));
+        }
         crate::isolated(&step(user), || activate(user, &h.directory, out, &out_path(&h.path)?))?;
     }
     if !plan.activate.is_empty() {

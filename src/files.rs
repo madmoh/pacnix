@@ -188,6 +188,11 @@ pub fn plan(_ctx: &Ctx, g: &Generation, ledger: &[Generation]) -> Result<Plan> {
             continue;
         }
         let value = value(Path::new(path), spec.target.as_deref().map(Path::new).unwrap_or(Path::new(&spec.source)), spec.target.is_some(), true);
+        // The mode and the owner show when they change.
+        let meta = std::fs::symlink_metadata(path).ok();
+        let same = |m: u32| meta.as_ref().is_some_and(|x| x.mode() & 0o7777 == m && Some(x.uid()) == id(&spec.user, true) && Some(x.gid()) == id(&spec.group, false));
+        let perm = mode(spec).filter(|m| spec.target.is_none() && !same(*m)).map(|m| format!(" ({m:04o} {}:{})", spec.user, spec.group)).unwrap_or_default();
+        let value = format!("{perm}{value}");
         let why = if std::fs::symlink_metadata(path).is_err() {
             format!("create{value}")
         } else if ours(path) {
@@ -349,6 +354,9 @@ pub fn apply(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<Vec<String>> {
     let changing = changes(plan);
     for (verb, paths) in plan.steps().iter().filter(|s| !s.1.is_empty()) {
         report::progress(&format!("{verb} {}: {}", crate::count(paths.len(), "file"), paths.join(", ")));
+    }
+    for (path, _) in plan.write.iter().filter(|w| plan.adopt.contains(&w.0)) {
+        say!("  keep the original of {path} as\n    {}", original(path).display());
     }
     // The triggers and unit restarts that follow the changes are recorded
     // first: after an interrupt, no change of a file shows them again.

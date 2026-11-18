@@ -17,6 +17,7 @@ package_pacnix() {
   depends=(aurutils base-devel curl devtools gcc-libs git glibc libarchive nix pacman pacnix-keyring sudo systemd util-linux)
   install -Dm755 "$srcdir/target/release/pacnix" "$pkgdir/usr/bin/pacnix"
   install -Dm644 "$startdir/LICENSE" "$pkgdir/usr/share/licenses/pacnix/LICENSE"
+  install -Dm644 "$startdir/README.md" "$pkgdir/usr/share/doc/pacnix/README.md"
   cd "$startdir/nix"
   find . -type f -exec install -Dm644 {} "$pkgdir/usr/share/pacnix/{}" \;
   cd "$startdir/pkg"

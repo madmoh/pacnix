@@ -380,7 +380,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
     if is_builder(g) {
         table = aur_table(&missing_aur)?;
         let found: BTreeSet<&String> = table.iter().map(|t| &t.0).collect();
-        plan.unknown.extend(missing_aur.iter().filter(|n| !found.contains(n)).cloned());
+        plan.unknown.extend(missing_aur.iter().filter(|n| !found.contains(n)).map(|n| format!("{n} (not in the AUR; search at https://aur.archlinux.org/packages)")));
         plan.build = missing_aur;
         let built = local_sources();
         for (name, dir) in &local_dirs(g) {
@@ -626,7 +626,7 @@ fn suggest(name: String, sync: &BTreeSet<String>) -> String {
     let mut close: Vec<(usize, &String)> = sync.iter().map(|s| (strsim::levenshtein(&name, s), s)).filter(|(d, _)| *d <= 2).collect();
     close.sort();
     match close.len() {
-        0 => name,
+        0 => format!("{name} (not in the sync databases; search with pacman -Ss, or declare an AUR package in packages.aur)"),
         _ => format!("{name} (did you mean {}?)", close.iter().take(3).map(|c| c.1.as_str()).collect::<Vec<_>>().join(", ")),
     }
 }
@@ -684,7 +684,8 @@ fn download(args: &[&str]) -> Result<()> {
     if files.is_empty() {
         return Ok(());
     }
-    let label = format!("download {}", count(files.len(), "package"));
+    let names: Vec<&str> = files.iter().filter_map(|f| f.0.rsplitn(4, '-').nth(3)).collect();
+    let label = format!("download {}", if names.len() <= 3 { names.join(", ") } else { count(files.len(), "package") });
     let size = files.iter().map(|f| f.1).sum::<u64>() as f64;
     report::progress(&match size < 1048576.0 {
         true => format!("{label}: {:.0} KiB", (size / 1024.0).ceil()),
@@ -1225,16 +1226,24 @@ pub fn databases() -> Vec<Option<std::time::SystemTime>> {
 pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
     write_confs(g)?;
     trust_server(g)?;
-    report::progress(crate::generation::UPGRADE);
     recover_lock()?;
     let pins = pinned(g);
     let pins: Vec<&str> = pins.iter().map(String::as_str).collect();
+    let stage = report::stage("system upgrade: refresh the sync databases");
     run_hidden(pacman(&["-Sy", "--config", CONF]))?;
-    let start = report::log_end();
-    download(&[&["-u"][..], &pins].concat())?;
-    transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
-    let done: Vec<String> = report::changed_packages(start).into_iter().map(|(verb, names)| crate::named("package", verb, &names)).collect();
-    say!("pacnix: system upgrade: {}", if done.is_empty() { "the packages are up to date".to_string() } else { done.join(", ") });
+    drop(stage);
+    let newer = output_any(pacman(&["-Qqu", "--config", CONF]))?;
+    let newer: Vec<String> = newer.lines().map(String::from).collect();
+    if newer.is_empty() && pins.is_empty() {
+        say!("pacnix: system upgrade: the packages are up to date");
+    } else {
+        report::progress(&format!("system upgrade: {}", crate::named("package", "to upgrade", &newer)));
+        let start = report::log_end();
+        download(&[&["-u"][..], &pins].concat())?;
+        transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
+        let done: Vec<String> = report::changed_packages(start).into_iter().map(|(verb, names)| crate::named("package", verb, &names)).collect();
+        say!("pacnix: system upgrade: {}", if done.is_empty() { "no package changed".to_string() } else { done.join(", ") });
+    }
     if !builds.queue.is_empty() {
         ensure_chroot()?;
         // An AUR package that did not build stays at its installed version.

@@ -47,6 +47,7 @@ impl Origins {
 
 pub fn audit(ctx: &Ctx) -> Result<()> {
     let g = build(ctx)?;
+    let _stage = crate::report::stage("check the system");
     let origins = Origins::new(&g)?;
     let mut report: Vec<String> = Vec::new();
 
@@ -110,6 +111,7 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
     if let Some(state) = crate::secure::audit(&g, &mut report)? {
         say!("{state}");
     }
+    drop(_stage);
     print(&report);
     let mut notes = Vec::new();
     crate::report::audit(&mut notes);
