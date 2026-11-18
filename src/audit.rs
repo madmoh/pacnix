@@ -134,7 +134,10 @@ fn print(report: &[String]) {
             None => kinds.push((kind, vec![item])),
         }
     }
-    say!("pacnix: items to check: {}. The configuration does not declare them, or they differ from it.", report.len());
+    match report.len() {
+        1 => say!("pacnix: 1 item that is not declared or that differs from the configuration"),
+        n => say!("pacnix: {n} items that are not declared or that differ from the configuration"),
+    }
     for (kind, items) in &kinds {
         say!("  {kind} ({}):", items.len());
         items.iter().for_each(|i| say!("    {}", i.replace('\n', "\n    ")));

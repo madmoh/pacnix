@@ -61,7 +61,7 @@ pub fn value(path: &Path, new: &Path, link: bool, full: bool) -> String {
     if more > 0 {
         lines.push(format!("and {more} more changed lines"));
     }
-    let end = if !text.is_empty() && !text.ends_with('\n') { " (no newline at the end; end the text with \\n)" } else { "" };
+    let end = if !text.is_empty() && !text.ends_with('\n') { " (the text has no final newline)" } else { "" };
     format!("{end}{}", lines.iter().map(|l| format!("\n  {l}")).collect::<String>())
 }
 
@@ -180,14 +180,15 @@ pub fn plan(_ctx: &Ctx, g: &Generation, ledger: &[Generation]) -> Result<Plan> {
         // The mode and the owner show when they change.
         let meta = std::fs::symlink_metadata(path).ok();
         let same = |m: u32| meta.as_ref().is_some_and(|x| x.mode() & 0o7777 == m && Some(x.uid()) == id(&spec.user, true) && Some(x.gid()) == id(&spec.group, false));
-        let perm = mode(spec).filter(|m| spec.target.is_none() && !same(*m)).map(|m| format!(" ({m:04o} {}:{})", spec.user, spec.group)).unwrap_or_default();
-        let value = format!("{perm}{value}");
+        let perm = mode(spec).filter(|m| spec.target.is_none() && !same(*m)).map(|m| format!("{m:04o} {}:{}", spec.user, spec.group));
         let why = if std::fs::symlink_metadata(path).is_err() {
-            format!("create{value}")
+            format!("create (new file{}){value}", perm.map(|p| format!(", {p}")).unwrap_or_default())
         } else if ours(path) {
+            let value = format!("{}{value}", perm.map(|p| format!(" ({p})")).unwrap_or_default());
             let drift = if previous.and_then(|f| f.get(path)) == Some(spec) { " (it differs from the declaration)" } else { "" };
             format!("{drift}{value}")
         } else {
+            let value = format!("{}{value}", perm.map(|p| format!(" ({p})")).unwrap_or_default());
             plan.adopt.push(path.clone());
             let of = owner.get(path).map(|pkg| format!(" of package {pkg}")).unwrap_or_default();
             format!("\n  keep the original{of} as\n    {}{value}", original(path).display())
@@ -347,7 +348,7 @@ pub fn apply(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<Vec<String>> {
     plan.print([a, b, c, d]);
     let lines = lines.concat();
     if !lines.is_empty() {
-        report::progress(&format!("change {}", crate::count(lines.len(), "file")));
+        report::progress(&format!("file changes ({}):", lines.len()));
     }
     lines.iter().for_each(|l| say!("  {}", l.1.replace('\n', "\n  ")));
     // The triggers and unit restarts that follow the changes are recorded

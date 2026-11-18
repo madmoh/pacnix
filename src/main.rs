@@ -116,12 +116,10 @@ fn run(cli: Cli) -> Result<()> {
     }
     // pacnix uses the Nix store directly as root, without the nix-daemon.
     unsafe { std::env::set_var("NIX_REMOTE", "local") };
-    let host = match cli.host {
-        Some(h) => h,
-        None => std::fs::read_to_string("/etc/hostname")
-            .context("read /etc/hostname, or give --host")?
-            .trim()
-            .to_string(),
+    let name = std::fs::read_to_string("/etc/hostname").map(|h| h.trim().to_string());
+    let host = match &cli.host {
+        Some(h) => h.clone(),
+        None => name.as_ref().map_err(|e| anyhow::anyhow!("read /etc/hostname, or give --host: {e}"))?.clone(),
     };
     let flake = match std::fs::canonicalize(&cli.flake) {
         Ok(p) => p.display().to_string(),
@@ -136,7 +134,10 @@ fn run(cli: Cli) -> Result<()> {
     if !flake.contains(':') && !std::path::Path::new(&flake).join("flake.nix").exists() {
         bail!("{flake} has no flake.nix. Make the configuration as \"First configuration\" of the README tells, or give --flake with the directory of the configuration");
     }
-    say!("pacnix: host {host} of the flake {flake}");
+    // The host and the flake show only when they are not the defaults.
+    if name.ok().as_ref() != Some(&host) || cli.flake != "/etc/pacnix" {
+        say!("pacnix: host {host} of the flake {flake}");
+    }
     let ctx = |opts| Ctx { flake: flake.clone(), host: host.clone(), opts };
     match cli.verb {
         Verb::Plan => generation::plan(&ctx(Opts::default())),

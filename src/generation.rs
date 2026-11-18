@@ -339,28 +339,29 @@ impl Plan {
         self.units.print(&mut units.1);
         self.home.print([&mut activate.1, &mut home_created.1, &mut home_changed.1, &mut home_deleted.1, &mut home_restored.1]);
         self.secure.print(&mut secure.1);
-        data.1.extend(self.data.iter().map(|(f, paths)| (f.clone(), format!("delete the data of removed feature {f}: {}", paths.join(", ")))));
+        data.1.extend(self.data.iter().map(|(f, paths)| (f.clone(), format!("delete the data of removed feature {f} (apply asks first): {}", paths.join(", ")))));
         s
     }
 
     /// The upgrade, the changes, the declared items that need no change, and a last line.
     fn print(&self) -> Result<()> {
         let newer = packages::newer()?;
-        let newer = match newer.len() {
-            0 => "no package is newer".to_string(),
-            1..=3 => format!("{} newer", newer.join(", ")),
-            n => format!("{n} packages newer"),
-        };
-        say!("pacnix: system upgrade: {newer} in the local sync databases; apply refreshes them first");
+        // The local sync databases tell what is newer since their last refresh. Apply refreshes them.
+        match newer.len() {
+            0 => {}
+            1 => say!("pacnix: system upgrade: {} is newer; apply checks for more", newer[0]),
+            2 | 3 => say!("pacnix: system upgrade: {} are newer; apply checks for more", newer.join(", ")),
+            n => say!("pacnix: system upgrade: {n} packages are newer; apply checks for more"),
+        }
         let sections = self.sections();
         let lines: Vec<&(String, String)> = sections.iter().flat_map(|s| &s.1).collect();
         if !lines.is_empty() {
-            say!("pacnix: apply makes these changes:");
+            say!("pacnix: changes ({}):", lines.len());
         }
         lines.iter().for_each(|l| say!("  {}", l.1.replace('\n', "\n  ")));
         self.same();
         match lines.len() {
-            0 => say!("pacnix: plan done: no change, only the system upgrade. The system is unchanged."),
+            0 => say!("pacnix: plan done: no change apart from the system upgrade. The system is unchanged."),
             n => say!("pacnix: plan done: {} and the system upgrade. The system is unchanged.", crate::count(n, "change")),
         }
         Ok(())
@@ -371,12 +372,15 @@ impl Plan {
         let sections = self.sections();
         let changed: BTreeSet<&String> = sections.iter().flat_map(|s| &s.1).map(|l| &l.0).collect();
         let m = &self.target.m;
-        let by = |made: bool| if made { "by pacnix" } else { "before pacnix" };
-        let units = |list: &Vec<String>, state: &str| list.iter().map(|u| (u.clone(), format!("{u} ({state} {})", by(self.units.made(u))))).collect::<Vec<_>>();
+        // What the removal of the declaration does, from the records of pacnix.
+        let units = |list: &Vec<String>, state: &str| {
+            let by = |u: &String| if self.units.made(u) { "by pacnix; vendor preset when undeclared" } else { "before pacnix; stays when undeclared" };
+            list.iter().map(|u| (u.clone(), format!("{u} ({state} {})", by(u)))).collect::<Vec<_>>()
+        };
         let plain = |list: Vec<&String>| list.into_iter().map(|i| (i.clone(), i.clone())).collect::<Vec<_>>();
         let packages = m.packages.repo.iter().chain(&m.packages.aur).chain(m.packages.local.keys());
         let declared = [
-            ("package", packages.map(|p| (p.clone(), format!("{p} (installed {})", by(self.packages.made(p))))).collect()),
+            ("package", packages.map(|p| (p.clone(), format!("{p} (installed {})", if self.packages.made(p) { "by pacnix; removed when undeclared" } else { "before pacnix; stays when undeclared" }))).collect()),
             ("user", plain(m.users.users.keys().collect())),
             ("file", plain(m.files.keys().collect())),
             ("unit", [units(&m.units.enable, "enabled"), units(&m.units.disable, "disabled"), units(&m.units.mask, "masked")].concat()),

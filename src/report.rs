@@ -148,7 +148,9 @@ fn wrapped(text: &str) -> String {
         if line.chars().count() <= 80 {
             return line.to_string();
         }
+        // A top-level line continues under the text after "pacnix: ", deeper than the items under it.
         let indent = line.len() - line.trim_start().len();
+        let next = if line.starts_with("pacnix: ") { 8 } else { indent + 2 };
         let (mut out, mut col) = (" ".repeat(indent), indent);
         for (i, word) in line.split_whitespace().enumerate() {
             let len = word.chars().count();
@@ -160,9 +162,9 @@ fn wrapped(text: &str) -> String {
                     format!("{w} ")
                 });
                 out.push('\n');
-                out.push_str(&" ".repeat(indent + 2));
+                out.push_str(&" ".repeat(next));
                 out.push_str(carry.as_deref().unwrap_or_default());
-                col = indent + 2 + carry.map_or(0, |c| c.chars().count());
+                col = next + carry.map_or(0, |c| c.chars().count());
             } else if i > 0 {
                 out.push(' ');
                 col += 1;

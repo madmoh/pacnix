@@ -6,13 +6,13 @@ pacnix changes only what the configuration declares. When the configuration decl
 
 ## Installation
 
-pacnix is in the signed pacman repository `[pacnix]`, which the releases of this project supply. Each release has the packages of pacnix, its signing key `pacnix-keyring` and [aurutils](https://github.com/aurutils/aurutils), the repository database and the signing key `pacnix.asc`. pacnix uses aurutils for the AUR, thus aurutils is a dependency of pacnix and comes built from `[pacnix]`. Each day, a job puts the latest aurutils release into the repository. To trust the key and add the repository, run these commands as root.
+pacnix is in the signed pacman repository `[pacnix]`, which the releases of this project supply. Each release has the packages of pacnix, its signing key `pacnix-keyring` and [aurutils](https://github.com/aurutils/aurutils), the repository database and the signing key `pacnix.asc`. pacnix uses aurutils for the AUR, thus aurutils is a dependency of pacnix and comes built from `[pacnix]`. Each day, a job puts the latest aurutils release into the repository. To trust the key and add the repository, run these commands:
 
 ```sh
 curl -fLO https://github.com/madmoh/pacnix/releases/latest/download/pacnix.asc
-pacman-key --add pacnix.asc
-pacman-key --lsign-key 94EE70A8B3EE6E0EE54639ABCE62ED9BA4742A16
-printf '\n[pacnix]\nServer = https://github.com/madmoh/pacnix/releases/latest/download\n' >> /etc/pacman.conf
+sudo pacman-key --add pacnix.asc
+sudo pacman-key --lsign-key 94EE70A8B3EE6E0EE54639ABCE62ED9BA4742A16
+printf '\n[pacnix]\nServer = https://github.com/madmoh/pacnix/releases/latest/download\n' | sudo tee -a /etc/pacman.conf
 ```
 
 For more information, see [Unofficial user repositories](https://wiki.archlinux.org/title/Unofficial_user_repositories).
@@ -31,7 +31,7 @@ pacnix uses the Nix store as root. It does not need the nix-daemon, and it does 
 
 ## First configuration
 
-These commands make a configuration in `/etc/pacnix` for this host. It installs Git, and it gives your user a Git identity and a shell alias:
+These commands make a configuration in `/etc/pacnix` for this host. It sets the time zone, installs Git, and gives your user a Git identity and a shell alias:
 
 ```sh
 sudo install -d -o "$USER" /etc/pacnix
@@ -47,6 +47,7 @@ cat >/etc/pacnix/flake.nix <<EOF
 EOF
 cat >/etc/pacnix/host.nix <<EOF
 {
+  time.timeZone = "Europe/Berlin";
   packages.repo = [ "git" ];
   home.users.$USER = {
     programs.git.enable = true;
@@ -145,7 +146,7 @@ pacnix downloads the packages into the pacman cache before the transaction. If a
 
 `files` contains files outside the home directories. Set one of these options:
 
-- `text`: the content, exactly as written. pacnix adds no newline at the end, as [`environment.etc`](https://search.nixos.org/options?query=environment.etc) of NixOS. A Nix string with `''` adds the newline of its last line.
+- `text`: the content, exactly as written. pacnix adds no newline at the end, as [`environment.etc`](https://search.nixos.org/options?query=environment.etc) of NixOS. A Nix string with `''` adds the newline of its last line. For a final newline, end the text with `\n`.
 - `source`: a file that has the content.
 - `target`: the target of a symbolic link.
 
@@ -283,7 +284,7 @@ Run pacnix as your user. pacnix starts itself again with `sudo`, which asks for 
 
 `apply` asks one question at most, before they change the system, and only for items that the configuration does not show: package removals, new maintainers or new AUR dependencies of AUR packages, the Arch Linux news and the data of removed features. `--yes` accepts the items. Without a terminal, pacnix stops if there is a question and you do not give `--yes`.
 
-`plan` shows the system upgrade, each change with its item, the declared items that need no change, and a last line with the number of changes. A change of a file shows the link target, or the lines of a text file that leave (`-`) and that come (`+`). A change of a home file that the home configuration replaces shows the path of its original. `apply` does not show the plan again: it shows each step with its items when the step starts, and the system upgrade shows the packages that it upgraded. The last line names the changed items when there are three or fewer of a kind. A step that changes nothing, for example the evaluation, shows only when it takes 2 s or more. pacnix answers no question of pacman, and the output of pacman shows only its errors and warnings. At the end, `apply` shows the items that you must know: if this run made a reboot necessary (the kernel that runs is not installed, a boot image changed, or a DKMS module was built for a kernel that does not run), new or changed install notes of packages, and new `.pacnew` files. The last line shows the result, the changes and the exit status:
+Each line that pacnix writes breaks between words before column 80. A line that starts with `pacnix:` is a step or a result; the indented lines under it are its items. `plan` shows the packages that the local sync databases have in a newer version, each change with its item, the declared items that need no change and what the removal of their declaration does, and a last line with the number of changes. A line marked `apply asks first` is an item of the question of `apply`. A change of a file shows its mode and owner when they change, and the link target or the lines of a text file that leave (`-`) and that come (`+`). A home file that the home configuration replaces shows the path of its original and the number of lines that differ. The Home Manager support files are the files that Home Manager writes also for an empty home configuration, for example `~/.cache/.keep`: `plan` and `apply` show only their number. `apply` does not show the plan again: it shows each step with its items when the step starts, and the system upgrade shows the packages that it upgraded. The last line names the changed items when there are three or fewer in total. A step that changes nothing, for example the evaluation, shows only when it takes 2 s or more. The host and the flake show only when you give `--host` or `--flake` with a value that is not the default. pacnix answers no question of pacman, and the output of pacman shows only its errors and warnings. At the end, `apply` shows the items that you must know: if this run made a reboot necessary (the kernel that runs is not installed, a boot image changed, or a DKMS module was built for a kernel that does not run), new or changed install notes of packages, and new `.pacnew` files. The last line shows the result, the changes and the exit status:
 
 | Exit status | Result |
 |---|---|

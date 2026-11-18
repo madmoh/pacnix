@@ -73,9 +73,11 @@ impl Plan {
         add("drop from local repository", &self.drop);
         add("install package", &self.install);
         add("install package from the Arch Linux Archive", &self.archive);
-        add("remove package", &self.remove);
+        l.extend(self.remove.iter().map(|p| (p.clone(), format!("remove package {p} (apply asks first)"))));
         marks.extend(self.explicit.iter().map(|p| (p.clone(), format!("{p}: installed as a dependency, set it to explicitly installed"))));
-        marks.extend(self.deps.iter().map(|p| (p.clone(), format!("{p}: set the install reason to installed as a dependency"))));
+        // A package that leaves in the same run gets its reason only as a step of the removal.
+        let deps = self.deps.iter().filter(|p| !self.remove.contains(p));
+        marks.extend(deps.map(|p| (p.clone(), format!("{p}: set the install reason to installed as a dependency"))));
     }
 }
 
@@ -672,7 +674,12 @@ pub fn check(ctx: &Ctx, plan: &Plan) -> Result<()> {
 pub fn removals(plan: &Plan) -> Vec<String> {
     match plan.remove.is_empty() {
         true => vec![],
-        false => vec![format!("Remove {} that are no longer declared, or that only these packages need: {}.", count(plan.remove.len(), "package"), plan.remove.join(", "))],
+        false if plan.remove.len() == 1 => vec![format!("Remove 1 package that is no longer declared and that pacnix installed: {}.", plan.remove[0])],
+        false => vec![format!(
+            "Remove {} packages that are no longer declared and that pacnix installed, with the dependencies that only they need: {}.",
+            plan.remove.len(),
+            plan.remove.join(", ")
+        )],
     }
 }
 
