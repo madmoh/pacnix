@@ -135,7 +135,7 @@ pub fn ask_passwords(plan: &Plan, opts: &Opts) -> Result<()> {
             if first == again && !first.is_empty() {
                 passwords.insert(name.clone(), first);
             } else {
-                say!("The passwords are empty or not equal. Type them again.");
+                say!("pacnix: The passwords are empty or not equal. Type them again.");
             }
         }
     }

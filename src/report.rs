@@ -140,6 +140,10 @@ pub fn progress(step: &str) {
 /// The text with each line longer than 80 columns broken between words. The
 /// next parts of a broken line have two more spaces of indent.
 pub fn wrap(text: &str) -> String {
+    wrapped(text).replace(crate::BIND, " ")
+}
+
+fn wrapped(text: &str) -> String {
     let lines = text.split('\n').map(|line| {
         if line.chars().count() <= 80 {
             return line.to_string();
@@ -229,12 +233,9 @@ pub fn changed_packages(offset: u64) -> Vec<(&'static str, Vec<String>)> {
 }
 
 /// The packages that the pacman transactions of the run changed, from the pacman log.
-fn packages() -> Vec<String> {
+fn packages() -> Vec<((&'static str, &'static str), Vec<String>)> {
     let Some(offset) = RUN.lock().unwrap().as_ref().map(|r| r.2) else { return vec![] };
-    changed_packages(offset)
-        .into_iter()
-        .map(|(verb, names)| crate::named("package", verb, &names))
-        .collect()
+    changed_packages(offset).into_iter().map(|(verb, names)| (("package", verb), names)).collect()
 }
 
 /// The last line of a run: the result, the changes and the exit status.
@@ -248,10 +249,16 @@ pub fn close(verb: &str, ok: bool) -> i32 {
         }
         return code;
     }
-    let mut changes = packages();
+    let mut groups = packages();
     if code == 0 || code == 4 {
-        changes.extend(PLANNED.lock().unwrap().iter().filter(|(_, items)| !items.is_empty()).map(|((noun, verb), items)| crate::named(noun, verb, items)));
+        groups.extend(PLANNED.lock().unwrap().iter().filter(|(_, items)| !items.is_empty()).cloned());
     }
+    // The items show by name only when there are three or fewer in total.
+    let few = groups.iter().map(|g| g.1.len()).sum::<usize>() <= 3;
+    let changes: Vec<String> = groups
+        .iter()
+        .map(|((noun, verb), items)| if few { crate::named(noun, verb, items) } else { format!("{} {verb}", crate::count(items.len(), noun)).trim_end().to_string() })
+        .collect();
     let changes = match changes.is_empty() {
         true if code == 0 || code == 4 => "No changes.".to_string(),
         true => String::new(),

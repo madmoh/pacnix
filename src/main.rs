@@ -274,8 +274,9 @@ pub fn ask(items: &[String], data: &[String], opts: &Opts) -> Result<bool> {
     if (items.is_empty() && data.is_empty()) || ASKED.swap(true, Relaxed) {
         return Ok(DELETE.load(Relaxed));
     }
+    say!("pacnix: these items need a confirmation:");
     for i in items.iter().chain(data) {
-        say!("{i}");
+        say!("  {i}");
     }
     if !opts.yes && !std::io::stdin().is_terminal() {
         bail!("these items need a confirmation. Give --yes to continue without a terminal");
@@ -525,12 +526,15 @@ pub fn count(n: usize, noun: &str) -> String {
 /// More than three items show as their number, for example "4 files created".
 pub fn named(noun: &str, verb: &str, items: &[String]) -> String {
     let text = match items.len() {
-        1 => format!("{noun} {verb}: {}", items[0]),
-        2 | 3 => format!("{noun}s {verb}: {}", items.join(", ")),
+        1 => format!("{noun} {verb}:{BIND}{}", items[0]),
+        2 | 3 => format!("{noun}s {verb}:{BIND}{}", items.join(", ")),
         n => format!("{} {verb}", count(n, noun)),
     };
     text.replace("  ", " ").replace(" :", ":").trim_end().to_string()
 }
+
+/// Binds a label to its first item: a line does not break between them.
+pub const BIND: char = '\u{1}';
 
 pub fn cmd(program: &str, args: &[&str]) -> Command {
     let mut c = Command::new(program);

@@ -34,21 +34,10 @@ impl Plan {
                 None => changed.push((p.clone(), format!("change file {p}{why}"))),
             }
         }
-        changed.extend(self.restore.iter().map(|(p, pkg)| (p.clone(), format!("change file {p} back to the file of package {pkg}"))));
-        let [.., (_, deletes), _] = self.steps();
-        deleted.extend(deletes.into_iter().map(|d| (d.split(' ').next().unwrap_or(&d).to_string(), format!("delete file {d}"))));
-        restored.extend(self.originals.iter().map(|p| (p.clone(), format!("restore the original of file {p}"))));
-    }
-
-    /// The paths of the plan lines, by verb.
-    fn steps(&self) -> [(&'static str, Vec<String>); 4] {
-        let (created, changed): (Vec<_>, Vec<_>) = self.write.iter().partition(|(_, why)| why.starts_with("create"));
-        [
-            ("create", created.into_iter().map(|w| w.0.clone()).collect()),
-            ("change", changed.into_iter().chain(&self.restore).map(|w| w.0.clone()).collect()),
-            ("delete", self.delete.iter().map(|p| format!("{p} (pacnix created it)")).chain(self.pacnew.iter().map(|p| format!("{p}.pacnew (the declared content replaces it)"))).collect()),
-            ("restore the original of", self.originals.clone()),
-        ]
+        deleted.extend(self.delete.iter().map(|p| (p.clone(), format!("delete file {p} (pacnix created it, no original to restore)"))));
+        deleted.extend(self.pacnew.iter().map(|p| (format!("{p}.pacnew"), format!("delete file {p}.pacnew (the declared content replaces it)"))));
+        restored.extend(self.originals.iter().map(|p| (p.clone(), format!("restore file {p} (the original from before pacnix)"))));
+        restored.extend(self.restore.iter().map(|(p, pkg)| (p.clone(), format!("restore file {p} (the file of package {pkg})"))));
     }
 }
 
@@ -72,7 +61,7 @@ pub fn value(path: &Path, new: &Path, link: bool, full: bool) -> String {
     if more > 0 {
         lines.push(format!("and {more} more changed lines"));
     }
-    let end = if !text.is_empty() && !text.ends_with('\n') { " (no newline at the end)" } else { "" };
+    let end = if !text.is_empty() && !text.ends_with('\n') { " (no newline at the end; end the text with \\n)" } else { "" };
     format!("{end}{}", lines.iter().map(|l| format!("\n  {l}")).collect::<String>())
 }
 
@@ -352,12 +341,15 @@ pub fn prune_dirs(path: &str) {
 pub fn apply(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<Vec<String>> {
     let mut changed = Vec::new();
     let changing = changes(plan);
-    for (verb, paths) in plan.steps().iter().filter(|s| !s.1.is_empty()) {
-        report::progress(&format!("{verb} {}: {}", crate::count(paths.len(), "file"), paths.join(", ")));
+    // The step shows the lines of the plan.
+    let mut lines: [crate::generation::Lines; 4] = Default::default();
+    let [a, b, c, d] = &mut lines;
+    plan.print([a, b, c, d]);
+    let lines = lines.concat();
+    if !lines.is_empty() {
+        report::progress(&format!("change {}", crate::count(lines.len(), "file")));
     }
-    for (path, _) in plan.write.iter().filter(|w| plan.adopt.contains(&w.0)) {
-        say!("  keep the original of {path} as\n    {}", original(path).display());
-    }
+    lines.iter().for_each(|l| say!("  {}", l.1.replace('\n', "\n  ")));
     // The triggers and unit restarts that follow the changes are recorded
     // first: after an interrupt, no change of a file shows them again.
     report::pending(triggered(plan, &changing).into_iter().map(|(n, _)| format!("trigger {n}")));

@@ -156,6 +156,9 @@ pub struct Home {
     pub drv: String,
     /// The derivation of home.path, the packages of the home configuration.
     pub path: String,
+    /// The home files of an empty home configuration of the user, relative to the home directory.
+    #[serde(default)]
+    pub support: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -234,9 +237,12 @@ fn eval_error(ctx: &Ctx, lines: &[String]) -> String {
         }
     }
     // The suggestion of Nix for an option comes first, before the definitions.
+    let first_hint = out.lines().find(|l| l.trim_start().starts_with("Did you mean")).and_then(|l| l.split_once('`')).and_then(|(_, r)| r.split_once('\'')).map(|(o, _)| format!("Did you mean `{o}'?"));
     let mut lines: Vec<&str> = out.lines().collect();
     if let Some(i) = lines.iter().position(|l| l.trim_start().starts_with("Did you mean")) {
-        let hint = lines.remove(i).trim_start();
+        // Nix sorts the suggestions by their distance: the first is the closest.
+        let full = lines.remove(i).trim_start();
+        let hint = first_hint.as_deref().unwrap_or(full);
         let first = lines[0].split_once(" Definition values:").map(|(head, _)| head).unwrap_or(lines[0]);
         let at = lines[1..].iter().filter(|l| l.trim_start().starts_with("- In `")).map(|l| l.trim_start());
         lines = [first, hint].into_iter().chain(at).collect();
@@ -338,16 +344,26 @@ impl Plan {
     }
 
     /// The upgrade, the changes, the declared items that need no change, and a last line.
-    fn print(&self) {
-        say!("system upgrade: apply refreshes the sync databases and upgrades the packages");
+    fn print(&self) -> Result<()> {
+        let newer = packages::newer()?;
+        let newer = match newer.len() {
+            0 => "no package is newer".to_string(),
+            1..=3 => format!("{} newer", newer.join(", ")),
+            n => format!("{n} packages newer"),
+        };
+        say!("pacnix: system upgrade: {newer} in the local sync databases; apply refreshes them first");
         let sections = self.sections();
         let lines: Vec<&(String, String)> = sections.iter().flat_map(|s| &s.1).collect();
-        lines.iter().for_each(|l| say!("{}", l.1));
+        if !lines.is_empty() {
+            say!("pacnix: apply makes these changes:");
+        }
+        lines.iter().for_each(|l| say!("  {}", l.1.replace('\n', "\n  ")));
         self.same();
         match lines.len() {
             0 => say!("pacnix: plan done: no change, only the system upgrade. The system is unchanged."),
             n => say!("pacnix: plan done: {} and the system upgrade. The system is unchanged.", crate::count(n, "change")),
         }
+        Ok(())
     }
 
     /// The declared items that need no change, with the state of each unit.
@@ -355,10 +371,12 @@ impl Plan {
         let sections = self.sections();
         let changed: BTreeSet<&String> = sections.iter().flat_map(|s| &s.1).map(|l| &l.0).collect();
         let m = &self.target.m;
-        let units = |list: &Vec<String>, state: &str| list.iter().map(|u| (u.clone(), format!("{u} ({state})"))).collect::<Vec<_>>();
+        let by = |made: bool| if made { "by pacnix" } else { "before pacnix" };
+        let units = |list: &Vec<String>, state: &str| list.iter().map(|u| (u.clone(), format!("{u} ({state} {})", by(self.units.made(u))))).collect::<Vec<_>>();
         let plain = |list: Vec<&String>| list.into_iter().map(|i| (i.clone(), i.clone())).collect::<Vec<_>>();
+        let packages = m.packages.repo.iter().chain(&m.packages.aur).chain(m.packages.local.keys());
         let declared = [
-            ("package", plain(m.packages.repo.iter().chain(&m.packages.aur).chain(m.packages.local.keys()).collect())),
+            ("package", packages.map(|p| (p.clone(), format!("{p} (installed {})", by(self.packages.made(p))))).collect()),
             ("user", plain(m.users.users.keys().collect())),
             ("file", plain(m.files.keys().collect())),
             ("unit", [units(&m.units.enable, "enabled"), units(&m.units.disable, "disabled"), units(&m.units.mask, "masked")].concat()),
@@ -370,7 +388,7 @@ impl Plan {
             .map(|(noun, items)| if items.len() > 3 { crate::count(items.len(), noun) } else { items.join(", ") })
             .collect();
         if !same.is_empty() {
-            say!("already as declared: {}", same.join(", "));
+            say!("pacnix: already as declared: {}", same.join(", "));
         }
     }
 }
@@ -391,8 +409,7 @@ pub fn locate(ctx: &Ctx, text: &str) -> Option<String> {
 }
 
 pub fn plan(ctx: &Ctx) -> Result<()> {
-    Plan::compute(ctx, build(ctx)?)?.print();
-    Ok(())
+    Plan::compute(ctx, build(ctx)?)?.print()
 }
 
 /// Makes the system agree with the configuration: pacman -Syu, the rebuild
@@ -409,6 +426,9 @@ pub fn apply(ctx: &Ctx, offline: bool) -> Result<()> {
         let builds = packages::upgrade_builds(&target)?;
         let news = news.join().unwrap_or_default();
         read = news.is_some();
+        if !read {
+            say!("pacnix: the Arch Linux news are not available. The next apply shows them");
+        }
         ask(&[packages::removals(&before.packages), builds.asks.clone(), news.unwrap_or_default()].concat(), &audit::asks(&before.data), &ctx.opts)?;
         users::ask_passwords(&before.users, &ctx.opts)?;
         secure::ask_secrets(&before.target, &before.secure)?;
@@ -449,7 +469,12 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
     let delete = ask(&[packages::removals(&plan.packages), builds.asks.clone()].concat(), &audit::asks(&plan.data), &ctx.opts)?;
     users::ask_passwords(&plan.users, &ctx.opts)?;
     secure::ask_secrets(&plan.target, &plan.secure)?;
-    report::planned(plan.sections().into_iter().skip(1).map(|(kind, lines)| (kind, lines.into_iter().map(|l| l.0).collect())).collect());
+    // The last line names the target of a declared link.
+    let link = |p: String| match plan.target.m.files.get(&p).and_then(|f| f.target.clone()) {
+        Some(t) => format!("{p} (link to {t})"),
+        None => p,
+    };
+    report::planned(plan.sections().into_iter().skip(1).map(|(kind, lines)| (kind, lines.into_iter().map(|l| link(l.0)).collect())).collect());
     report::changing();
     let current = std::fs::canonicalize(PENDING).ok();
     if current.as_deref() != Some(Path::new(&plan.target.path)) {

@@ -369,7 +369,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
     let repo_names: BTreeSet<String> = repo.iter().map(|i| i.name.clone()).collect();
     let local_names: Vec<String> = p.local.keys().cloned().collect();
     let (declared, unknown) = declared(g, &sync)?;
-    plan.unknown = unknown.into_iter().map(|n| suggest(n, &sync)).collect();
+    plan.unknown = unknown.into_iter().map(|n| format!("packages.repo: {}", suggest(n, &sync))).collect();
     let locals = local_dirs(g);
     let mut built_aur = built_aur(g);
     built_aur.extend(p.providers.values().filter(|v| !sync.contains(*v) && !locals.contains_key(*v)).cloned());
@@ -380,19 +380,19 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
     if is_builder(g) {
         table = aur_table(&missing_aur)?;
         let found: BTreeSet<&String> = table.iter().map(|t| &t.0).collect();
-        plan.unknown.extend(missing_aur.iter().filter(|n| !found.contains(n)).map(|n| format!("{n} (not in the AUR; search at https://aur.archlinux.org/packages)")));
+        plan.unknown.extend(missing_aur.iter().filter(|n| !found.contains(n)).map(|n| format!("packages.aur: {n} (not in the AUR; search at https://aur.archlinux.org/packages)")));
         plan.build = missing_aur;
         let built = local_sources();
         for (name, dir) in &local_dirs(g) {
             if !Path::new(dir).join("PKGBUILD").exists() {
-                plan.unknown.push(format!("{name} (no PKGBUILD in {dir})"));
+                plan.unknown.push(format!("packages.local: {name} (no PKGBUILD in {dir})"));
             } else if !repo_names.contains(name) || built.get(name) != Some(dir) {
                 plan.local.push(name.clone());
             }
         }
     } else {
-        plan.unknown.extend(missing_aur.iter().map(|n| format!("{n} (not in the repository of {})", p.server.as_deref().unwrap_or(""))));
-        plan.unknown.extend(local_names.iter().filter(|n| !repo_names.contains(*n)).map(|n| format!("{n} (not in the repository of the server)")));
+        plan.unknown.extend(missing_aur.iter().map(|n| format!("packages.aur: {n} (not in the repository of {})", p.server.as_deref().unwrap_or(""))));
+        plan.unknown.extend(local_names.iter().filter(|n| !repo_names.contains(*n)).map(|n| format!("packages.local: {n} (not in the repository of the server)")));
     }
 
     // Packages that the local repository keeps: declared AUR and local packages and their dependencies.
@@ -561,11 +561,11 @@ fn pin(g: &Generation, plan: &mut Plan, inst: &HashMap<String, Info>, sync: &BTr
         } else if sync.contains(name) {
             match archive_url(name, version) {
                 Some(url) => plan.archive.push(url),
-                None => plan.unknown.push(format!("{name} {version} (not in the Arch Linux Archive)")),
+                None => plan.unknown.push(format!("packages.versions: {name} {version} (not in the Arch Linux Archive)")),
             }
         } else {
             let has = source.unwrap_or_else(|| "no version".to_string());
-            plan.unknown.push(format!("{name} {version} (the AUR or the local repository has {has}; declare a PKGBUILD of that version in packages.local)"));
+            plan.unknown.push(format!("packages.versions: {name} {version} (the AUR or the local repository has {has}; declare a PKGBUILD of that version in packages.local)"));
         }
     }
     Ok(())
@@ -606,7 +606,7 @@ fn wrong_providers(g: &Generation, repo: &[Info], sync: &BTreeSet<String>) -> Re
     Ok(chosen
         .iter()
         .filter(|(dep, v)| provides.get(*v).is_some_and(|l| !l.iter().any(|x| dep_name(x) == dep.as_str())))
-        .map(|(dep, v)| format!("{v} (it does not provide {dep})"))
+        .map(|(dep, v)| format!("packages.providers: {v} (it does not provide {dep})"))
         .collect())
 }
 
@@ -631,13 +631,27 @@ fn suggest(name: String, sync: &BTreeSet<String>) -> String {
     }
 }
 
+/// The installed packages that the local sync databases have in a newer version.
+pub fn newer() -> Result<Vec<String>> {
+    Ok(output_any(pacman(&["-Qqu", "--config", CONF]))?.lines().map(String::from).collect())
+}
+
+/// Whether pacnix installed the package or set it to explicitly installed.
+impl Plan {
+    pub fn made(&self, name: &str) -> bool {
+        self.made.contains(name)
+    }
+}
+
 pub fn check(ctx: &Ctx, plan: &Plan) -> Result<()> {
     if !plan.unknown.is_empty() {
-        let at = |n: &String| {
-            let name = n.split(' ').next().unwrap_or(n);
-            crate::generation::locate(ctx, &format!("\"{name}\"")).map_or(n.clone(), |at| format!("{n}, in {at}"))
+        let line = |u: &String| {
+            let (option, rest) = u.split_once(": ").unwrap_or(("packages", u));
+            let name = rest.split(' ').next().unwrap_or(rest);
+            let at = crate::generation::locate(ctx, &format!("\"{name}\"")).map(|at| format!(", in {at}")).unwrap_or_default();
+            format!("{option}: unknown package {rest}{at}")
         };
-        bail!("{}: {}. Correct the names in the configuration", match plan.unknown.len() { 1 => "unknown package", _ => "unknown packages" }, plan.unknown.iter().map(at).collect::<Vec<_>>().join(", "));
+        bail!("{}", plan.unknown.iter().map(line).collect::<Vec<_>>().join("\n"));
     }
     if !plan.conflicts.is_empty() {
         let mut pairs = plan.conflicts.clone();
@@ -1232,8 +1246,7 @@ pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
     let stage = report::stage("system upgrade: refresh the sync databases");
     run_hidden(pacman(&["-Sy", "--config", CONF]))?;
     drop(stage);
-    let newer = output_any(pacman(&["-Qqu", "--config", CONF]))?;
-    let newer: Vec<String> = newer.lines().map(String::from).collect();
+    let newer = newer()?;
     if newer.is_empty() && pins.is_empty() {
         say!("pacnix: system upgrade: the packages are up to date");
     } else {

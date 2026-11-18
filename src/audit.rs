@@ -109,7 +109,7 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
 
     home(&g, &origins, &mut report)?;
     if let Some(state) = crate::secure::audit(&g, &mut report)? {
-        say!("{state}");
+        say!("pacnix: {state}");
     }
     drop(_stage);
     print(&report);
@@ -136,10 +136,10 @@ fn print(report: &[String]) {
     }
     say!("pacnix: items to check: {}. The configuration does not declare them, or they differ from it.", report.len());
     for (kind, items) in &kinds {
-        say!("{kind} ({}):", items.len());
-        items.iter().for_each(|i| say!("  {}", i.replace('\n', "\n  ")));
+        say!("  {kind} ({}):", items.len());
+        items.iter().for_each(|i| say!("    {}", i.replace('\n', "\n    ")));
     }
-    say!("pacnix apply corrects the managed files, the declared units, the boot files and the TPM2 keys. It never removes a package that it did not install. Declare each other item, add it to claims or audit.ignore, or remove it.");
+    say!("pacnix: apply corrects the managed files, the declared units, the boot files and the TPM2 keys. It never removes a package that it did not install. Declare each other item, add it to claims or audit.ignore, or remove it.");
 }
 
 /// Lists entries of ~/.config, ~/.local/share, ~/.cache and dot entries of

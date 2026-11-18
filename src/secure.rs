@@ -272,7 +272,7 @@ pub fn ask_secrets(g: &Generation, plan: &Plan) -> Result<()> {
             if c.wait()?.success() {
                 break p;
             }
-            say!("The passphrase is wrong. Type it again.");
+            say!("pacnix: The passphrase is wrong. Type it again.");
         };
         let mut pin = String::new();
         while g.m.boot.luks[name].tpm2.pin && plan.tpm.iter().any(|(n, _, a)| n == name && matches!(a, Action::Enroll(_))) && pin.is_empty() {
@@ -280,7 +280,7 @@ pub fn ask_secrets(g: &Generation, plan: &Plan) -> Result<()> {
             if first == rpassword::prompt_password(format!("New TPM2 PIN of the LUKS device {name} again: "))? && !first.is_empty() {
                 pin = first;
             } else {
-                say!("The PINs are empty or not equal. Type them again.");
+                say!("pacnix: The PINs are empty or not equal. Type them again.");
             }
         }
         secrets.insert(name.clone(), (passphrase, pin));

@@ -15,17 +15,27 @@ pub struct Plan {
     originals: Vec<String>,
     /// The plan lines of the home files that the activation creates, changes and deletes.
     lines: [Lines; 3],
+    /// The number of created or changed files of each user that an empty home configuration also has.
+    support: std::collections::BTreeMap<String, usize>,
 }
 
 impl Plan {
     /// The plan lines: activations, and created, changed, deleted and restored home files.
     pub fn print(&self, l: [&mut Lines; 5]) {
         let [activate, created, changed, deleted, restored] = l;
-        activate.extend(self.activate.iter().map(|(u, _)| (u.clone(), step(u))));
+        activate.extend(self.activate.iter().map(|(u, _)| (u.clone(), self.step(u))));
         created.extend(self.lines[0].iter().cloned());
         changed.extend(self.lines[1].iter().cloned());
         deleted.extend(self.lines[2].iter().cloned());
         restored.extend(self.originals.iter().map(|p| (p.clone(), format!("restore the original of home file {p}"))));
+    }
+
+    /// The activation step, with the number of Home Manager support files that it creates or changes.
+    fn step(&self, user: &str) -> String {
+        match self.support.get(user) {
+            Some(n) => format!("{}, with {}", step(user), crate::count(*n, "Home Manager support file")),
+            None => step(user),
+        }
     }
 }
 
@@ -74,13 +84,19 @@ pub fn plan(g: &Generation) -> Result<Plan> {
             let value = |full| crate::files::value(&path, &file, false, full);
             let linked = std::fs::read_link(&path).is_ok_and(|t| t.starts_with("/nix/store") && t.to_string_lossy().contains("-home-manager-files/"));
             let kept = backup(&path).symlink_metadata().is_ok();
-            if path.symlink_metadata().is_err() {
+            let support = h.support.iter().any(|s| Path::new(s) == rel);
+            let changed = std::fs::canonicalize(&path).ok() != std::fs::canonicalize(&file).ok();
+            if support && (linked || path.symlink_metadata().is_err()) {
+                if changed {
+                    *plan.support.entry(user.clone()).or_default() += 1;
+                }
+            } else if path.symlink_metadata().is_err() {
                 plan.lines[0].push((p.clone(), format!("create home file {p}")));
             } else if !linked {
                 let why = if kept { " (it differs from the declaration)".to_string() } else { format!("\n  keep the original as\n    {}", backup(&path).display()) };
                 plan.lines[1].push((p.clone(), format!("change home file {p}{why}{}", value(kept))));
                 plan.replace.push((p, kept));
-            } else if std::fs::canonicalize(&path).ok() != std::fs::canonicalize(&file).ok() {
+            } else if changed {
                 plan.lines[1].push((p.clone(), format!("change home file {p}")));
             }
         }
@@ -114,7 +130,7 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
     // An activation is an isolated step: a failure does not stop the other users and the apply.
     for (user, out) in &plan.activate {
         let h = &g.m.home[user];
-        crate::report::progress(&step(user));
+        crate::report::progress(&plan.step(user));
         for (_, line) in plan.lines.iter().flatten().filter(|l| Path::new(&l.0).starts_with(&h.directory)) {
             say!("  {}", line.replace('\n', "\n  "));
         }

@@ -11,7 +11,8 @@ let
   };
   cfg = eval.config;
   pkgs = nixpkgs.legacyPackages.${system};
-  homes = lib.mapAttrs (user: module: home-manager.lib.homeManagerConfiguration {
+  homes = lib.mapAttrs home cfg.home.users;
+  home = user: module: home-manager.lib.homeManagerConfiguration {
     inherit pkgs;
     modules = [
       module
@@ -38,7 +39,10 @@ let
         }) (lib.filterAttrs (_: o: visible o && (o.package.type.check null || o.package ? default)) options.${kind}));
       })
     ];
-  }) cfg.home.users;
+  };
+  # The home files that an empty home configuration of the user also has, for example ~/.cache/.keep.
+  support = user: hm: let empty = home user { home.homeDirectory = hm.config.home.homeDirectory; }; in
+    map (f: f.target) (lib.filter (f: f.enable) (lib.attrValues empty.config.home.file));
   # Home Manager always adds hm-session-vars.sh, a generated shell file.
   homePackages = hm: lib.filter (p: lib.getName p != "hm-session-vars.sh" && !(p.pacnixHost or false)) hm.config.home.packages;
   # A package with only a link to the program of the same name that pacman installs.
@@ -97,6 +101,7 @@ let
       directory = hm.config.home.homeDirectory;
       drv = builtins.unsafeDiscardStringContext hm.activationPackage.drvPath;
       path = builtins.unsafeDiscardStringContext hm.config.home.path.drvPath;
+      support = support user hm;
     }) homes;
   };
 in

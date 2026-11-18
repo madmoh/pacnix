@@ -262,6 +262,8 @@ Declare the input that an application reads:
 
 Do not declare the data that an application writes, for example databases, tokens and caches. Add these paths to `claims` so that the audit does not show them. When an apply removes a feature from `claims`, the question of the run shows the paths of that feature that exist. Answer `y` to delete them, or `k` to keep them: the audit then shows them with their feature. pacnix does not delete a path that a package owns, or that a declared file or a different claim includes.
 
+`audit.ignore` contains glob patterns of paths that the audit does not show, for example `[ "/var/lib/docker/**" ]`. Use it for paths that no feature owns and that pacnix must never delete. `claims` groups the paths by feature: when the feature goes, pacnix asks to delete them.
+
 pacnix does not manage these items:
 
 - partitions and file systems: make them with the installation guide, and declare their mounts in `fileSystems`
@@ -292,7 +294,7 @@ Run pacnix as your user. pacnix starts itself again with `sudo`, which asks for 
 
 An error in the configuration shows the message of Nix one time, with the file in the flake and its line.
 
-When the [Arch Linux news](https://archlinux.org/news/) are not available, `apply` continues without them. The next apply that gets them shows the news since the last read.
+When there are no new [Arch Linux news](https://archlinux.org/news/), `apply` shows nothing about them. When the news are not available, `apply` shows one line and continues without them. The next apply that gets them shows the news since the last read.
 
 When a download fails because of the network, for example no connection, a DNS timeout or a mirror that stops, pacnix tries again after 10 s, 30 s and 60 s, with one download at a time. Your `ParallelDownloads` setting in `/etc/pacman.conf` does not change. The next attempt uses the packages that are already in the pacman cache and in the local repository, and the downloaded sources of a local package stay until it builds.
 

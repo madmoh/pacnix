@@ -20,6 +20,13 @@ struct Made {
     mask: BTreeSet<String>,
 }
 
+impl Plan {
+    /// Whether pacnix changed the state of the unit.
+    pub fn made(&self, unit: &str) -> bool {
+        self.made.preset.contains(unit) || self.made.mask.contains(unit)
+    }
+}
+
 /// The record of the units that pacnix changed. Without the record, the units
 /// of the earlier generation, which pacnix 0.10 changed.
 fn made(old: &Generation) -> Made {
