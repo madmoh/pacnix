@@ -339,8 +339,9 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
                     key = output(cmd("systemd-cryptenroll", &["--recovery-key", dev]).env("PASSWORD", passphrase).stdin(Stdio::null()))?.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_string();
                     Ok(())
                 })?;
+                // At once, because the summary does not show when a later step stops the apply.
                 if !key.is_empty() {
-                    report::last(format!("pacnix: the recovery key of LUKS device {name}: {key}\n  Write it down and keep it away from this computer. pacnix does not show it again"));
+                    println!("pacnix: the recovery key of LUKS device {name}: {key}\n  Write it down and keep it away from this computer. pacnix does not show it again");
                 }
             }
         }

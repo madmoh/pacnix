@@ -80,9 +80,12 @@ PACNIX_VM_SECUREBOOT=1 PACNIX_VM_NOWAIT=1 "$vm" boot sbbox "$cache/sbbox-disk.qc
 [[ $(secure_boot) == "disabled (setup)" ]] || fail "the firmware is not in Setup Mode: $(secure_boot)"
 uuid=$(on sbbox 'sudo cryptsetup luksUUID /dev/vda2')
 luks="boot.initrd.luks.devices.root = { device = \"UUID=$uuid\"; tpm2 = { enable = true; pin = true; }; recoveryKey = true; };"
-scenario sbbox "{ boot.loader.systemd-boot.secureBoot.enable = true; $luks }"
-out=$(plan sbbox)
-grep -qxF 'enroll the Secure Boot keys of this host in the firmware, with microsoft' <<<"$out" || { echo "$out"; fail "the default does not enroll the Microsoft keys"; }
+scenario sbbox "{ boot.loader.systemd-boot.secureBoot = { enable = true; extraFiles = [ \"/boot/EFI/tools/tool.efi\" ]; }; $luks }"
+out=$(plan sbbox) || { echo "$out"; fail "plan failed"; }
+for l in 'create the Secure Boot keys of this host with sbctl' 'sign boot file /boot/EFI/Linux/arch-linux.efi' 'sign boot file /boot/vmlinuz-old' 'sign boot file /boot/EFI/tools/tool.efi' \
+	'sign boot file /usr/lib/systemd/boot/efi/systemd-bootx64.efi as /usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed' 'enroll the Secure Boot keys of this host in the firmware, with microsoft'; do
+	grep -qxF "$l" <<<"$out" || { echo "$out"; fail "the plan does not show: $l"; }
+done
 scenario sbbox "{ boot.loader.systemd-boot.secureBoot = { enable = true; dbAdditions = [ ]; extraFiles = [ \"/boot/EFI/tools/tool.efi\" ]; }; $luks }"
 rc=0
 out=$(apply sbbox) || rc=$?
@@ -98,22 +101,24 @@ signed 6 "the boot files are not signed"
 for l in 'enroll the Secure Boot keys of this host in the firmware, with tpm-eventlog' 'note: the TPM2 key of LUKS device root waits: the firmware does not check Secure Boot signatures with the keys of this host yet'; do
 	grep -qxF "$l" <<<"$out" || { echo "$out"; fail "the plan does not show: $l"; }
 done
-out=$(apply sbbox) || { echo "$out" | tail -30; fail "the apply in Setup Mode failed"; }
+# As on a real machine, the user runs the apply in a terminal: it asks for the passphrase for the recovery key.
+out=$(tty_apply pass1)
+echo "$out" | tail -8
+grep -q '^pacnix: the recovery key of LUKS device root: [a-z]\{8\}-' <<<"$out" || fail "the apply does not show the recovery key"
 grep -qx 'pacnix: the firmware has the Secure Boot keys of this host. Reboot. If sbctl status then shows that Secure Boot is disabled, turn on Secure Boot in the firmware' <<<"$out" || { echo "$out" | tail; fail "the summary does not tell to reboot"; }
 signed 6 "the boot files are not signed"
 check sbbox 'grep -qx "root UUID=.* none tpm2-device=auto" /etc/crypttab.initramfs' "crypttab.initramfs does not have the TPM2 option"
 
-step "the firmware checks the signatures, and the apply enrolls the TPM2 key with the PIN and a recovery key"
+step "the firmware checks the signatures, and the apply enrolls the TPM2 key with the PIN"
 reboot_with "Please enter" pass1
 [[ $(secure_boot) == "enabled (user)" ]] || fail "Secure Boot is not on after the enrollment: $(secure_boot)"
 out=$(pacnix sbbox audit) || true
 grep -qx 'Secure Boot: on, with the keys of this host' <<<"$out" || { echo "$out"; fail "the audit does not show the Secure Boot state"; }
 grep -e sbctl -e 'without a signature' <<<"$out" && fail "the audit shows a file of sbctl or a boot file without a signature"
 out=$(plan sbbox)
-grep -qxF 'enroll the TPM2 key of LUKS device root: the device has none' <<<"$out" && grep -qxF 'enroll a recovery key for LUKS device root' <<<"$out" || { echo "$out"; fail "the plan does not enroll the TPM2 key and the recovery key"; }
-out=$(tty_apply pass1 4321 4321)
-echo "$out" | tail -8
-grep -q '^pacnix: the recovery key of LUKS device root: [a-z]\{8\}-' <<<"$out" || fail "the summary does not show the recovery key"
+grep -qxF 'enroll the TPM2 key of LUKS device root: the device has none' <<<"$out" || { echo "$out"; fail "the plan does not enroll the TPM2 key"; }
+grep -q 'recovery' <<<"$out" && { echo "$out"; fail "the plan enrolls a second recovery key"; }
+tty_apply pass1 4321 4321 | tail -4
 check sbbox 'sudo systemd-cryptenroll /dev/vda2 | grep -q "tpm2" && sudo systemd-cryptenroll /dev/vda2 | grep -q recovery && sudo cryptsetup luksDump --dump-json-metadata /dev/vda2 | grep -q "\"tpm2-pin\":true"' "the TPM2 key with the PIN or the recovery key is not enrolled"
 empty_plan sbbox
 

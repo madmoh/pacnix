@@ -191,9 +191,9 @@ pacnix creates the keys in `/var/lib/sbctl` when they are missing, and signs sys
 Do these steps in the firmware setup. The summary of the apply tells the next step:
 
 1. Set Secure Boot to custom mode, and reset it to Setup Mode. This deletes the factory keys.
-2. Run `pacnix apply`. It enrolls the keys of this host.
+2. Run `pacnix apply` in a terminal. It enrolls the keys of this host. With `recoveryKey`, it asks for the current passphrase of each device and shows the recovery key one time. Write down the recovery key.
 3. Reboot, and turn on Secure Boot if it is off.
-4. Run `pacnix apply` in a terminal. It asks for the current passphrase of each device and for a new PIN, then enrolls the TPM2 key and shows the recovery key one time. Write down the recovery key.
+4. Run `pacnix apply` in a terminal. It asks for the current passphrase of each device and for a new PIN, then enrolls the TPM2 key.
 
 The passphrase stays as a second key. When `tpm2.pcrs` contains 7, pacnix enrolls the TPM2 key only when the firmware checks the signatures, with the keys of this host when Secure Boot is declared. When the PCR values change, for example after new keys, the initramfs asks for the passphrase, and the next `pacnix apply` enrolls the TPM2 key again. When the firmware checks the signatures with other keys, pacnix stops before it changes the system. `pacnix audit` shows the Secure Boot state, the boot files without a signature and the state of each TPM2 key.
 
