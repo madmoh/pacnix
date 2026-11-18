@@ -222,9 +222,10 @@ fn systemctl(step: &str, args: &[&str]) -> Result<bool> {
 /// the units of the earlier generation, then starts the declared units that it
 /// enabled and stops the units that it disabled.
 pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
-    let n = plan.enable.len() + plan.disable.len() + plan.mask.len() + plan.unmask.len();
-    if n > 0 {
-        report::progress(&format!("enable, disable or mask {}", crate::count(n, "unit")));
+    for (verb, units) in [("enable", &plan.enable), ("disable", &plan.disable), ("mask", &plan.mask), ("unmask", &plan.unmask)] {
+        if !units.is_empty() {
+            report::progress(&format!("{verb} {}: {}", crate::count(units.len(), "unit"), units.join(", ")));
+        }
     }
     // The starts that follow the presets are recorded first: after an
     // interrupt, the units are enabled and the next plan shows the starts.

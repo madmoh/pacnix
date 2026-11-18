@@ -25,12 +25,30 @@ impl Plan {
         self.delete.iter().chain(&self.originals).cloned().chain(self.restore.iter().map(|r| r.0.clone())).collect()
     }
 
-    pub fn print(&self, l: &mut Vec<String>) {
-        l.extend(self.write.iter().map(|(p, why)| format!("write file {p} ({why})")));
-        l.extend(self.restore.iter().map(|(p, pkg)| format!("restore file {p} from package {pkg}")));
-        l.extend(self.originals.iter().map(|p| format!("restore the original of file {p}")));
-        l.extend(self.delete.iter().map(|p| format!("delete file {p}")));
-        l.extend(self.pacnew.iter().map(|p| format!("delete {p}.pacnew (the declared content replaces it)")));
+    /// The plan lines: created, changed, deleted and restored files.
+    pub fn print(&self, l: [&mut Vec<String>; 4]) {
+        let [created, changed, deleted, restored] = l;
+        for (p, why) in &self.write {
+            match why.as_str() {
+                "create" => created.push(format!("create file {p}")),
+                why => changed.push(format!("change file {p}{why}")),
+            }
+        }
+        changed.extend(self.restore.iter().map(|(p, pkg)| format!("change file {p} back to the file of package {pkg}")));
+        deleted.extend(self.delete.iter().map(|p| format!("delete file {p}")));
+        deleted.extend(self.pacnew.iter().map(|p| format!("delete file {p}.pacnew (the declared content replaces it)")));
+        restored.extend(self.originals.iter().map(|p| format!("restore the original of file {p}")));
+    }
+
+    /// The paths of the plan lines, by verb.
+    fn steps(&self) -> [(&'static str, Vec<String>); 4] {
+        let (created, changed): (Vec<_>, Vec<_>) = self.write.iter().partition(|(_, why)| why == "create");
+        [
+            ("create", created.into_iter().map(|w| w.0.clone()).collect()),
+            ("change", changed.into_iter().chain(&self.restore).map(|w| w.0.clone()).collect()),
+            ("delete", self.delete.iter().cloned().chain(self.pacnew.iter().map(|p| format!("{p}.pacnew"))).collect()),
+            ("restore the original of", self.originals.clone()),
+        ]
     }
 }
 
@@ -148,13 +166,11 @@ pub fn plan(_ctx: &Ctx, g: &Generation, ledger: &[Generation]) -> Result<Plan> {
         let why = if std::fs::symlink_metadata(path).is_err() {
             "create".to_string()
         } else if ours(path) {
-            if previous.and_then(|f| f.get(path)) == Some(spec) { "correct drift" } else { "update" }.to_string()
+            if previous.and_then(|f| f.get(path)) == Some(spec) { " (it differs from the declaration)" } else { "" }.to_string()
         } else {
             plan.adopt.push(path.clone());
-            match owner.get(path) {
-                Some(pkg) => format!("override the file of package {pkg}, keep the original"),
-                None => "replace the unmanaged file, keep the original".to_string(),
-            }
+            let of = owner.get(path).map(|pkg| format!(" of package {pkg}")).unwrap_or_default();
+            format!(", keep the original{of} as {}", original(path).display())
         };
         plan.write.push((path.clone(), why));
     }
@@ -305,8 +321,8 @@ pub fn prune_dirs(path: &str) {
 pub fn apply(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<Vec<String>> {
     let mut changed = Vec::new();
     let changing = changes(plan);
-    if !changing.is_empty() {
-        report::progress(&format!("write {}", crate::count(changing.len(), "file")));
+    for (verb, paths) in plan.steps().iter().filter(|s| !s.1.is_empty()) {
+        report::progress(&format!("{verb} {}: {}", crate::count(paths.len(), "file"), paths.join(", ")));
     }
     // The triggers and unit restarts that follow the changes are recorded
     // first: after an interrupt, no change of a file shows them again.

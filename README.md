@@ -60,7 +60,7 @@ pacnix plan
 pacnix apply
 ```
 
-`pacnix plan` shows each change and changes nothing. Change the configuration until the plan shows only the changes that you want, then run `pacnix apply`. Keep the configuration in a Git repository, for example to use it on a different host. When a declared file replaces a file that pacnix did not write, also a file of a package, pacnix keeps the original file in `/var/lib/pacnix/originals`, and the plan shows `keep the original`. A declared file that has the declared content already is no change. When you remove the declaration, pacnix puts the original file back. A declared user that exists keeps its password and its home directory. If you declare `/etc/pacman.conf`, keep the section `[pacnix]` in it.
+`pacnix plan` shows each change and changes nothing. Change the configuration until the plan shows only the changes that you want, then run `pacnix apply`. Keep the configuration in a Git repository, for example to use it on a different host. When a declared file replaces a file that pacnix did not write, also a file of a package, pacnix keeps the original file in `/var/lib/pacnix/originals`, and the plan line shows the path of the copy. A declared file that has the declared content already is no change. When you remove the declaration, pacnix puts the original file back. A declared user that exists keeps its password and its home directory. If you declare `/etc/pacman.conf`, keep the section `[pacnix]` in it.
 
 The first apply builds and installs the AUR and local packages, and activates the home configurations. The builds can take a long time. When a step gives no output for 60 s, pacnix writes a line that tells that the step continues. A download shows the packages and MiB that arrived every 30 s, and tells when no data arrived for a minute.
 
@@ -145,7 +145,7 @@ pacnix downloads the packages into the pacman cache before the transaction. If a
 
 `files` contains files outside the home directories. Set one of these options:
 
-- `text`: the content.
+- `text`: the content, exactly as written. pacnix adds no newline at the end, as [`environment.etc`](https://search.nixos.org/options?query=environment.etc) of NixOS. A Nix string with `''` adds the newline of its last line.
 - `source`: a file that has the content.
 - `target`: the target of a symbolic link.
 
@@ -260,7 +260,7 @@ Declare the input that an application reads:
 - dconf keys
 - drop-ins
 
-Do not declare the data that an application writes, for example databases, tokens and caches. Add these paths to `claims` so that the audit does not show them. When an apply or a rollback removes a feature from `claims`, the question of the run shows the paths of that feature that exist. Answer `y` to delete them, or `k` to keep them: the audit then shows them with their feature. pacnix does not delete a path that a package owns, or that a declared file or a different claim includes.
+Do not declare the data that an application writes, for example databases, tokens and caches. Add these paths to `claims` so that the audit does not show them. When an apply removes a feature from `claims`, the question of the run shows the paths of that feature that exist. Answer `y` to delete them, or `k` to keep them: the audit then shows them with their feature. pacnix does not delete a path that a package owns, or that a declared file or a different claim includes.
 
 pacnix does not manage these items:
 
@@ -276,13 +276,12 @@ Run pacnix as your user. pacnix starts itself again with `sudo`, which asks for 
 |---|---|
 | `pacnix plan` | Shows each change that `apply` will do. It does not change the system. |
 | `pacnix apply` | Upgrades the system, then makes it agree with the configuration. It also shows the Arch Linux news since the last upgrade. With `--offline`, it does not upgrade. |
-| `pacnix rollback` | Applies the previous generation. Package versions do not go back. |
 | `pacnix uninstall` | Removes pacnix, aurutils and Nix with pacman, and deletes the data, users and groups that they made. The declared files, units and packages stay. The Home Manager files become copies outside the Nix store. |
-| `pacnix audit` | Shows the state that the configuration does not explain: files without an owner, changed package files, `.pacnew` files, explicitly installed packages that are not declared, enabled units that are not declared and that no vendor preset enables, and paths in home directories that no claim explains. It also shows if a reboot is necessary and the install notes of the last change. For each kind of item, a line tells what to do. |
+| `pacnix audit` | Shows the state that the configuration does not explain: files without an owner, changed package files, `.pacnew` files, explicitly installed packages that are not declared, enabled units that are not declared and that no vendor preset enables, and paths in home directories that no claim explains. The first line shows the number of items, then the items of each kind follow, and the last line tells what to do. It also shows if a reboot is necessary and the install notes of the last change. |
 
-`apply` and `rollback` ask one question at most, before they change the system, and only for items that the configuration does not show: package removals, new maintainers or new AUR dependencies of AUR packages, the Arch Linux news and the data of removed features. `--yes` accepts the items. Without a terminal, pacnix stops if there is a question and you do not give `--yes`.
+`apply` asks one question at most, before they change the system, and only for items that the configuration does not show: package removals, new maintainers or new AUR dependencies of AUR packages, the Arch Linux news and the data of removed features. `--yes` accepts the items. Without a terminal, pacnix stops if there is a question and you do not give `--yes`.
 
-`plan` and `apply` show each step when it starts. `apply` does not show the plan again. pacnix answers no question of pacman, and the output of pacman shows only its errors and warnings. At the end, `apply` and `rollback` show the items that you must know: if this run made a reboot necessary (the kernel that runs is not installed, a boot image changed, or a DKMS module was built for a kernel that does not run), new or changed install notes of packages, and new `.pacnew` files. The last line shows the result, the changes and the exit status:
+`plan` shows the upgrade, each change, the number of declared items that need no change, and a last line with the number of changes. `apply` does not show the plan again: it shows each step with its items when the step starts. A step that changes nothing, for example the evaluation, shows only when it takes 2 s or more. pacnix answers no question of pacman, and the output of pacman shows only its errors and warnings. At the end, `apply` shows the items that you must know: if this run made a reboot necessary (the kernel that runs is not installed, a boot image changed, or a DKMS module was built for a kernel that does not run), new or changed install notes of packages, and new `.pacnew` files. The last line shows the result, the changes and the exit status:
 
 | Exit status | Result |
 |---|---|
@@ -297,7 +296,7 @@ When the [Arch Linux news](https://archlinux.org/news/) are not available, `appl
 
 When a download fails because of the network, for example no connection, a DNS timeout or a mirror that stops, pacnix tries again after 10 s, 30 s and 60 s, with one download at a time. Your `ParallelDownloads` setting in `/etc/pacman.conf` does not change. The next attempt uses the packages that are already in the pacman cache and in the local repository, and the downloaded sources of a local package stay until it builds.
 
-A failed step that changes only one item does not stop `apply` and `rollback`, as with [`nix build --keep-going`](https://nix.dev/manual/nix/stable/command-ref/new-cli/nix3-build) and [`switch-to-configuration`](https://nixos.org/manual/nixos/stable/#sec-switching-systems) of NixOS. These steps are:
+A failed step that changes only one item does not stop `apply`, as with [`nix build --keep-going`](https://nix.dev/manual/nix/stable/command-ref/new-cli/nix3-build) and [`switch-to-configuration`](https://nixos.org/manual/nixos/stable/#sec-switching-systems) of NixOS. These steps are:
 
 - the build of an AUR or a local package. The packages that need it do not build or install. The package removals wait until each declared package builds, because a package that did not build can replace a package that leaves. The units and files that leave go: when a package that did not build replaces a service, for example a display manager, the old service stops.
 - a trigger. The later triggers wait, because a trigger can need the result of an earlier trigger, for example the boot loader needs the boot images.

@@ -85,7 +85,7 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
         let Some((path, why)) = rest.rsplit_once(" (") else { continue };
         let content = why.contains("checksum") || why.contains("Size");
         if content && !g.m.files.contains_key(path) && !claimed.is_match(path) {
-            report.push(format!("modified file of package {pkg}: {path}"));
+            report.push(format!("modified package file: {path} ({pkg})"));
         }
     }
 
@@ -107,36 +107,38 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
     report.extend(units.enable.iter().filter(|u| g.m.units.enable.contains(*u)).map(|u| format!("declared unit not enabled: {u}")));
 
     home(&g, &origins, &mut report)?;
-    crate::report::audit(&mut report);
     if let Some(state) = crate::secure::audit(&g, &mut report)? {
         println!("{state}");
     }
-    if report.is_empty() {
-        println!("The configuration explains the state of the system.");
-    }
-    for l in &report {
-        println!("{l}");
-    }
-    // One line for each kind of finding tells what to do.
-    for (kind, todo) in HINTS {
-        if report.iter().any(|l| l.starts_with(kind)) {
-            println!("{todo}");
-        }
-    }
+    print(&report);
+    let mut notes = Vec::new();
+    crate::report::audit(&mut notes);
+    notes.iter().for_each(|n| println!("pacnix: {n}"));
     Ok(())
 }
 
-const HINTS: [(&str, &str); 9] = [
-    ("pacnew file", "Merge each .pacnew file into its file, then delete the .pacnew file."),
-    ("pacsave file", "Delete each .pacsave file that you do not need."),
-    ("unowned", "For an unowned path, declare it in files, add it to claims or audit.ignore, or delete it."),
-    ("modified file of package", "For a modified file of a package, declare it in files, or restore it with pacman -S PACKAGE."),
-    ("managed file differs", "pacnix apply writes the managed files again."),
-    ("explicit package not declared", "For an explicit package that is not declared, declare it in packages.repo or packages.aur, or mark it as a dependency with pacman -D --asdeps PACKAGE."),
-    ("enabled unit not declared", "For an enabled unit that is not declared, declare it in units.enable, or disable it with systemctl disable UNIT."),
-    ("declared unit not enabled", "pacnix apply enables the declared units."),
-    ("unclaimed home path", "For an unclaimed home path, declare it in home.users.USER, add it to the home paths of claims, or delete it."),
-];
+/// Shows the number of items first, then the items under one heading for
+/// each kind, and at the end one line that tells what to do.
+fn print(report: &[String]) {
+    if report.is_empty() {
+        println!("pacnix: the system agrees with the configuration.");
+        return;
+    }
+    let mut kinds: Vec<(&str, Vec<&str>)> = Vec::new();
+    for line in report {
+        let (kind, item) = line.split_once(": ").unwrap_or((line, ""));
+        match kinds.iter_mut().find(|k| k.0 == kind) {
+            Some(k) => k.1.push(item),
+            None => kinds.push((kind, vec![item])),
+        }
+    }
+    println!("pacnix: items that differ from the configuration: {}", report.len());
+    for (kind, items) in &kinds {
+        println!("{kind} ({}):", items.len());
+        items.iter().for_each(|i| println!("  {}", i.replace('\n', "\n  ")));
+    }
+    println!("pacnix apply corrects the managed files, the declared units, the boot files and the TPM2 keys. Declare each other item, add it to claims or audit.ignore, or remove it.");
+}
 
 /// Lists entries of ~/.config, ~/.local/share, ~/.cache and dot entries of
 /// each home directory that no claim and no Home Manager file explains.

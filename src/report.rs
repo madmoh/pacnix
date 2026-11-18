@@ -18,7 +18,9 @@ const RETRY: &str = "/var/lib/pacnix/retry.json";
 /// the run, and the reasons to reboot at the start of the run.
 static RUN: Mutex<Option<(String, Instant, u64, Vec<String>)>> = Mutex::new(None);
 /// The number of planned changes of each kind, for the last line.
-static PLANNED: Mutex<Vec<(&str, usize)>> = Mutex::new(Vec::new());
+static PLANNED: Mutex<Vec<((&str, &str), usize)>> = Mutex::new(Vec::new());
+/// The number of the stage that runs, 0 without a stage.
+static STAGE: Mutex<u64> = Mutex::new(0);
 /// Set before the first change of the system. Before it, an interrupt stops
 /// pacnix at once, and nothing changed.
 static CHANGING: AtomicBool = AtomicBool::new(false);
@@ -132,8 +134,42 @@ pub fn progress(step: &str) {
     }
 }
 
+/// Ends the stage when it goes out of scope.
+pub struct Stage(u64);
+
+impl Drop for Stage {
+    fn drop(&mut self) {
+        let mut s = STAGE.lock().unwrap();
+        if *s == self.0 {
+            *s = 0;
+        }
+    }
+}
+
+/// A stage of the work that changes nothing, for example the evaluation. It
+/// shows only when it takes 2 s or more, and an interrupt names it.
+pub fn stage(step: &str) -> Stage {
+    let id = {
+        let mut s = STAGE.lock().unwrap();
+        *s += 1;
+        *s
+    };
+    if let Some((s, start, _, _)) = RUN.lock().unwrap().as_mut() {
+        *s = step.to_string();
+        *start = Instant::now();
+    }
+    let step = step.to_string();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        if *STAGE.lock().unwrap() == id {
+            println!("pacnix: {step}");
+        }
+    });
+    Stage(id)
+}
+
 /// The number of planned changes of each kind, for the last line.
-pub fn planned(kinds: Vec<(&'static str, usize)>) {
+pub fn planned(kinds: Vec<((&'static str, &'static str), usize)>) {
     *PLANNED.lock().unwrap() = kinds;
 }
 
@@ -166,7 +202,7 @@ pub fn close(verb: &str, ok: bool) -> i32 {
     }
     let mut changes = packages();
     if code == 0 || code == 4 {
-        changes.extend(PLANNED.lock().unwrap().iter().filter(|(_, n)| *n > 0).map(|(kind, n)| crate::count(*n, kind)));
+        changes.extend(PLANNED.lock().unwrap().iter().filter(|(_, n)| *n > 0).map(|((noun, verb), n)| format!("{} {verb}", crate::count(*n, noun)).trim_end().to_string()));
     }
     let changes = match changes.is_empty() {
         true if code == 0 || code == 4 => "No changes.".to_string(),
@@ -402,7 +438,7 @@ pub fn summary() {
 pub fn audit(report: &mut Vec<String>) {
     report.extend(reboot_reasons().into_iter().map(|r| format!("reboot necessary: {r}")));
     let saved: Notes = std::fs::read(NOTES).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    report.extend(saved.last.iter().map(|(p, n)| format!("install note of {p} from the last change:\n  {}", n.trim_end().replace('\n', "\n  "))));
+    report.extend(saved.last.iter().map(|(p, n)| format!("install note of the last change: {p}\n  {}", n.trim_end().replace('\n', "\n  "))));
 }
 
 fn boot_time() -> i64 {

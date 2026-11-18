@@ -60,7 +60,7 @@ pub fn plan(g: &Generation) -> Result<Plan> {
         if old.as_deref() == Some(out.as_str()) && !crate::report::retry(&step(user)) {
             continue;
         }
-        crate::report::progress(&format!("build the home configuration of {user}"));
+        let _stage = crate::report::stage(&format!("build the home configuration of {user}"));
         run_hidden(cmd("nix-store", &["--realise", &h.drv, &h.path]))?;
         let new = home_files(&out);
         let home = Path::new(&h.directory);

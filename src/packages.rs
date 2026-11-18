@@ -622,7 +622,8 @@ fn uname() -> String {
 /// Refuses a plan that is not safe. Runs before any change.
 pub fn check(ctx: &Ctx, plan: &Plan) -> Result<()> {
     if !plan.unknown.is_empty() {
-        bail!("{}: {}. Correct the names in the configuration", match plan.unknown.len() { 1 => "unknown package", _ => "unknown packages" }, plan.unknown.join(", "));
+        let at = |n: &String| crate::generation::locate(ctx, &format!("\"{n}\"")).map(|at| format!("{n} ({at})")).unwrap_or(n.clone());
+        bail!("{}: {}. Correct the names in the configuration", match plan.unknown.len() { 1 => "unknown package", _ => "unknown packages" }, plan.unknown.iter().map(at).collect::<Vec<_>>().join(", "));
     }
     if !plan.conflicts.is_empty() {
         let mut pairs = plan.conflicts.clone();
@@ -643,7 +644,7 @@ pub fn check(ctx: &Ctx, plan: &Plan) -> Result<()> {
 pub fn removals(plan: &Plan) -> Vec<String> {
     match plan.remove.is_empty() {
         true => vec![],
-        false => vec![format!("Remove {}: {}.", count(plan.remove.len(), "package"), plan.remove.join(" "))],
+        false => vec![format!("Remove {} that are no longer declared, or that only these packages need: {}.", count(plan.remove.len(), "package"), plan.remove.join(", "))],
     }
 }
 
@@ -1133,13 +1134,13 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
     std::fs::write(MADE, serde_json::to_vec(&list)?)?;
     let targets = plan.targets(skip);
     if !targets.is_empty() {
-        report::progress(&format!("install {}", count(targets.len(), "package")));
+        report::progress(&format!("install {}: {}", count(targets.len(), "package"), targets.join(", ")));
         let mut args = vec!["-S", "--needed", "--noconfirm", "--ask=4", "--config", CONF];
         args.extend(targets);
         transaction(&args)?;
     }
     if !plan.archive.is_empty() {
-        report::progress(&format!("install {} from the Arch Linux Archive", count(plan.archive.len(), "package")));
+        report::progress(&format!("install {} from the Arch Linux Archive: {}", count(plan.archive.len(), "package"), plan.archive.join(", ")));
         let mut args = vec!["-U", "--noconfirm", "--ask=4", "--config", CONF];
         args.extend(plan.archive.iter().map(String::as_str));
         // pacman downloads the files of -U first and stops before a change when a download fails.
@@ -1159,13 +1160,13 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
         run_cmd(pacman(&["-D", "--asdeps"]).args(&plan.deps))?;
     }
     if !plan.remove.is_empty() {
-        report::progress(&format!("remove {}", count(plan.remove.len(), "package")));
+        report::progress(&format!("remove {}: {}", count(plan.remove.len(), "package"), plan.remove.join(", ")));
         transaction(&[&["-Rns", "--noconfirm"][..], &plan.remove.iter().map(String::as_str).collect::<Vec<_>>()].concat())?;
     }
     let orphans = output_any(&mut pacman(&["-Qqdtt"]))?;
     let orphans: Vec<&str> = orphans.split_whitespace().filter(|n| !plan.orphans.contains(*n)).collect();
     if !orphans.is_empty() {
-        report::progress(&format!("remove {} that no declared package needs: {}", count(orphans.len(), "package"), orphans.join(" ")));
+        report::progress(&format!("remove {} that no declared package needs: {}", count(orphans.len(), "package"), orphans.join(", ")));
         transaction(&[&["-Rns", "--noconfirm"][..], &orphans].concat())?;
     }
     save_made(plan)

@@ -403,10 +403,10 @@ pub fn audit(g: &Generation, report: &mut Vec<String>) -> Result<Option<String>>
     }
     for (name, action) in plan(g, g)?.tpm.into_iter().map(|(n, _, a)| (n, a)) {
         report.push(match action {
-            Action::Enroll(why) => format!("TPM2 key of LUKS device {name}: not current, {why}"),
-            Action::Wait(why) => format!("TPM2 key of LUKS device {name}: waits, {why}"),
-            Action::Wipe => format!("TPM2 key of LUKS device {name}: not declared"),
-            Action::Recovery => format!("LUKS device {name}: no recovery key"),
+            Action::Enroll(why) => format!("TPM2 key not current: {name}, {why}"),
+            Action::Wait(why) => format!("TPM2 key that waits: {name}, {why}"),
+            Action::Wipe => format!("TPM2 key not declared: {name}"),
+            Action::Recovery => format!("LUKS device without a recovery key: {name}"),
         });
     }
     Ok(Some(state))

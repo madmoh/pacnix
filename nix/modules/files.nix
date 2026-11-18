@@ -13,7 +13,7 @@ in
         text = mkOption {
           type = types.nullOr types.str;
           default = null;
-          description = "Content of the file. Set one of text, source and target.";
+          description = "Content of the file, exactly as written, without an added newline. Set one of text, source and target.";
         };
         source = mkOption {
           type = types.nullOr types.path;

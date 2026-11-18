@@ -38,8 +38,6 @@ enum Verb {
     Plan,
     /// Upgrade the system, then make it agree with the configuration
     Apply(ApplyOpts),
-    /// Apply the previous generation
-    Rollback(Opts),
     /// Show what the configuration does not explain. Change nothing
     Audit,
     /// Remove pacnix and Nix. The declared files, units and packages stay
@@ -51,7 +49,6 @@ impl Verb {
         match self {
             Verb::Plan => "plan",
             Verb::Apply(_) => "apply",
-            Verb::Rollback(_) => "rollback",
             Verb::Audit => "audit",
             Verb::Uninstall(_) => "uninstall",
         }
@@ -125,11 +122,15 @@ fn run(cli: Cli) -> Result<()> {
         bail!("pacnix runs only on the booted system. Boot the installed system, then run pacnix again");
     }
     let _lock = lock()?;
+    // A local flake needs flake.nix. Nix tells this without the directory and the option.
+    if !flake.contains(':') && !std::path::Path::new(&flake).join("flake.nix").exists() {
+        bail!("{flake} has no flake.nix. Make the configuration as \"First configuration\" of the README tells, or give --flake with the directory of the configuration");
+    }
+    println!("pacnix: host {host} of the flake {flake}");
     let ctx = |opts| Ctx { flake: flake.clone(), host: host.clone(), opts };
     match cli.verb {
         Verb::Plan => generation::plan(&ctx(Opts::default())),
         Verb::Apply(a) => resilient(|| generation::apply(&ctx(a.opts.clone()), a.offline)),
-        Verb::Rollback(o) => resilient(|| generation::rollback(&ctx(o.clone()))),
         Verb::Audit => audit::audit(&ctx(Opts::default())),
         Verb::Uninstall(o) => resilient(|| generation::uninstall(&ctx(o.clone()))),
     }
