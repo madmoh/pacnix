@@ -311,8 +311,9 @@ fn mib(bytes: u64) -> String {
 }
 
 /// Shows the progress of a download every 30 s, and tells when no data
-/// arrived for a minute: the complete files in the cache directory and the
-/// partial files in its download directories of pacman. Returns false
+/// arrived for a minute: the files in the cache directory and in its download
+/// directories of pacman. pacman keeps the complete files in a download
+/// directory and moves them to the cache directory at the end. Returns false
 /// without a download.
 pub fn meter() -> bool {
     let mut guard = DOWNLOAD.lock().unwrap();
@@ -321,18 +322,19 @@ pub fn meter() -> bool {
         return true;
     }
     d.shown = Instant::now();
-    let complete: Vec<u64> = d.files.iter().filter(|(f, _)| Path::new(&d.cache).join(f).exists()).map(|(_, s)| *s).collect();
-    let partial: u64 = std::fs::read_dir(&d.cache)
+    let loading: Vec<(String, u64)> = std::fs::read_dir(&d.cache)
         .into_iter()
         .flatten()
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().starts_with("download-"))
         .flat_map(|e| std::fs::read_dir(e.path()).into_iter().flatten().flatten())
-        .filter_map(|e| e.metadata().ok().map(|m| m.len()))
-        .sum();
-    let done = complete.iter().sum::<u64>() + partial;
+        .filter_map(|e| Some((e.file_name().to_string_lossy().into_owned(), e.metadata().ok()?.len())))
+        .collect();
+    let cached: Vec<u64> = d.files.iter().filter(|(f, _)| Path::new(&d.cache).join(f).exists()).map(|(_, s)| *s).collect();
+    let complete = cached.len() + d.files.iter().filter(|(f, _)| loading.iter().any(|(l, _)| l == f)).count();
+    let done = cached.iter().sum::<u64>() + loading.iter().map(|(_, s)| s).sum::<u64>();
     let total: u64 = d.files.iter().map(|f| f.1).sum();
-    let state = format!("{} of {}, {} of {} MiB", complete.len(), crate::count(d.files.len(), "package"), mib(done), mib(total));
+    let state = format!("{} of {}, {} of {} MiB", complete, crate::count(d.files.len(), "package"), mib(done), mib(total));
     if done != d.done {
         (d.done, d.changed) = (done, Instant::now());
         say!("pacnix: {}: {state}", d.label);

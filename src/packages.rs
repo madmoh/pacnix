@@ -284,8 +284,13 @@ fn write_confs(g: &Generation) -> Result<()> {
             .map(|l| if l.trim() == "[options]" { format!("{l}\nParallelDownloads = 1\n") } else { format!("{l}\n") })
             .collect();
     }
+    // pacman warns about a repository without a synced database. The plan reads
+    // the database of pacnix-local from the repository, thus the section of
+    // pacnix-local goes into the system configuration after its first sync.
+    let db = output(cmd("pacman-conf", &["--config", declared, "DBPath"]))?;
+    let synced = Path::new(db.trim()).join("sync/pacnix-local.db").exists();
     std::fs::create_dir_all("/run/pacnix")?;
-    std::fs::write(CONF, format!("{system}{section}"))?;
+    std::fs::write(CONF, format!("{system}{}", if synced { section.as_str() } else { "" }))?;
     std::fs::write(LOCAL_CONF, format!("[options]\nArchitecture = auto\n{section}"))?;
     Ok(())
 }
@@ -296,9 +301,10 @@ fn has_local(g: &Generation) -> bool {
 
 /// Refreshes the database of the pacnix-local repository only. The sync databases of
 /// the Arch repositories stay as they are.
-fn sync_pacnix_db() -> Result<()> {
+fn sync_pacnix_db(g: &Generation) -> Result<()> {
     recover_lock()?;
-    run_quiet(pacman(&["-Sy", "--config", LOCAL_CONF]))
+    run_quiet(pacman(&["-Sy", "--config", LOCAL_CONF]))?;
+    write_confs(g)
 }
 
 fn aur_table(names: &[String]) -> Result<Vec<(String, String, String)>> {
@@ -804,7 +810,7 @@ fn signing_key() -> Result<String> {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(GNUPG)?;
         let host = std::fs::read_to_string("/etc/hostname").unwrap_or_default();
-        run_quiet(gpg(&["--passphrase", "", "--quick-gen-key", &format!("pacnix-local of {}", host.trim()), "ed25519", "sign", "never"]))?;
+        run_hidden(gpg(&["--passphrase", "", "--quick-gen-key", &format!("pacnix-local of {}", host.trim()), "ed25519", "sign", "never"]))?;
     }
     let key = fingerprints(&output(gpg(&["--with-colons", "--list-secret-keys"]))?).into_iter().next().context("the signing key of the local repository has no fingerprint")?;
     if !Path::new(KEY).exists() {
@@ -822,7 +828,7 @@ fn repo_add(files: &[std::path::PathBuf]) -> Result<()> {
         run_quiet(gpg(&["--yes", "--local-user", &key, "--detach-sign"]).arg(f))?;
     }
     let mut c = cmd("repo-add", &["-q", "-R", "-s", "-k", &key, &format!("{REPO}/pacnix-local.db.tar.gz")]);
-    run_cmd(c.args(files).env("GNUPGHOME", GNUPG))
+    run_hidden(c.args(files).env("GNUPGHOME", GNUPG))
 }
 
 /// Trusts the signing key of packages.server with pacman-key, after a check of
@@ -838,7 +844,7 @@ fn trust_server(g: &Generation) -> Result<()> {
     let file = format!("/run/pacnix/server-{}.asc", std::process::id());
     std::fs::create_dir_all("/run/pacnix")?;
     output(cmd("curl", &["-fsSL", "--retry", "3", "-o", &file, &url])).with_context(|| format!("download {url}"))?;
-    let found = fingerprints(&output(cmd("gpg", &["--homedir", "/etc/pacman.d/gnupg", "--batch", "--with-colons", "--show-keys", &file]))?);
+    let found = fingerprints(&output(cmd("gpg", &["--homedir", "/etc/pacman.d/gnupg", "--no-permission-warning", "--batch", "--with-colons", "--show-keys", &file]))?);
     if found.first() != Some(&key) {
         let _ = std::fs::remove_file(&file);
         bail!("the key in {url} has the fingerprint {}, but packages.serverKey is {key}", found.first().map_or("none", |f| f.as_str()));
@@ -904,7 +910,7 @@ pub fn fetch_builds(g: &Generation, plan: &Plan) -> Result<Builds> {
     }
     ensure_repo()?;
     write_confs(g)?;
-    sync_pacnix_db()?;
+    sync_pacnix_db(g)?;
     let mut aur: Vec<String> = plan.build.clone();
     let mut dirs = Vec::new();
     let sync = sync_names()?;
@@ -958,7 +964,7 @@ fn build(g: &Generation, plan: &Plan, builds: Builds) -> Result<BTreeSet<String>
     if !plan.drop.is_empty() {
         let files: Vec<String> = repo_db(g)?.into_iter().filter(|i| plan.drop.contains(&i.name)).map(|i| i.filename).collect();
         let key = signing_key()?;
-        run_cmd(cmd("repo-remove", &["-q", "-s", "-k", &key, &format!("{REPO}/pacnix-local.db.tar.gz")]).args(&plan.drop).env("GNUPGHOME", GNUPG))?;
+        run_hidden(cmd("repo-remove", &["-q", "-s", "-k", &key, &format!("{REPO}/pacnix-local.db.tar.gz")]).args(&plan.drop).env("GNUPGHOME", GNUPG))?;
         for f in files {
             let _ = std::fs::remove_file(format!("{REPO}/{f}"));
             let _ = std::fs::remove_file(format!("{REPO}/{f}.sig"));
@@ -1149,14 +1155,14 @@ pub fn prepare(g: &Generation, plan: &Plan, builds: Builds) -> Result<BTreeSet<S
         write_confs(g)?;
         // The build asks pacman for the dependencies, which needs the
         // pacnix database also on a new host.
-        sync_pacnix_db()?;
+        sync_pacnix_db(g)?;
         if !builds.queue.is_empty() {
             ensure_chroot()?;
         }
         failed = build(g, plan, builds)?;
     }
     if has_local(g) {
-        sync_pacnix_db()?;
+        sync_pacnix_db(g)?;
     }
     let skip = plan.skipped(failed);
     let targets = plan.targets(&skip);
@@ -1271,7 +1277,7 @@ pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
         ensure_chroot()?;
         // An AUR package that did not build stays at its installed version.
         build_dirs(g, builds)?;
-        sync_pacnix_db()?;
+        sync_pacnix_db(g)?;
         transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
     }
     Ok(())

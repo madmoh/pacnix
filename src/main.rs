@@ -383,8 +383,12 @@ pub fn run_silent(mut cmd: impl BorrowMut<Command>) -> Result<()> {
     Ok(())
 }
 
+/// A note of systemd-nspawn about its future defaults. arch-nspawn of devtools
+/// starts each container with a new machine name and gives no way to set the option.
+const NSPAWN_NOTE: &str = "Note: in a future version of systemd-nspawn the default set of permitted socket address families";
+
 fn execute(cmd: &mut Command, stdout: bool) -> Result<()> {
-    let (status, lines) = forward(cmd, 20, stdout, |_| true)?;
+    let (status, lines) = forward(cmd, 20, stdout, |l| !l.starts_with(NSPAWN_NOTE))?;
     if !status.success() {
         return Err(failed(cmd, status, &lines));
     }
