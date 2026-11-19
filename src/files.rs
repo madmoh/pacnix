@@ -1,5 +1,5 @@
 use crate::generation::{FileSpec, Generation, Trigger};
-use crate::{Ctx, cmd, output_any, report, run_cmd, run_hidden};
+use crate::{Ctx, cmd, output_any, report, run_cmd};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -41,28 +41,14 @@ impl Plan {
     }
 }
 
-/// The new value of a file for its plan line: the target of a link, or the
-/// lines of a text file that leave and that come, six at most, compared with
-/// the file at the path. Without `full`, only the number of changed lines.
-pub fn value(path: &Path, new: &Path, link: bool, full: bool) -> String {
-    if link {
-        return format!("\n  link to {}", new.display());
+/// The new value of a file for its plan line: the target of a link, or a
+/// note when the text has no final newline.
+pub fn value(new: &Path, link: bool) -> Option<String> {
+    let text = std::fs::read_to_string(new).unwrap_or_default();
+    match link {
+        true => Some(format!("link to {}", new.display())),
+        false => (!text.is_empty() && !text.ends_with('\n')).then(|| "the text has no final newline".to_string()),
     }
-    let Ok(text) = std::fs::read_to_string(new) else { return String::new() };
-    let old = std::fs::read_to_string(path).unwrap_or_default();
-    let (before, after): (BTreeSet<&str>, BTreeSet<&str>) = (old.lines().collect(), text.lines().collect());
-    let mut lines: Vec<String> = old.lines().filter(|l| !after.contains(l)).map(|l| format!("- {l}")).collect();
-    lines.extend(text.lines().filter(|l| !before.contains(l)).map(|l| format!("+ {l}")));
-    if !full {
-        lines = if lines.is_empty() { vec![] } else { vec![format!("{} differ", crate::count(lines.len(), "line"))] };
-    }
-    let more = lines.len().saturating_sub(6);
-    lines.truncate(6);
-    if more > 0 {
-        lines.push(format!("and {more} more changed lines"));
-    }
-    let end = if !text.is_empty() && !text.ends_with('\n') { " (the text has no final newline)" } else { "" };
-    format!("{end}{}", lines.iter().map(|l| format!("\n  {l}")).collect::<String>())
 }
 
 pub fn sha256(path: &Path) -> Option<Vec<u8>> {
@@ -176,23 +162,21 @@ pub fn plan(_ctx: &Ctx, g: &Generation, ledger: &[Generation]) -> Result<Plan> {
             }
             continue;
         }
-        let value = value(Path::new(path), spec.target.as_deref().map(Path::new).unwrap_or(Path::new(&spec.source)), spec.target.is_some(), true);
-        // The mode and the owner show when they change.
+        // The notes of the line: the reason, the mode and owner when they change, and the value.
         let meta = std::fs::symlink_metadata(path).ok();
         let same = |m: u32| meta.as_ref().is_some_and(|x| x.mode() & 0o7777 == m && Some(x.uid()) == id(&spec.user, true) && Some(x.gid()) == id(&spec.group, false));
-        let perm = mode(spec).filter(|m| spec.target.is_none() && !same(*m)).map(|m| format!("{m:04o} {}:{}", spec.user, spec.group));
-        let why = if std::fs::symlink_metadata(path).is_err() {
-            format!("create (new file{}){value}", perm.map(|p| format!(", {p}")).unwrap_or_default())
+        let perm = mode(spec).filter(|m| spec.target.is_none() && !same(*m) && meta.is_some()).map(|m| format!("{m:04o} {}:{}", spec.user, spec.group));
+        let reason = if meta.is_none() {
+            None
         } else if ours(path) {
-            let value = format!("{}{value}", perm.map(|p| format!(" ({p})")).unwrap_or_default());
-            let drift = if previous.and_then(|f| f.get(path)) == Some(spec) { " (it differs from the declaration)" } else { "" };
-            format!("{drift}{value}")
+            (previous.and_then(|f| f.get(path)) == Some(spec)).then(|| "it differs from the declaration".to_string())
         } else {
-            let value = format!("{}{value}", perm.map(|p| format!(" ({p})")).unwrap_or_default());
             plan.adopt.push(path.clone());
-            let of = owner.get(path).map(|pkg| format!(" of package {pkg}")).unwrap_or_default();
-            format!("\n  keep the original{of} as\n    {}{value}", original(path).display())
+            Some(format!("pacnix keeps the original{}", owner.get(path).map(|pkg| format!(" of package {pkg}")).unwrap_or_default()))
         };
+        let notes: Vec<String> = [reason, perm, value(spec.target.as_deref().map(Path::new).unwrap_or(Path::new(&spec.source)), spec.target.is_some())].into_iter().flatten().collect();
+        let notes = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join("; ")) };
+        let why = if meta.is_none() { format!("create{notes}") } else { notes };
         plan.write.push((path.clone(), why));
     }
     for path in dropped {
@@ -309,7 +293,7 @@ fn restore(path: &str, pkg: &str) -> Result<()> {
     let archive = match find() {
         Some(a) => a,
         None => {
-            run_hidden(cmd("pacman", &["-Sw", "--noconfirm", "--config", crate::packages::CONF, pkg]))?;
+            run_cmd(cmd("pacman", &["-Sw", "--noconfirm", "--config", crate::packages::CONF, pkg]))?;
             find().with_context(|| format!("no archive of {pkg} {version} in the pacman cache"))?
         }
     };
@@ -350,7 +334,7 @@ pub fn apply(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<Vec<String>> {
     if !lines.is_empty() {
         report::progress(&format!("file changes ({}):", lines.len()));
     }
-    lines.iter().for_each(|l| say!("  {}", l.1.replace('\n', "\n  ")));
+    lines.iter().for_each(|l| say!("{}", crate::report::plan_line(l)));
     // The triggers and unit restarts that follow the changes are recorded
     // first: after an interrupt, no change of a file shows them again.
     report::pending(triggered(plan, &changing).into_iter().map(|(n, _)| format!("trigger {n}")));
@@ -434,7 +418,7 @@ pub fn run_triggers(plan: &Plan, changed: &[String]) -> Result<()> {
             continue;
         }
         crate::report::progress(&format!("run trigger {name}: {command}"));
-        if !crate::isolated(&step, || run_hidden(cmd("sh", &["-ec", command])))? {
+        if !crate::isolated(&step, || run_cmd(cmd("sh", &["-ec", command])))? {
             failed = Some(name);
         }
     }

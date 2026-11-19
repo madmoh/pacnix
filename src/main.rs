@@ -1,11 +1,11 @@
-/// Prints a line that breaks between words before column 80.
+/// Prints a line, see report::emit.
 macro_rules! say {
-    ($($t:tt)*) => { println!("{}", crate::report::wrap(&format!($($t)*))) };
+    ($($t:tt)*) => { crate::report::emit(&format!($($t)*), false) };
 }
 
 /// As say!, to standard error.
 macro_rules! esay {
-    ($($t:tt)*) => { eprintln!("{}", crate::report::wrap(&format!($($t)*))) };
+    ($($t:tt)*) => { crate::report::emit(&format!($($t)*), true) };
 }
 
 mod audit;
@@ -111,7 +111,12 @@ fn run(cli: Cli) -> Result<()> {
     // change, so that a long build cannot outlast the sudo timestamp.
     if unsafe { libc::geteuid() } != 0 {
         let exe = std::env::current_exe()?;
-        let e = Command::new("sudo").arg("--").arg(exe).args(std::env::args_os().skip(1)).exec();
+        let mut sudo = Command::new("sudo");
+        // sudo removes NO_COLOR from the environment.
+        if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
+            sudo.arg("--preserve-env=NO_COLOR");
+        }
+        let e = sudo.arg("--").arg(exe).args(std::env::args_os().skip(1)).exec();
         return Err(e).context("run pacnix with sudo");
     }
     // pacnix uses the Nix store directly as root, without the nix-daemon.
@@ -343,7 +348,7 @@ pub fn failed_with(message: String, lines: &[String]) -> anyhow::Error {
 
 /// The error of a failed command, with the last lines of its output.
 pub fn failed(cmd: &Command, status: ExitStatus, lines: &[String]) -> anyhow::Error {
-    let tail: Vec<&str> = lines.iter().rev().take(6).rev().map(|l| l.as_str()).collect();
+    let tail: Vec<&str> = lines.iter().rev().take(10).rev().map(|l| l.as_str()).collect();
     let message = match tail.is_empty() {
         true => format!("{} failed with {status}", describe(cmd)),
         false => format!("{} failed with {status}. Its last output:\n  {}", describe(cmd), tail.join("\n  ")),
@@ -351,44 +356,11 @@ pub fn failed(cmd: &Command, status: ExitStatus, lines: &[String]) -> anyhow::Er
     Failed { message, lines: lines.to_vec() }.into()
 }
 
-/// Runs a command and fails on a nonzero exit status.
+/// Runs a command and fails on a nonzero exit status. Its output shows only
+/// in the error, with the last lines.
 pub fn run_cmd(mut cmd: impl BorrowMut<Command>) -> Result<()> {
-    execute(cmd.borrow_mut(), true)
-}
-
-/// Runs a command without its standard output and fails on a nonzero exit status.
-pub fn run_quiet(mut cmd: impl BorrowMut<Command>) -> Result<()> {
-    execute(cmd.borrow_mut(), false)
-}
-
-/// Runs a command without output and fails on a nonzero exit status with the
-/// last lines of its output.
-pub fn run_hidden(mut cmd: impl BorrowMut<Command>) -> Result<()> {
     let cmd = cmd.borrow_mut();
     let (status, lines) = forward(cmd, 20, true, |_| false)?;
-    if !status.success() {
-        return Err(failed(cmd, status, &lines));
-    }
-    Ok(())
-}
-
-/// Runs a command without output and fails on a nonzero exit status.
-pub fn run_silent(mut cmd: impl BorrowMut<Command>) -> Result<()> {
-    let cmd = cmd.borrow_mut();
-    let status = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status().with_context(|| format!("run {}", describe(cmd)))?;
-    report::check()?;
-    if !status.success() {
-        return Err(failed(cmd, status, &[]));
-    }
-    Ok(())
-}
-
-/// A note of systemd-nspawn about its future defaults. arch-nspawn of devtools
-/// starts each container with a new machine name and gives no way to set the option.
-const NSPAWN_NOTE: &str = "Note: in a future version of systemd-nspawn the default set of permitted socket address families";
-
-fn execute(cmd: &mut Command, stdout: bool) -> Result<()> {
-    let (status, lines) = forward(cmd, 20, stdout, |l| !l.starts_with(NSPAWN_NOTE))?;
     if !status.success() {
         return Err(failed(cmd, status, &lines));
     }
@@ -426,7 +398,7 @@ pub fn forward(cmd: &mut Command, keep: usize, stdout: bool, mut show: impl FnMu
         }
         let shown = show(&text);
         if shown {
-            println!("{text}");
+            report::emit(&text, false);
         }
         if lines.len() == keep {
             lines.pop_front();
@@ -434,15 +406,18 @@ pub fn forward(cmd: &mut Command, keep: usize, stdout: bool, mut show: impl FnMu
         lines.push_back(text);
         shown
     };
-    let (start, mut quiet, mut buf) = (Instant::now(), Instant::now(), [0u8; 8192]);
+    let (start, mut quiet, mut buf, mut spinner) = (Instant::now(), Instant::now(), [0u8; 8192], false);
     loop {
+        if !spinner && start.elapsed() >= Duration::from_secs(1) {
+            spinner = report::spinner();
+        }
         let mut fd = libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 };
         let ready = unsafe { libc::poll(&mut fd, 1, 1000) } > 0;
         // A daemon that the command started can keep the pipe open.
         if !ready && child.try_wait()?.is_some() {
             break;
         }
-        if report::meter() {
+        if report::meter() || report::live() {
             quiet = Instant::now();
         } else if quiet.elapsed() >= Duration::from_secs(60) {
             report::heartbeat(&describe(cmd), start.elapsed().as_secs() / 60, &strip_escapes(&line));
@@ -471,6 +446,9 @@ pub fn forward(cmd: &mut Command, keep: usize, stdout: bool, mut show: impl FnMu
         }
     }
     emit(&mut line);
+    if spinner {
+        report::end_spinner();
+    }
     let status = child.wait()?;
     report::check()?;
     Ok((status, lines.into()))
@@ -501,13 +479,14 @@ fn strip_escapes(line: &[u8]) -> String {
     String::from_utf8_lossy(&out).trim_end().to_string()
 }
 
-/// Runs a command and returns its standard output. Standard error stays visible.
+/// Runs a command and returns its standard output. Standard error shows only in the error.
 pub fn output(mut cmd: impl BorrowMut<Command>) -> Result<String> {
     let cmd = cmd.borrow_mut();
-    let out = cmd.stderr(Stdio::inherit()).output().with_context(|| format!("run {}", describe(cmd)))?;
+    let out = cmd.output().with_context(|| format!("run {}", describe(cmd)))?;
     report::check()?;
     if !out.status.success() {
-        return Err(failed(cmd, out.status, &[]));
+        let lines: Vec<String> = String::from_utf8_lossy(&out.stderr).lines().map(String::from).collect();
+        return Err(failed(cmd, out.status, &lines));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -531,8 +510,8 @@ pub fn count(n: usize, noun: &str) -> String {
 /// More than three items show as their number, for example "4 files created".
 pub fn named(noun: &str, verb: &str, items: &[String]) -> String {
     let text = match items.len() {
-        1 => format!("{noun} {verb}:{BIND}{}", items[0]),
-        2 | 3 => format!("{noun}s {verb}:{BIND}{}", items.join(", ")),
+        1 => format!("{noun} {verb}:{BIND}{}", report::item(&items[0])),
+        2 | 3 => format!("{noun}s {verb}:{BIND}{}", report::items(items)),
         n => format!("{} {verb}", count(n, noun)),
     };
     text.replace("  ", " ").replace(" :", ":").trim_end().to_string()

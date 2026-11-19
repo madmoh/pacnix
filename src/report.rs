@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::{Read, Seek};
+use std::io::{IsTerminal, Read, Seek};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::Mutex;
@@ -137,15 +137,120 @@ pub fn progress(step: &str) {
     }
 }
 
-/// The text with each line longer than 80 columns broken between words. The
-/// next parts of a broken line have two more spaces of indent.
-pub fn wrap(text: &str) -> String {
-    wrapped(text).replace(crate::BIND, " ")
+/// The one check of the terminal: standard output is a terminal and NO_COLOR
+/// is not set. Then the output has colors and live progress lines. Without it,
+/// the output has the same lines without escape codes, and progress shows as
+/// periodic lines.
+pub fn live() -> bool {
+    static LIVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LIVE.get_or_init(|| std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()))
+}
+
+/// Marks a name in a line, for example a package or a file, so that it shows in bold.
+pub fn item(name: &str) -> String {
+    format!("\u{2}{name}\u{3}")
+}
+
+/// Names joined with commas, each marked.
+pub fn items<S: AsRef<str>>(names: &[S]) -> String {
+    names.iter().map(|n| item(n.as_ref())).collect::<Vec<_>>().join(", ")
+}
+
+/// An indented line of a plan, with its item marked.
+pub fn plan_line(l: &(String, String)) -> String {
+    format!("  {}", l.1.replacen(&l.0, &item(&l.0), 1).replace('\n', "\n  "))
+}
+
+/// The width of a line without the marks of names.
+fn width(text: &str) -> usize {
+    text.chars().filter(|c| *c >= ' ').count()
+}
+
+/// The kind of the last line: 0 for none, 1 for a line of pacnix, 2 for an
+/// indented line or a line of a command.
+static PREV: Mutex<u8> = Mutex::new(0);
+/// The live progress line.
+static BAR: Mutex<Option<indicatif::ProgressBar>> = Mutex::new(None);
+
+/// Writes a line. Lines break between words before column 80; the next parts of a
+/// broken line have two more spaces of indent. An empty line goes before a heading
+/// and after a block of indented lines. With a terminal, the names are bold,
+/// errors are red and the live progress line stays below the line.
+pub fn emit(text: &str, err: bool) {
+    let mut prev = PREV.lock().unwrap();
+    let top = text.starts_with("pacnix: ");
+    let gap = top && (*prev == 2 || (*prev == 1 && text.split('\n').next().is_some_and(|l| l.ends_with(':'))));
+    *prev = if !top || text.contains('\n') { 2 } else { 1 };
+    drop(prev);
+    let text = format!("{}{}", if gap { "\n" } else { "" }, paint(&wrapped(text)));
+    let write = || match err {
+        true => eprintln!("{text}"),
+        false => println!("{text}"),
+    };
+    match BAR.lock().unwrap().as_ref() {
+        Some(bar) => bar.suspend(write),
+        None => write(),
+    }
+}
+
+/// An empty line before the next line of pacnix.
+pub fn gap() {
+    let mut prev = PREV.lock().unwrap();
+    if *prev != 0 {
+        *prev = 2;
+    }
+}
+
+/// The text with styles on a terminal, or plain.
+fn paint(text: &str) -> String {
+    use anstyle::{AnsiColor, Style};
+    let text = text.replace(crate::BIND, " ");
+    if !live() {
+        return text.replace(['\u{2}', '\u{3}'], "");
+    }
+    let bold = Style::new().bold();
+    let prefix = Style::new().bold().fg_color(Some(AnsiColor::Blue.into()));
+    let red = Style::new().bold().fg_color(Some(AnsiColor::Red.into()));
+    let text = text.replace('\u{2}', &bold.render().to_string()).replace('\u{3}', &bold.render_reset().to_string());
+    let red_from = ["pacnix: error: ", "pacnix: failed step: "].iter().any(|p| text.starts_with(p));
+    match text.strip_prefix("pacnix: ") {
+        Some(rest) if red_from => format!("{prefix}pacnix:{prefix:#} {red}{}{red:#}", rest.replace(&bold.render_reset().to_string(), &format!("{bold:#}{red}"))),
+        Some(rest) => format!("{prefix}pacnix:{prefix:#} {rest}"),
+        None => text,
+    }
+}
+
+/// Shows a live progress line on a terminal, until `end_bar`.
+fn start_bar(bar: indicatif::ProgressBar) {
+    bar.enable_steady_tick(Duration::from_millis(200));
+    *BAR.lock().unwrap() = Some(bar);
+}
+
+fn end_bar() {
+    if let Some(bar) = BAR.lock().unwrap().take() {
+        bar.finish_and_clear();
+    }
+}
+
+/// A live line with the time of a command that runs for 1 s or more, on a
+/// terminal. Returns true when it starts one.
+pub fn spinner() -> bool {
+    if !live() || BAR.lock().unwrap().is_some() {
+        return false;
+    }
+    let bar = indicatif::ProgressBar::with_draw_target(None, indicatif::ProgressDrawTarget::stdout());
+    bar.set_style(indicatif::ProgressStyle::with_template("  {spinner} {elapsed}").unwrap().tick_chars("|/-\\ "));
+    start_bar(bar);
+    true
+}
+
+pub fn end_spinner() {
+    end_bar();
 }
 
 fn wrapped(text: &str) -> String {
     let lines = text.split('\n').map(|line| {
-        if line.chars().count() <= 80 {
+        if width(line) <= 80 {
             return line.to_string();
         }
         // A top-level line continues under the text after "pacnix: ", deeper than the items under it.
@@ -153,10 +258,10 @@ fn wrapped(text: &str) -> String {
         let next = if line.starts_with("pacnix: ") { 8 } else { indent + 2 };
         let (mut out, mut col) = (" ".repeat(indent), indent);
         for (i, word) in line.split_whitespace().enumerate() {
-            let len = word.chars().count();
+            let len = width(word);
             if i > 0 && col + 1 + len > 80 {
                 // A short word, for example "in", moves to the next line with the word after it.
-                let last = out.rsplit_once(' ').filter(|(head, w)| w.chars().count() <= 3 && !head.rsplit('\n').next().unwrap_or_default().trim().is_empty()).map(|(head, w)| (head.len(), w.to_string()));
+                let last = out.rsplit_once(' ').filter(|(head, w)| width(w) <= 3 && !head.rsplit('\n').next().unwrap_or_default().trim().is_empty()).map(|(head, w)| (head.len(), w.to_string()));
                 let carry = last.map(|(at, w)| {
                     out.truncate(at);
                     format!("{w} ")
@@ -164,7 +269,7 @@ fn wrapped(text: &str) -> String {
                 out.push('\n');
                 out.push_str(&" ".repeat(next));
                 out.push_str(carry.as_deref().unwrap_or_default());
-                col = next + carry.map_or(0, |c| c.chars().count());
+                col = next + carry.map_or(0, |c| width(&c));
             } else if i > 0 {
                 out.push(' ');
                 col += 1;
@@ -224,13 +329,8 @@ pub fn planned(kinds: Vec<((&'static str, &'static str), Vec<String>)>) {
     *PLANNED.lock().unwrap() = kinds;
 }
 
-/// The end of the pacman log, as the start of a later read.
-pub fn log_end() -> u64 {
-    std::fs::metadata(PACMAN_LOG).map_or(0, |m| m.len())
-}
-
 /// The packages that pacman changed after the offset in the pacman log, by verb.
-pub fn changed_packages(offset: u64) -> Vec<(&'static str, Vec<String>)> {
+fn changed_packages(offset: u64) -> Vec<(&'static str, Vec<String>)> {
     let mut text = String::new();
     if let Ok(mut f) = std::fs::File::open(PACMAN_LOG) {
         let _ = f.seek(std::io::SeekFrom::Start(offset)).and_then(|_| f.read_to_string(&mut text));
@@ -275,6 +375,7 @@ pub fn close(verb: &str, ok: bool) -> i32 {
         false => format!("Changes: {}.", changes.join("; ")),
     };
     let step = RUN.lock().unwrap().as_ref().map(|r| r.0.clone()).unwrap_or_default();
+    gap();
     match code {
         0 => say!("pacnix: {verb} done. {changes} Exit status 0."),
         4 => say!("pacnix: {verb} done, but {} failed. {changes} The next apply does the failed steps again. Exit status 4.", crate::count(failed, "step")),
@@ -302,7 +403,16 @@ struct Download {
 static DOWNLOAD: Mutex<Option<Download>> = Mutex::new(None);
 
 /// Starts or ends the progress of a download of package files with their sizes into the cache directory.
+/// On a terminal, the progress is a live line.
 pub fn download(label: &str, cache: &str, files: Option<Vec<(String, u64)>>) {
+    end_bar();
+    if let Some(files) = files.as_ref().filter(|_| live()) {
+        let bar = indicatif::ProgressBar::with_draw_target(Some(files.iter().map(|f| f.1).sum()), indicatif::ProgressDrawTarget::stdout());
+        let style = indicatif::ProgressStyle::with_template("  [{bar:20}] {binary_bytes}/{binary_total_bytes} {binary_bytes_per_sec:>11} {msg}");
+        bar.set_style(style.unwrap().progress_chars("=> "));
+        bar.set_message(format!("0/{}", crate::count(files.len(), "package")));
+        start_bar(bar);
+    }
     *DOWNLOAD.lock().unwrap() = files.map(|files| Download { files, cache: cache.to_string(), label: label.to_string(), done: 0, changed: Instant::now(), shown: Instant::now() });
 }
 
@@ -318,7 +428,7 @@ fn mib(bytes: u64) -> String {
 pub fn meter() -> bool {
     let mut guard = DOWNLOAD.lock().unwrap();
     let Some(d) = guard.as_mut() else { return false };
-    if d.shown.elapsed() < Duration::from_secs(30) {
+    if d.shown.elapsed() < Duration::from_secs(if live() { 1 } else { 30 }) {
         return true;
     }
     d.shown = Instant::now();
@@ -335,7 +445,10 @@ pub fn meter() -> bool {
     let done = cached.iter().sum::<u64>() + loading.iter().map(|(_, s)| s).sum::<u64>();
     let total: u64 = d.files.iter().map(|f| f.1).sum();
     let state = format!("{} of {}, {} of {} MiB", complete, crate::count(d.files.len(), "package"), mib(done), mib(total));
-    if done != d.done {
+    if let Some(bar) = BAR.lock().unwrap().as_ref() {
+        bar.set_position(done);
+        bar.set_message(format!("{complete}/{}", crate::count(d.files.len(), "package")));
+    } else if done != d.done {
         (d.done, d.changed) = (done, Instant::now());
         say!("pacnix: {}: {state}", d.label);
     } else if d.changed.elapsed() >= Duration::from_secs(60) {
@@ -482,8 +595,9 @@ pub fn summary() {
     } else if reboot_reasons().is_empty() && !reasons(STARTED.load(Relaxed)).is_empty() {
         say!("pacnix: no reboot is necessary");
     }
-    for (pkg, note) in &fresh {
-        say!("pacnix: install note of {pkg}:\n  {}", note.trim_end().replace('\n', "\n  "));
+    if !fresh.is_empty() {
+        let names: Vec<&String> = fresh.keys().collect();
+        say!("pacnix: new install notes of {}: {}. pacnix audit shows them", crate::count(names.len(), "package"), items(&names));
     }
     for f in &pacnew {
         say!("pacnix: new file {f}: merge it with {}", f.trim_end_matches(".pacnew"));

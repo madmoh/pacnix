@@ -1,5 +1,5 @@
 use crate::generation::Generation;
-use crate::{cmd, isolated, output, report, run_cmd, run_silent};
+use crate::{cmd, isolated, output, report, run_cmd};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -155,8 +155,8 @@ fn simulate(g: &Generation, old: &Generation, preset: &str, units: Option<&[Stri
     }
     std::fs::write(root.join(PRESET.trim_start_matches('/')), preset)?;
     match units {
-        Some(units) => run_silent(cmd("systemctl", &["--root", SCRATCH, "preset"]).args(units))?,
-        None => run_silent(cmd("systemctl", &["--root", SCRATCH, "preset-all"]))?,
+        Some(units) => run_cmd(cmd("systemctl", &["--root", SCRATCH, "preset"]).args(units))?,
+        None => run_cmd(cmd("systemctl", &["--root", SCRATCH, "preset-all"]))?,
     }
     let enabled = unit_states(Some(SCRATCH)).map(|s| in_state(&s, "enabled"));
     std::fs::remove_dir_all(root)?;
@@ -235,7 +235,7 @@ fn systemctl(step: &str, args: &[&str]) -> Result<bool> {
 pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
     for (verb, units) in [("enable", &plan.enable), ("disable", &plan.disable), ("mask", &plan.mask), ("unmask", &plan.unmask)] {
         if !units.is_empty() {
-            report::progress(&format!("{verb} {}: {}", crate::count(units.len(), "unit"), units.join(", ")));
+            report::progress(&format!("{verb} {}: {}", crate::count(units.len(), "unit"), report::items(&units)));
         }
     }
     // The starts that follow the presets are recorded first: after an
@@ -265,7 +265,7 @@ pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
     // The package transaction can add the unit files of declared units after the plan.
     let units = touched_now(plan)?;
     if !units.is_empty() {
-        run_silent(cmd("systemctl", &["preset"]).args(&units))?;
+        run_cmd(cmd("systemctl", &["preset"]).args(&units))?;
     }
     let states = unit_states(None)?;
     let after = in_state(&states, "enabled");

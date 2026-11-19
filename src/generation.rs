@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use crate::{Ctx, ask, audit, cmd, files, forward, home, packages, report, run_cmd, run_hidden, run_quiet, secure, trust, units, users};
+use crate::{Ctx, ask, audit, cmd, files, forward, home, packages, report, run_cmd, secure, trust, units, users};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -358,7 +358,7 @@ impl Plan {
         if !lines.is_empty() {
             say!("pacnix: changes ({}):", lines.len());
         }
-        lines.iter().for_each(|l| say!("  {}", l.1.replace('\n', "\n  ")));
+        lines.iter().for_each(|l| say!("{}", report::plan_line(l)));
         self.same();
         match lines.len() {
             0 => say!("pacnix: plan done: no change apart from the system upgrade. The system is unchanged."),
@@ -430,9 +430,6 @@ pub fn apply(ctx: &Ctx, offline: bool) -> Result<()> {
         let builds = packages::upgrade_builds(&target)?;
         let news = news.join().unwrap_or_default();
         read = news.is_some();
-        if !read {
-            say!("pacnix: the Arch Linux news are not available. The next apply shows them");
-        }
         ask(&[packages::removals(&before.packages), builds.asks.clone(), news.unwrap_or_default()].concat(), &audit::asks(&before.data), &ctx.opts)?;
         users::ask_passwords(&before.users, &ctx.opts)?;
         secure::ask_secrets(&before.target, &before.secure)?;
@@ -484,7 +481,7 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
     if current.as_deref() != Some(Path::new(&plan.target.path)) {
         std::fs::create_dir_all(STATE)?;
         let _ = std::fs::remove_file(PENDING);
-        run_hidden(cmd("nix-store", &["--add-root", PENDING, "--realise", &plan.target.path]))?;
+        run_cmd(cmd("nix-store", &["--add-root", PENDING, "--realise", &plan.target.path]))?;
     }
     let leaving = units::leaving(&plan.units, &plan.files.deleted());
     let skip = packages::prepare(&plan.target, &plan.packages, builds)?;
@@ -496,7 +493,6 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
     secure::apply(&plan.target, &plan.secure)?;
     units::apply(&plan.units, &changed)?;
     home::apply(&plan.target, &plan.home)?;
-    plan.same();
     keep_or_delete(&plan.target, &plan.data, delete)?;
     report::save_retries();
     Ok(())
@@ -530,7 +526,7 @@ pub fn uninstall(ctx: &Ctx) -> Result<()> {
     let gids: Vec<u32> = groups.iter().filter_map(|g| gid(g)).collect();
     let passwd = std::fs::read_to_string("/etc/passwd")?;
     let users: Vec<&str> = passwd.lines().map(|l| l.split(':').collect::<Vec<_>>()).filter(|f| f.get(3).and_then(|g| g.parse().ok()).is_some_and(|g| gids.contains(&g))).map(|f| f[0]).collect();
-    let key = current.m.packages.server_key.clone().map(|k| k.replace(' ', "").to_uppercase()).filter(|k| run_quiet(cmd("pacman-key", &["--list-keys", k])).is_ok());
+    let key = current.m.packages.server_key.clone().map(|k| k.replace(' ', "").to_uppercase()).filter(|k| run_cmd(cmd("pacman-key", &["--list-keys", k])).is_ok());
     let mut asks = audit::asks(&data);
     if !groups.is_empty() {
         asks.push(format!("Delete the users {} and the groups {}.", users.join(" "), groups.join(" ")));
@@ -552,7 +548,7 @@ pub fn uninstall(ctx: &Ctx) -> Result<()> {
             }
         }
         if let Some(k) = key {
-            run_quiet(cmd("pacman-key", &["--delete", &k]))?;
+            run_cmd(cmd("pacman-key", &["--delete", &k]))?;
         }
     }
     Ok(())

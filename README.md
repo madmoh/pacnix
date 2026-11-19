@@ -61,7 +61,7 @@ pacnix plan
 pacnix apply
 ```
 
-`pacnix plan` shows each change and changes nothing. Change the configuration until the plan shows only the changes that you want, then run `pacnix apply`. Keep the configuration in a Git repository, for example to use it on a different host. When a declared file replaces a file that pacnix did not write, also a file of a package, pacnix keeps the original file in `/var/lib/pacnix/originals`, and the plan line shows the path of the copy. A declared file that has the declared content already is no change. When you remove the declaration, pacnix puts the original file back. A declared user that exists keeps its password and its home directory. If you declare `/etc/pacman.conf`, keep the section `[pacnix]` in it.
+`pacnix plan` shows each change and changes nothing. Change the configuration until the plan shows only the changes that you want, then run `pacnix apply`. Keep the configuration in a Git repository, for example to use it on a different host. When a declared file replaces a file that pacnix did not write, also a file of a package, pacnix keeps the original file in `/var/lib/pacnix/originals`, and the plan line tells this. A declared file that has the declared content already is no change. When you remove the declaration, pacnix puts the original file back. A declared user that exists keeps its password and its home directory. If you declare `/etc/pacman.conf`, keep the section `[pacnix]` in it.
 
 The first apply builds and installs the AUR and local packages, and activates the home configurations. The builds can take a long time. When a step gives no output for 60 s, pacnix writes a line that tells that the step continues. A download shows the packages and MiB that arrived every 30 s, and tells when no data arrived for a minute.
 
@@ -138,7 +138,7 @@ When two declared packages conflict, pacnix refuses the plan. `pacnix apply` doe
 
 `pacnix apply` runs `pacman -Syu`, builds the AUR packages again when necessary, and then makes the other changes. `pacnix apply --offline` does not refresh the sync databases and does not build the AUR packages again. Use it for a change that needs no download, for example a file.
 
-Each AUR user can change an AUR package. At the first build of an AUR package, pacnix records its maintainer, its co-maintainers and its AUR dependencies in `/var/lib/pacnix`, without a question. When a later build shows a different maintainer or co-maintainer, or a new AUR dependency, pacnix asks before it changes the system. Before each new build of an AUR package, the output shows the changes of its PKGBUILD since the last build.
+Each AUR user can change an AUR package. At the first build of an AUR package, pacnix records its maintainer, its co-maintainers and its AUR dependencies in `/var/lib/pacnix`, without a question. When a later build shows a different maintainer or co-maintainer, or a new AUR dependency, pacnix asks before it changes the system. To see the changes of a PKGBUILD before the build, run `pacnix plan` and read the PKGBUILD on the [AUR](https://aur.archlinux.org/).
 
 pacnix downloads the packages into the pacman cache before the transaction. If a mirror does not have a package version of the sync databases, the databases are old: run `pacnix apply` without `--offline`.
 
@@ -221,7 +221,7 @@ pacnix creates the keys in `/var/lib/sbctl` when they are missing, and signs sys
 Do these steps in the firmware setup. The summary of the apply tells the next step:
 
 1. Set Secure Boot to custom mode, and reset it to Setup Mode. This deletes the factory keys.
-2. Run `pacnix apply` in a terminal. It enrolls the keys of this host. With `recoveryKey`, it asks for the current passphrase of each device and shows the recovery key one time. Write down the recovery key.
+2. Run `pacnix apply` in a terminal. It enrolls the keys of this host. With `recoveryKey`, it asks for the current passphrase of each device and shows the recovery key one time, in a separate block. Write down the recovery key, then type `written` to continue. `--yes` does not skip this step.
 3. Reboot, and turn on Secure Boot if it is off.
 4. Run `pacnix apply` in a terminal. It asks for the current passphrase of each device and for a new PIN, then enrolls the TPM2 key.
 
@@ -284,7 +284,11 @@ Run pacnix as your user. pacnix starts itself again with `sudo`, which asks for 
 
 `apply` asks one question at most, before they change the system, and only for items that the configuration does not show: package removals, new maintainers or new AUR dependencies of AUR packages, the Arch Linux news and the data of removed features. `--yes` accepts the items. Without a terminal, pacnix stops if there is a question and you do not give `--yes`.
 
-Each line that pacnix writes breaks between words before column 80. A line that starts with `pacnix:` is a step or a result; the indented lines under it are its items. `plan` shows the packages that the local sync databases have in a newer version, each change with its item, the declared items that need no change and what the removal of their declaration does, and a last line with the number of changes. A line marked `apply asks first` is an item of the question of `apply`. A change of a file shows its mode and owner when they change, and the link target or the lines of a text file that leave (`-`) and that come (`+`). A home file that the home configuration replaces shows the path of its original and the number of lines that differ. The Home Manager support files are the files that Home Manager writes also for an empty home configuration, for example `~/.cache/.keep`: `plan` and `apply` show only their number. `apply` does not show the plan again: it shows each step with its items when the step starts, and the system upgrade shows the packages that it upgraded. The last line names the changed items when there are three or fewer in total. A step that changes nothing, for example the evaluation, shows only when it takes 2 s or more. The host and the flake show only when you give `--host` or `--flake` with a value that is not the default. pacnix answers no question of pacman, and the output of pacman shows only its errors and warnings. At the end, `apply` shows the items that you must know: if this run made a reboot necessary (the kernel that runs is not installed, a boot image changed, or a DKMS module was built for a kernel that does not run), new or changed install notes of packages, and new `.pacnew` files. The last line shows the result, the changes and the exit status:
+Each line that pacnix writes breaks between words before column 80. A line that starts with `pacnix:` is a step or a result; the indented lines under it are its items. An empty line separates the sections. When the standard output is a terminal and [`NO_COLOR`](https://no-color.org/) is not set, the names of items show in bold, errors in red, and a download or a long step shows one live progress line. Without a terminal, the output has the same lines without colors, and a download shows its progress every 30 s.
+
+`plan` shows the packages that the local sync databases have in a newer version, each change with its item, the declared items that need no change and what the removal of their declaration does, and a last line with the number of changes. A line marked `apply asks first` is an item of the question of `apply`. A change of a file shows its mode and owner when they change, and the target of a link. The Home Manager support files are the files that Home Manager writes also for an empty home configuration, for example `~/.cache/.keep`: `plan` and `apply` show only their number.
+
+`apply` shows each step with its items when the step starts. The output of pacman, makepkg and the other commands shows only when a command fails, with its last lines. A step that changes nothing, for example the evaluation, shows only when it takes 2 s or more. The host and the flake show only when you give `--host` or `--flake` with a value that is not the default. At the end, `apply` shows the items that you must know: if this run made a reboot necessary (the kernel that runs is not installed, a boot image changed, or a DKMS module was built for a kernel that does not run), the packages with new install notes (`pacnix audit` shows the notes), and new `.pacnew` files. The last line shows the result, the changes and the exit status. It names the changed items when there are three or fewer in total:
 
 | Exit status | Result |
 |---|---|
@@ -295,7 +299,7 @@ Each line that pacnix writes breaks between words before column 80. A line that 
 
 An error in the configuration shows the message of Nix one time, with the file in the flake and its line.
 
-When there are no new [Arch Linux news](https://archlinux.org/news/), `apply` shows nothing about them. When the news are not available, `apply` shows one line and continues without them. The next apply that gets them shows the news since the last read.
+When there are no new [Arch Linux news](https://archlinux.org/news/), `apply` shows nothing about them. When the news are not available, `apply` continues without them. The next apply that gets them shows the news since the last read.
 
 When a download fails because of the network, for example no connection, a DNS timeout or a mirror that stops, pacnix tries again after 10 s, 30 s and 60 s, with one download at a time. Your `ParallelDownloads` setting in `/etc/pacman.conf` does not change. The next attempt uses the packages that are already in the pacman cache and in the local repository, and the downloaded sources of a local package stay until it builds.
 

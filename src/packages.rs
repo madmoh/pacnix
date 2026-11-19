@@ -1,5 +1,5 @@
 use crate::generation::Generation;
-use crate::{Ctx, cmd, count, failed, forward, isolated, output, output_any, report, run_cmd, run_hidden, run_quiet, run_silent, trust};
+use crate::{Ctx, cmd, count, failed, forward, isolated, output, output_any, report, run_cmd, trust};
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -303,7 +303,7 @@ fn has_local(g: &Generation) -> bool {
 /// the Arch repositories stay as they are.
 fn sync_pacnix_db(g: &Generation) -> Result<()> {
     recover_lock()?;
-    run_quiet(pacman(&["-Sy", "--config", LOCAL_CONF]))?;
+    run_cmd(pacman(&["-Sy", "--config", LOCAL_CONF]))?;
     write_confs(g)
 }
 
@@ -722,7 +722,7 @@ fn download(args: &[&str]) -> Result<()> {
     });
     let cache = output(cmd("pacman-conf", &["--config", CONF, "CacheDir"]))?.lines().next().unwrap_or("/var/cache/pacman/pkg/").to_string();
     report::download(&label, &cache, Some(files));
-    let result = run_hidden(pacman(&["-Sw", "--noconfirm", "--ask=4", "--config", CONF]).args(args));
+    let result = run_cmd(pacman(&["-Sw", "--noconfirm", "--ask=4", "--config", CONF]).args(args));
     report::download("", "", None);
     result
 }
@@ -810,11 +810,11 @@ fn signing_key() -> Result<String> {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(GNUPG)?;
         let host = std::fs::read_to_string("/etc/hostname").unwrap_or_default();
-        run_hidden(gpg(&["--passphrase", "", "--quick-gen-key", &format!("pacnix-local of {}", host.trim()), "ed25519", "sign", "never"]))?;
+        run_cmd(gpg(&["--passphrase", "", "--quick-gen-key", &format!("pacnix-local of {}", host.trim()), "ed25519", "sign", "never"]))?;
     }
     let key = fingerprints(&output(gpg(&["--with-colons", "--list-secret-keys"]))?).into_iter().next().context("the signing key of the local repository has no fingerprint")?;
     if !Path::new(KEY).exists() {
-        run_quiet(gpg(&["--armor", "--output", KEY, "--export", &key]))?;
+        run_cmd(gpg(&["--armor", "--output", KEY, "--export", &key]))?;
         report::last(format!("pacnix: the key {key} signs the local repository. A host that installs from it declares packages.serverKey = \"{key}\";"));
     }
     Ok(key)
@@ -825,10 +825,10 @@ fn signing_key() -> Result<String> {
 fn repo_add(files: &[std::path::PathBuf]) -> Result<()> {
     let key = signing_key()?;
     for f in files {
-        run_quiet(gpg(&["--yes", "--local-user", &key, "--detach-sign"]).arg(f))?;
+        run_cmd(gpg(&["--yes", "--local-user", &key, "--detach-sign"]).arg(f))?;
     }
     let mut c = cmd("repo-add", &["-q", "-R", "-s", "-k", &key, &format!("{REPO}/pacnix-local.db.tar.gz")]);
-    run_hidden(c.args(files).env("GNUPGHOME", GNUPG))
+    run_cmd(c.args(files).env("GNUPGHOME", GNUPG))
 }
 
 /// Trusts the signing key of packages.server with pacman-key, after a check of
@@ -836,7 +836,7 @@ fn repo_add(files: &[std::path::PathBuf]) -> Result<()> {
 fn trust_server(g: &Generation) -> Result<()> {
     let (Some(url), Some(key)) = (&g.m.packages.server, &g.m.packages.server_key) else { return Ok(()) };
     let key = key.replace(' ', "").to_uppercase();
-    if run_silent(cmd("pacman-key", &["--list-keys", &key])).is_ok() {
+    if run_cmd(cmd("pacman-key", &["--list-keys", &key])).is_ok() {
         return Ok(());
     }
     report::progress("trust the signing key of the server");
@@ -849,9 +849,9 @@ fn trust_server(g: &Generation) -> Result<()> {
         let _ = std::fs::remove_file(&file);
         bail!("the key in {url} has the fingerprint {}, but packages.serverKey is {key}", found.first().map_or("none", |f| f.as_str()));
     }
-    run_quiet(cmd("pacman-key", &["--add", &file]))?;
+    run_cmd(cmd("pacman-key", &["--add", &file]))?;
     let _ = std::fs::remove_file(&file);
-    run_quiet(cmd("pacman-key", &["--lsign-key", &key]))
+    run_cmd(cmd("pacman-key", &["--lsign-key", &key]))
 }
 
 /// aur chroot as root. devtools needs root for the clean chroot, and the
@@ -964,7 +964,7 @@ fn build(g: &Generation, plan: &Plan, builds: Builds) -> Result<BTreeSet<String>
     if !plan.drop.is_empty() {
         let files: Vec<String> = repo_db(g)?.into_iter().filter(|i| plan.drop.contains(&i.name)).map(|i| i.filename).collect();
         let key = signing_key()?;
-        run_hidden(cmd("repo-remove", &["-q", "-s", "-k", &key, &format!("{REPO}/pacnix-local.db.tar.gz")]).args(&plan.drop).env("GNUPGHOME", GNUPG))?;
+        run_cmd(cmd("repo-remove", &["-q", "-s", "-k", &key, &format!("{REPO}/pacnix-local.db.tar.gz")]).args(&plan.drop).env("GNUPGHOME", GNUPG))?;
         for f in files {
             let _ = std::fs::remove_file(format!("{REPO}/{f}"));
             let _ = std::fs::remove_file(format!("{REPO}/{f}.sig"));
@@ -1013,12 +1013,6 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<BTreeSet<String>> {
             true => String::new(),
             false => output(as_builder(&["git", "-C", dir, "rev-parse", "HEAD"]))?.trim().to_string(),
         };
-        // Without a record of a build, the changes start at the empty tree of Git: all files.
-        let old = record.as_ref().map(|r| r.head.clone()).filter(|h| !h.is_empty()).unwrap_or("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string());
-        if !local && old != head {
-            say!("pacnix: changes of the AUR package {name} since its last build:");
-            run_cmd(as_builder(&["git", "-C", dir, "--no-pager", "diff", "--stat", "--patch", &old, &head]))?;
-        }
         if *local || !names.iter().all(|n| built.get(n) == Some(&version)) {
             let _ = std::fs::remove_dir_all(&out);
             run_cmd(as_builder(&["mkdir", &out]))?;
@@ -1182,20 +1176,20 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
     std::fs::write(MADE, serde_json::to_vec(&list)?)?;
     let targets = plan.targets(skip);
     if !targets.is_empty() {
-        report::progress(&format!("install {}: {}", count(targets.len(), "package"), targets.join(", ")));
+        report::progress(&format!("install {}: {}", count(targets.len(), "package"), report::items(&targets)));
         let mut args = vec!["-S", "--needed", "--noconfirm", "--ask=4", "--config", CONF];
         args.extend(targets);
         transaction(&args)?;
     }
     if !plan.archive.is_empty() {
-        report::progress(&format!("install {} from the Arch Linux Archive: {}", count(plan.archive.len(), "package"), plan.archive.join(", ")));
+        report::progress(&format!("install {} from the Arch Linux Archive: {}", count(plan.archive.len(), "package"), report::items(&plan.archive)));
         let mut args = vec!["-U", "--noconfirm", "--ask=4", "--config", CONF];
         args.extend(plan.archive.iter().map(String::as_str));
         // pacman downloads the files of -U first and stops before a change when a download fails.
         transaction(&args)?;
     }
     if !plan.explicit.is_empty() {
-        run_hidden(pacman(&["-D", "--asexplicit"]).args(&plan.explicit))?;
+        run_cmd(pacman(&["-D", "--asexplicit"]).args(&plan.explicit))?;
     }
     if !skip.is_empty() {
         if !plan.remove.is_empty() || !plan.deps.is_empty() {
@@ -1205,16 +1199,16 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
         return save_made(plan);
     }
     if !plan.deps.is_empty() {
-        run_hidden(pacman(&["-D", "--asdeps"]).args(&plan.deps))?;
+        run_cmd(pacman(&["-D", "--asdeps"]).args(&plan.deps))?;
     }
     if !plan.remove.is_empty() {
-        report::progress(&format!("remove {}: {}", count(plan.remove.len(), "package"), plan.remove.join(", ")));
+        report::progress(&format!("remove {}: {}", count(plan.remove.len(), "package"), report::items(&plan.remove)));
         transaction(&[&["-Rns", "--noconfirm"][..], &plan.remove.iter().map(String::as_str).collect::<Vec<_>>()].concat())?;
     }
     let orphans = output_any(&mut pacman(&["-Qqdtt"]))?;
     let orphans: Vec<&str> = orphans.split_whitespace().filter(|n| !plan.orphans.contains(*n)).collect();
     if !orphans.is_empty() {
-        report::progress(&format!("remove {} that no declared package needs: {}", count(orphans.len(), "package"), orphans.join(", ")));
+        report::progress(&format!("remove {} that no declared package needs: {}", count(orphans.len(), "package"), report::items(&orphans)));
         transaction(&[&["-Rns", "--noconfirm"][..], &orphans].concat())?;
     }
     save_made(plan)
@@ -1259,19 +1253,16 @@ pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
     let pins = pinned(g);
     let pins: Vec<&str> = pins.iter().map(String::as_str).collect();
     let stage = report::stage("system upgrade: refresh the sync databases");
-    run_hidden(pacman(&["-Sy", "--config", CONF]))?;
+    run_cmd(pacman(&["-Sy", "--config", CONF]))?;
     drop(stage);
     let newer = newer()?;
     if newer.is_empty() && pins.is_empty() {
         say!("pacnix: system upgrade: the packages are up to date");
     } else {
         report::progress(&format!("system upgrade: {}", crate::named("package", "to upgrade", &newer)));
-        let start = report::log_end();
         download(&[&["-u"][..], &pins].concat())?;
         report::step("system upgrade");
         transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
-        let done: Vec<String> = report::changed_packages(start).into_iter().map(|(verb, names)| crate::named("package", verb, &names)).collect();
-        say!("pacnix: system upgrade: {}", if done.is_empty() { "no package changed".to_string() } else { done.join(", ") });
     }
     if !builds.queue.is_empty() {
         ensure_chroot()?;

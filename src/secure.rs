@@ -1,7 +1,7 @@
 //! Secure Boot with the keys of the host, through sbctl, and the TPM2 keys of
 //! the LUKS devices of the initramfs, through systemd-cryptenroll.
 use crate::generation::Generation;
-use crate::{cmd, isolated, output, output_any, report, run_quiet};
+use crate::{cmd, isolated, output, output_any, report, run_cmd};
 use anyhow::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, Write};
@@ -301,7 +301,7 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
     if sb.enable {
         if !Path::new(KEYS).join("db/db.key").exists() {
             report::progress("create the Secure Boot keys of this host");
-            run_quiet(sbctl(&["create-keys"]))?;
+            run_cmd(sbctl(&["create-keys"]))?;
         }
         for (path, out) in unsigned(g) {
             report::progress(&format!("sign boot file {path}"));
@@ -309,14 +309,14 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
             if path != out {
                 c.args(["--output", &out]);
             }
-            run_quiet(c.arg(&path))?;
+            run_cmd(c.arg(&path))?;
             let mut ours = saved_by_pacnix();
             ours.insert(path);
             save_saved(&ours)?;
         }
         for path in forgotten(g) {
             report::progress(&format!("stop signing file {path}"));
-            run_quiet(sbctl(&["remove-file", &path]))?;
+            run_cmd(sbctl(&["remove-file", &path]))?;
             let mut ours = saved_by_pacnix();
             ours.remove(&path);
             save_saved(&ours)?;
@@ -333,7 +333,7 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
             report::progress(step);
             let flags: Vec<String> = sb.db_additions.iter().map(|a| format!("--{a}")).collect();
             // sbctl refuses keys without the hashes of the option ROMs that the firmware loads, before it changes the firmware.
-            if isolated(step, || run_quiet(sbctl(&["enroll-keys"]).args(&flags)))? {
+            if isolated(step, || run_cmd(sbctl(&["enroll-keys"]).args(&flags)))? {
                 report::last("pacnix: the firmware has the Secure Boot keys of this host. Reboot. If sbctl status then shows that Secure Boot is disabled, turn on Secure Boot in the firmware".to_string());
             } else {
                 report::last("pacnix: the firmware stays in Setup Mode. Read the message of sbctl. When it tells about option ROMs, add \"tpm-eventlog\" or \"microsoft\" to boot.loader.systemd-boot.secureBoot.dbAdditions, then run pacnix apply".to_string());
@@ -352,7 +352,7 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
             (Action::Wipe, _) => {
                 let step = format!("remove the TPM2 key of LUKS device {name}");
                 report::progress(&step);
-                isolated(&step, || run_quiet(cmd("systemd-cryptenroll", &["--wipe-slot=tpm2", dev])))?;
+                isolated(&step, || run_cmd(cmd("systemd-cryptenroll", &["--wipe-slot=tpm2", dev])))?;
             }
             (_, None) => report::last(needs()),
             (Action::Enroll(_), Some((passphrase, pin))) => {
@@ -362,7 +362,7 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
                 let pcrs: Vec<String> = l.tpm2.pcrs.iter().map(u32::to_string).collect();
                 let mut c = cmd("systemd-cryptenroll", &["--wipe-slot=tpm2", "--tpm2-device=auto", &format!("--tpm2-pcrs={}", pcrs.join("+"))]);
                 c.arg(format!("--tpm2-with-pin={}", if l.tpm2.pin { "yes" } else { "no" })).arg(dev).env("PASSWORD", passphrase).env("NEWPIN", pin);
-                isolated(&step, || run_quiet(c.stdin(Stdio::null())))?;
+                isolated(&step, || run_cmd(c.stdin(Stdio::null())))?;
             }
             (Action::Recovery, Some((passphrase, _))) => {
                 let step = format!("enroll a recovery key for LUKS device {name}");
@@ -374,11 +374,30 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
                 })?;
                 // At once, because the summary does not show when a later step stops the apply.
                 if !key.is_empty() {
-                    say!("pacnix: the recovery key of LUKS device {name}: {key}\n  Write it down and keep it away from this computer. pacnix does not show it again");
+                    show_key(name, &key)?;
                 }
             }
         }
     }
+    Ok(())
+}
+
+/// Shows a recovery key in a separate block, and continues only after the user
+/// types "written". The enrollment needs the passphrase, thus stdin is a terminal.
+fn show_key(name: &str, key: &str) -> Result<()> {
+    say!("pacnix: the recovery key of LUKS device {name}:");
+    say!("\n    {}\n", report::item(key));
+    say!("  Write down this key now and keep it away from this computer. Use it to\n  unlock the device when the TPM2 key fails. pacnix does not show it again.");
+    let mut answer = String::new();
+    while answer.trim() != "written" {
+        print!("\nType written and press Enter when you have the key on paper: ");
+        std::io::stdout().flush()?;
+        answer.clear();
+        if std::io::stdin().read_line(&mut answer)? == 0 {
+            break;
+        }
+    }
+    report::gap();
     Ok(())
 }
 

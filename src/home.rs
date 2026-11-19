@@ -1,5 +1,5 @@
 use crate::generation::{Generation, Lines};
-use crate::{cmd, output, run_cmd, run_hidden};
+use crate::{cmd, output, run_cmd};
 use anyhow::{Context, Result};
 use std::path::Path;
 
@@ -74,14 +74,13 @@ pub fn plan(g: &Generation) -> Result<Plan> {
             continue;
         }
         let _stage = crate::report::stage(&format!("build the home configuration of {user}"));
-        run_hidden(cmd("nix-store", &["--realise", &h.drv, &h.path]))?;
+        run_cmd(cmd("nix-store", &["--realise", &h.drv, &h.path]))?;
         let new = home_files(&out);
         let home = Path::new(&h.directory);
         for rel in &new {
             let path = home.join(rel);
             let file = Path::new(&out).join("home-files").join(rel);
             let p = path.display().to_string();
-            let value = |full| crate::files::value(&path, &file, false, full);
             let linked = std::fs::read_link(&path).is_ok_and(|t| t.starts_with("/nix/store") && t.to_string_lossy().contains("-home-manager-files/"));
             let kept = backup(&path).symlink_metadata().is_ok();
             let support = h.support.iter().any(|s| Path::new(s) == rel);
@@ -93,8 +92,8 @@ pub fn plan(g: &Generation) -> Result<Plan> {
             } else if path.symlink_metadata().is_err() {
                 plan.lines[0].push((p.clone(), format!("create home file {p}")));
             } else if !linked {
-                let why = if kept { " (it differs from the declaration)".to_string() } else { format!("\n  keep the original as\n    {}", backup(&path).display()) };
-                plan.lines[1].push((p.clone(), format!("change home file {p}{why}{}", value(kept))));
+                let why = if kept { "it differs from the declaration" } else { "pacnix keeps the original" };
+                plan.lines[1].push((p.clone(), format!("change home file {p} ({why})")));
                 plan.replace.push((p, kept));
             } else if changed {
                 plan.lines[1].push((p.clone(), format!("change home file {p}")));
@@ -131,8 +130,8 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
     for (user, out) in &plan.activate {
         let h = &g.m.home[user];
         crate::report::progress(&plan.step(user));
-        for (_, line) in plan.lines.iter().flatten().filter(|l| Path::new(&l.0).starts_with(&h.directory)) {
-            say!("  {}", line.replace('\n', "\n  "));
+        for l in plan.lines.iter().flatten().filter(|l| Path::new(&l.0).starts_with(&h.directory)) {
+            say!("{}", crate::report::plan_line(l));
         }
         crate::isolated(&step(user), || activate(user, &h.directory, out, &out_path(&h.path)?))?;
     }
@@ -152,14 +151,14 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
 fn activate(user: &str, home: &str, out: &str, packages: &str) -> Result<()> {
     let (profiles, roots) = (format!("{home}/.local/state/nix/profiles"), format!("{home}/.local/state/home-manager/gcroots"));
     run_cmd(cmd("runuser", &["-u", user, "--", "mkdir", "-p", &profiles, &roots]))?;
-    run_hidden(cmd("nix-store", &["--realise", out, "--add-root", &format!("{roots}/new-home")]))?;
-    run_hidden(cmd("nix-env", &["--profile", &format!("{profiles}/home-manager"), "--set", out]))?;
+    run_cmd(cmd("nix-store", &["--realise", out, "--add-root", &format!("{roots}/new-home")]))?;
+    run_cmd(cmd("nix-env", &["--profile", &format!("{profiles}/home-manager"), "--set", out]))?;
     std::fs::create_dir_all("/etc/profiles/per-user")?;
-    run_hidden(cmd("nix-store", &["--realise", packages, "--add-root", &format!("/etc/profiles/per-user/{user}")]))?;
+    run_cmd(cmd("nix-store", &["--realise", packages, "--add-root", &format!("/etc/profiles/per-user/{user}")]))?;
     // pacnix 0.11 let Home Manager install home.path into the profile of the user.
     for profile in [format!("{home}/.nix-profile"), format!("{profiles}/profile")] {
         if Path::new(&profile).exists() {
-            run_hidden(cmd("nix-env", &["--profile", &profile, "--uninstall", "home-manager-path"]))?;
+            run_cmd(cmd("nix-env", &["--profile", &profile, "--uninstall", "home-manager-path"]))?;
         }
     }
     let owner = |p: &str| run_cmd(cmd("chown", &["-h", &format!("{user}:")]).arg(p));
@@ -185,9 +184,9 @@ fn activate(user: &str, home: &str, out: &str, packages: &str) -> Result<()> {
         c.arg(format!("DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus"));
     }
     c.args([&format!("{out}/activate"), "--driver-version", "1"]).current_dir(home);
-    run_hidden(&mut c)?;
+    run_cmd(&mut c)?;
     let current = format!("{roots}/current-home");
-    run_hidden(cmd("nix-store", &["--realise", out, "--add-root", &current]))?;
+    run_cmd(cmd("nix-store", &["--realise", out, "--add-root", &current]))?;
     owner(&current)?;
     let _ = std::fs::remove_file(format!("{roots}/new-home"));
     Ok(())
