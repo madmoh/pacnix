@@ -268,38 +268,56 @@ pub fn isolated(step: &str, f: impl FnOnce() -> Result<()>) -> Result<bool> {
     }
 }
 
-static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set when the questions of the run end, before the long work. Later steps do not ask.
+static CLOSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static DELETE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The items that the user accepted in this run.
+static APPROVED: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+pub fn closed() -> bool {
+    CLOSED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn close() {
+    CLOSED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// The one question of a run: it shows each item that the user must accept and
 /// asks one time. --yes accepts. Without a terminal and without --yes, pacnix
 /// stops. The answer k continues and keeps the data of `data`. Returns true
-/// when the user accepts the deletion of the data. Later calls in the same run
-/// do not ask again and return the same answer.
+/// when the user accepts the deletion of the data. A later call returns the
+/// same answer for the accepted items. After the questions of the run end, a
+/// new item stops pacnix, because only the next apply can ask for it.
 pub fn ask(items: &[String], data: &[String], opts: &Opts) -> Result<bool> {
     use std::sync::atomic::Ordering::Relaxed;
-    if (items.is_empty() && data.is_empty()) || ASKED.swap(true, Relaxed) {
+    let new: Vec<&String> = items.iter().chain(data).filter(|i| !APPROVED.lock().unwrap().contains(*i)).collect();
+    if new.is_empty() {
         return Ok(DELETE.load(Relaxed));
     }
+    let data_new = data.iter().any(|d| new.contains(&d));
     say!("pacnix: these items need a confirmation:");
-    for i in items.iter().chain(data) {
+    for i in &new {
         say!("  {i}");
+    }
+    if closed() && !opts.yes {
+        bail!("pacnix asks only at the start of the run, and these items came after it. Run pacnix apply again to confirm them");
     }
     if !opts.yes && !std::io::stdin().is_terminal() {
         bail!("these items need a confirmation. Give --yes to continue without a terminal");
     }
     let mut answer = String::from("y");
     if !opts.yes {
-        print!("Continue? [y/N]{} ", if data.is_empty() { " (N stops pacnix)" } else { " (N stops pacnix, k continues and keeps the data)" });
+        print!("Continue? [y/N]{} ", if !data_new { " (N stops pacnix)" } else { " (N stops pacnix, k continues and keeps the data)" });
         std::io::stdout().flush()?;
         answer.clear();
         std::io::stdin().lock().read_line(&mut answer)?;
     }
     match answer.trim() {
-        "y" | "Y" | "yes" => DELETE.store(!data.is_empty(), Relaxed),
-        "k" if !data.is_empty() => {}
+        "y" | "Y" | "yes" => DELETE.store(DELETE.load(Relaxed) || data_new, Relaxed),
+        "k" if data_new => {}
         _ => bail!("stopped by the user"),
     }
+    APPROVED.lock().unwrap().extend(new.into_iter().cloned());
     Ok(DELETE.load(Relaxed))
 }
 
@@ -521,9 +539,10 @@ pub fn named(noun: &str, verb: &str, items: &[String]) -> String {
 /// Binds a label to its first item: a line does not break between them.
 pub const BIND: char = '\u{1}';
 
+/// A command without input: the questions of pacnix are the only input of the run.
 pub fn cmd(program: &str, args: &[&str]) -> Command {
     let mut c = Command::new(program);
-    c.args(args);
+    c.args(args).stdin(Stdio::null());
     c
 }
 

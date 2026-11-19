@@ -8,8 +8,11 @@
 # keys because the firmware loads an option ROM, and the firmware stays in Setup
 # Mode; the output shows the failure one time, with the next step. With the
 # hashes of the TPM event log, the apply enrolls the keys and the TPM2 key
-# waits; the recovery key shows until the user types written, and the end of
-# the input stops the apply and keeps the enrolled key. After a reboot, the firmware checks the signatures, and the
+# waits. The apply asks for the passphrase and shows the recovery key one time
+# at the start, before the upgrade, until the user types written; the end of the
+# input stops the apply before the upgrade and keeps the enrolled key. A new plan
+# after the upgrade asks nothing. Without a terminal, the recovery key waits.
+# After a reboot, the firmware checks the signatures, and the
 # apply asks for the passphrase and the PIN, enrolls the TPM2 key with the PIN
 # and a recovery key. The system unlocks with the PIN. After a kernel update,
 # a systemd-boot update and new Secure Boot keys, it still boots; the new keys
@@ -76,6 +79,15 @@ reboot_with() {
 }
 # Runs pacnix apply in a terminal, which types the lines of the arguments at its prompts.
 tty_apply() { printf '%s\n' "$@" | "$vm" ssh sbbox -tt 'NO_COLOR=1 pacnix apply 2>&1' | tr -d '\r'; }
+# Fails unless an apply asked for the passphrase and showed the recovery key one
+# time, before the system upgrade, and asked nothing after it.
+order() {
+	once "$1" 'pacnix: the recovery key of LUKS device root:' || { echo "$1"; fail "the apply does not show the recovery key one time"; }
+	at() { grep -n -m1 -- "$1" <<<"$2" | cut -d: -f1; }
+	(($(at 'Passphrase of the LUKS device root' "$1") < $(at 'pacnix: the recovery key of LUKS device root:' "$1") && $(at 'pacnix: the recovery key of LUKS device root:' "$1") < $(at '^pacnix: system upgrade' "$1"))) || { echo "$1"; fail "the questions and the recovery key do not come before the system upgrade"; }
+	sed -n "/^pacnix: system upgrade/,\$p" <<<"$1" | grep -q 'Passphrase\|PIN\|Type written' && { echo "$1"; fail "the apply asks after the system upgrade"; }
+	return 0
+}
 # Fails unless sbctl has the given number of files and each is signed.
 signed() { check sbbox "sudo sbctl list-files --json | jq -e 'length == $1 and all(.is_signed)'" "$2"; }
 secure_boot() { on sbbox 'bootctl status 2>/dev/null | sed -n "s/^ *Secure Boot: //p" | head -1'; }
@@ -117,6 +129,8 @@ done
 out=$(tty_apply pass1 written)
 echo "$out" | tail -8
 matches "$out" 'pacnix: the recovery key of LUKS device root: [a-z]{8}-' || fail "the apply does not show the recovery key"
+order "$out"
+has "$out" 'recovery key enrolled: root' || fail "the last line does not show the recovery key"
 has "$out" 'pacnix: the firmware has the Secure Boot keys of this host. Reboot. If sbctl status then shows that Secure Boot is disabled, turn on Secure Boot in the firmware' || { echo "$out" | tail; fail "the summary does not tell to reboot"; }
 signed 6 "the boot files are not signed"
 check sbbox 'grep -qx "root UUID=.* none tpm2-device=auto" /etc/crypttab.initramfs' "crypttab.initramfs does not have the TPM2 option"
@@ -129,8 +143,28 @@ out=$(on sbbox "printf 'pass1\n' | script -qec 'NO_COLOR=1 pacnix apply' /dev/nu
 echo "$out" | tail -8
 matches "$out" 'pacnix: the recovery key of LUKS device root: [a-z]{8}-' || fail "the apply does not show the recovery key"
 has "$out" 'pacnix: error: the input ended before you typed written. The recovery key above is enrolled.' || fail "the apply does not stop at the end of the input"
-grep -q 'apply done' <<<"$out" && fail "the apply continued without the confirmation"
+grep -q 'apply done\|^pacnix: system upgrade' <<<"$out" && fail "the apply continued without the confirmation"
 check sbbox 'sudo systemd-cryptenroll /dev/vda2 | grep -q recovery' "the end of the input removed the recovery key"
+
+step "a new plan after the upgrade does not ask again or show a second recovery key"
+wipe_recovery='sudo env PASSWORD=pass1 systemd-cryptenroll --wipe-slot=recovery /dev/vda2 >/dev/null 2>&1'
+on sbbox "$wipe_recovery" || fail "the removal of the recovery key by hand failed"
+# An old sync database makes the upgrade download it again, thus pacnix computes the plan again.
+on sbbox 'sudo touch -d 2000-01-01 /var/lib/pacman/sync/core.db'
+out=$(tty_apply pass1 written)
+order "$out"
+check sbbox 'test "$(stat -c %Y /var/lib/pacman/sync/core.db)" -gt 946771200' "the upgrade did not download the sync database again"
+check sbbox 'test "$(sudo systemd-cryptenroll /dev/vda2 | grep -c recovery)" = 1' "the device does not have one recovery key"
+has "$out" 'apply done.' || { echo "$out" | tail; fail "the apply after the new plan failed"; }
+
+step "without a terminal, the recovery key waits with a note"
+on sbbox "$wipe_recovery" || fail "the removal of the recovery key by hand failed"
+out=$(apply sbbox) || { echo "$out" | tail; fail "the apply without a terminal failed"; }
+has "$out" 'pacnix: a recovery key for LUKS device root waits. Run pacnix apply in a terminal to get it' || { echo "$out" | tail; fail "the apply does not tell how to get the recovery key"; }
+grep -q 'recovery key of LUKS device root:' <<<"$out" && fail "the apply without a terminal shows a recovery key"
+refute sbbox 'sudo systemd-cryptenroll /dev/vda2 | grep -q recovery' "the apply without a terminal enrolled a recovery key"
+tty_apply pass1 written >/dev/null
+check sbbox 'sudo systemd-cryptenroll /dev/vda2 | grep -q recovery' "the recovery key is not enrolled"
 
 step "the firmware checks the signatures, and the apply enrolls the TPM2 key with the PIN"
 reboot_with "Please enter" pass1

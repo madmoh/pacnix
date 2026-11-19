@@ -14,7 +14,21 @@ const KEYS: &str = "/var/lib/sbctl/keys";
 const TPM: &str = "/sys/class/tpm/tpm0";
 
 /// The passphrase and the new PIN of each LUKS device, which the user types at the run.
+/// The passphrase and the new PIN of each LUKS device, by its UUID, which the
+/// user types at the start of the run and which stay in memory only.
 static SECRETS: Mutex<BTreeMap<String, (String, String)>> = Mutex::new(BTreeMap::new());
+/// The names of the LUKS devices that got a recovery key at the start of the run.
+static RECOVERED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The identity of a LUKS device: the UUID of its header, also when the
+/// declaration names it by a path or a label.
+fn identity(dev: &str) -> Option<String> {
+    output(cmd("cryptsetup", &["luksUUID", dev])).ok().map(|u| u.trim().to_string()).filter(|u| !u.is_empty())
+}
+
+pub fn recovered() -> Vec<String> {
+    RECOVERED.lock().unwrap().clone()
+}
 
 /// The Secure Boot state of the firmware and the keys of sbctl.
 #[derive(Default)]
@@ -322,7 +336,9 @@ pub fn ask_secrets(g: &Generation, plan: &Plan) -> Result<()> {
     }
     let mut secrets = SECRETS.lock().unwrap();
     for (name, dev, action) in &plan.tpm {
-        if !matches!(action, Action::Enroll(_) | Action::Recovery) || secrets.contains_key(name) {
+        // Without the UUID, a passphrase cannot belong to one device: the step waits.
+        let Some(id) = identity(dev) else { continue };
+        if !matches!(action, Action::Enroll(_) | Action::Recovery) || secrets.contains_key(&id) {
             continue;
         }
         let passphrase = loop {
@@ -343,7 +359,7 @@ pub fn ask_secrets(g: &Generation, plan: &Plan) -> Result<()> {
                 say!("pacnix: The PINs are empty or not equal. Type them again.");
             }
         }
-        secrets.insert(name.clone(), (passphrase, pin));
+        secrets.insert(id, (passphrase, pin));
     }
     Ok(())
 }
@@ -414,9 +430,20 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
         }
     }
     for (name, dev, action) in &plan.tpm {
-        let secret = SECRETS.lock().unwrap().get(name).cloned();
-        let needs = || format!("pacnix: the TPM2 key and the recovery key of LUKS device {name} wait for the passphrase. Run pacnix apply in a terminal");
+        let secret = match action {
+            Action::Enroll(_) => identity(dev).and_then(|id| SECRETS.lock().unwrap().get(&id).cloned()),
+            _ => None,
+        };
+        let needs = || match identity(dev) {
+            Some(_) => format!("pacnix: the TPM2 key of LUKS device {name} waits for the passphrase. Run pacnix apply in a terminal"),
+            None => format!("pacnix: the TPM2 key of LUKS device {name} waits: pacnix cannot read the UUID of {dev}"),
+        };
         match (action, secret) {
+            // A recovery key shows only at the start of the run, see `recover`.
+            (Action::Recovery, _) => report::last(match identity(dev) {
+                Some(_) => format!("pacnix: a recovery key for LUKS device {name} waits. Run pacnix apply in a terminal to get it"),
+                None => format!("pacnix: a recovery key for LUKS device {name} waits: pacnix cannot read the UUID of {dev}"),
+            }),
             (Action::Wait(why), _) => report::last(format!("pacnix: the TPM2 key of LUKS device {name} waits: {why}")),
             (Action::Wipe, _) => {
                 let step = format!("remove the TPM2 key of LUKS device {name}");
@@ -426,6 +453,11 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
             (_, None) => report::last(needs()),
             (Action::Enroll(_), Some((passphrase, pin))) => {
                 let l = &g.m.boot.luks[name];
+                // The PIN is asked only at the start of the run, for a key that can be enrolled then.
+                if l.tpm2.pin && pin.is_empty() {
+                    report::last(format!("pacnix: the TPM2 key of LUKS device {name} waits for its PIN. Run pacnix apply in a terminal"));
+                    continue;
+                }
                 // The values that the key seals to are the values of the SHA-256 bank that pacnix checks now.
                 let snap = match snapshot(&l.tpm2.pcrs) {
                     Ok(snap) => snap,
@@ -442,20 +474,31 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
                 c.arg(format!("--tpm2-with-pin={}", if l.tpm2.pin { "yes" } else { "no" })).arg(dev).env("PASSWORD", passphrase).env("NEWPIN", pin);
                 isolated(&step, || run_cmd(c.stdin(Stdio::null())))?;
             }
-            (Action::Recovery, Some((passphrase, _))) => {
-                let step = format!("enroll a recovery key for LUKS device {name}");
-                report::progress(&step);
-                let mut key = String::new();
-                isolated(&step, || {
-                    key = output(cmd("systemd-cryptenroll", &["--recovery-key", dev]).env("PASSWORD", passphrase).stdin(Stdio::null()))?.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_string();
-                    Ok(())
-                })?;
-                // At once, because the summary does not show when a later step stops the apply.
-                if !key.is_empty() {
-                    show_key(name, dev, &key)?;
-                }
-            }
         }
+    }
+    Ok(())
+}
+
+/// Enrolls the recovery keys of the plan at the start of the run, after the
+/// questions, with the passphrases that the user typed, and shows each key at once.
+/// The enrolled keys leave the plan, thus the late steps do not see them.
+pub fn recover(plan: &mut Plan) -> Result<()> {
+    let mut done = Vec::new();
+    for (i, (name, dev, action)) in plan.tpm.iter().enumerate() {
+        let secret = identity(dev).and_then(|id| SECRETS.lock().unwrap().get(&id).cloned());
+        let (Action::Recovery, Some((passphrase, _))) = (action, secret) else { continue };
+        report::progress(&format!("enroll a recovery key for LUKS device {name}"));
+        report::changing();
+        let key = output(cmd("systemd-cryptenroll", &["--recovery-key", dev]).env("PASSWORD", passphrase))?.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_string();
+        RECOVERED.lock().unwrap().push(name.clone());
+        done.push(i);
+        if key.is_empty() {
+            bail!("systemd-cryptenroll enrolled a recovery key for LUKS device {name}, but did not show it. Remove it with systemd-cryptenroll --wipe-slot=recovery {dev}, then run pacnix apply to get a new key");
+        }
+        show_key(name, dev, &key)?;
+    }
+    for i in done.into_iter().rev() {
+        plan.tpm.remove(i);
     }
     Ok(())
 }

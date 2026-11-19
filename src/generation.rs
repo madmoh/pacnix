@@ -446,27 +446,29 @@ pub fn plan(ctx: &Ctx) -> Result<()> {
 }
 
 /// Makes the system agree with the configuration: pacman -Syu, the rebuild
-/// of changed AUR packages, then the plan. The one question of the run comes
-/// before any change: the removals that the plan shows now, the changes of the
-/// AUR packages that upgrade, and the Arch Linux news since the last upgrade.
-/// Offline, the sync databases and the AUR packages stay as they are.
+/// of changed AUR packages, then the plan. The questions of the run come
+/// before any long work, see `preflight`: the removals and the AUR builds that
+/// the plan shows now, the changes of the AUR packages that upgrade, and the
+/// Arch Linux news since the last upgrade. Offline, the sync databases and the
+/// AUR packages stay as they are.
 pub fn apply(ctx: &Ctx, offline: bool) -> Result<()> {
     let target = build(ctx)?;
     let (mut plan, mut read) = (None, false);
     if !offline {
         let news = std::thread::spawn(trust::news);
-        let before = Plan::compute(ctx, target.clone())?;
+        let mut before = Plan::compute(ctx, target.clone())?;
+        files::check(ctx, &before.target, &before.files)?;
         let builds = packages::upgrade_builds(&target)?;
+        let fetched = packages::fetch_builds(&before.target, &before.packages)?;
         let news = news.join().unwrap_or_default();
         read = news.is_some();
-        ask(&[packages::removals(&before.packages), builds.asks.clone(), news.unwrap_or_default()].concat(), &audit::asks(&before.data), &ctx.opts)?;
-        users::ask_passwords(&before.users, &ctx.opts)?;
-        secure::ask_secrets(&before.target, &before.secure)?;
-        // When the upgrade changes no package and no sync database, the plan stays the same.
+        let asks = [packages::removals(&before.packages), builds.asks.clone(), fetched.asks.clone(), news.unwrap_or_default()].concat();
+        preflight(ctx, &mut before, &asks)?;
+        // When the upgrade changes no package and no sync database, the plan and its builds stay the same.
         let (state, built) = (packages::databases(), builds.queue.is_empty());
         report::changing();
         packages::upgrade(&target, builds)?;
-        plan = (built && packages::databases() == state).then_some(before);
+        plan = (built && packages::databases() == state).then_some((before, fetched));
     }
     if offline {
         say!("pacnix: system upgrade: skipped, because of --offline");
@@ -487,18 +489,36 @@ fn commit(target: &Generation) -> Result<()> {
     Ok(())
 }
 
+/// The questions of the run, one time before the long work, also for the
+/// retries: the one question, the passwords of the new users, the passphrases
+/// and PINs of the LUKS devices, then the recovery keys, which pacnix enrolls
+/// and shows at once. After them, a new item of the question stops pacnix,
+/// and the late steps do not ask: they show the next command.
+fn preflight(ctx: &Ctx, plan: &mut Plan, asks: &[String]) -> Result<bool> {
+    let delete = ask(asks, &audit::asks(&plan.data), &ctx.opts)?;
+    if !crate::closed() {
+        users::ask_passwords(&plan.users, &ctx.opts)?;
+        secure::ask_secrets(&plan.target, &plan.secure)?;
+        secure::recover(&mut plan.secure)?;
+        crate::close();
+    }
+    Ok(delete)
+}
+
 /// Brings the system to the target generation. The profile is not changed.
-fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
+fn activate(ctx: &Ctx, target: Generation, plan: Option<(Plan, packages::Builds)>) -> Result<()> {
     packages::recover_lock()?;
-    let plan = match plan {
+    let (mut plan, builds) = match plan {
         Some(plan) => plan,
-        None => Plan::compute(ctx, target)?,
+        None => {
+            let plan = Plan::compute(ctx, target)?;
+            files::check(ctx, &plan.target, &plan.files)?;
+            let builds = packages::fetch_builds(&plan.target, &plan.packages)?;
+            (plan, builds)
+        }
     };
-    files::check(ctx, &plan.target, &plan.files)?;
-    let builds = packages::fetch_builds(&plan.target, &plan.packages)?;
-    let delete = ask(&[packages::removals(&plan.packages), builds.asks.clone()].concat(), &audit::asks(&plan.data), &ctx.opts)?;
-    users::ask_passwords(&plan.users, &ctx.opts)?;
-    secure::ask_secrets(&plan.target, &plan.secure)?;
+    let asks = [packages::removals(&plan.packages), builds.asks.clone()].concat();
+    let delete = preflight(ctx, &mut plan, &asks)?;
     // The last line names the target of a declared link.
     let link = |p: String| match plan.target.m.files.get(&p).and_then(|f| f.target.clone()) {
         Some(t) => format!("{p} (link to {t})"),
@@ -507,7 +527,10 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
     let p = &plan.target.m.packages;
     report::declared(p.repo.iter().chain(&p.aur).chain(p.local.keys()).cloned().collect());
     report::install_notes(plan.target.m.install_notes.clone());
-    report::planned(plan.sections().into_iter().skip(1).map(|(kind, lines)| (kind, lines.into_iter().map(|l| link(l.0)).collect())).collect());
+    let mut kinds: Vec<_> = plan.sections().into_iter().skip(1).map(|(kind, lines)| (kind, lines.into_iter().map(|l| link(l.0)).collect())).collect();
+    // The recovery keys of the start of the run left the plan.
+    kinds.push((("recovery key", "enrolled"), secure::recovered()));
+    report::planned(kinds);
     report::changing();
     let current = std::fs::canonicalize(PENDING).ok();
     if current.as_deref() != Some(Path::new(&plan.target.path)) {
