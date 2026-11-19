@@ -332,7 +332,7 @@ pub fn apply(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<Vec<String>> {
     plan.print([a, b, c, d]);
     let lines = lines.concat();
     if !lines.is_empty() {
-        report::progress(&format!("file changes ({}):", lines.len()));
+        report::progress(&format!("change {}:", crate::count(lines.len(), "file")));
     }
     lines.iter().for_each(|l| say!("{}", crate::report::plan_line(l)));
     // The triggers and unit restarts that follow the changes are recorded

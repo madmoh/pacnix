@@ -289,7 +289,7 @@ pub fn ask(items: &[String], data: &[String], opts: &Opts) -> Result<bool> {
     }
     let mut answer = String::from("y");
     if !opts.yes {
-        print!("Continue? [y/N]{} ", if data.is_empty() { "" } else { " (k: continue and keep the data)" });
+        print!("Continue? [y/N]{} ", if data.is_empty() { " (N stops pacnix)" } else { " (N stops pacnix, k continues and keeps the data)" });
         std::io::stdout().flush()?;
         answer.clear();
         std::io::stdin().lock().read_line(&mut answer)?;

@@ -324,6 +324,14 @@ pub fn step(step: &str) {
     }
 }
 
+/// The declared packages that the plan installs or removes, for the last line.
+static DECLARED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Sets the declared packages that the plan installs or removes.
+pub fn declared(names: Vec<String>) {
+    *DECLARED.lock().unwrap() = names;
+}
+
 /// The number of planned changes of each kind, for the last line.
 pub fn planned(kinds: Vec<((&'static str, &'static str), Vec<String>)>) {
     *PLANNED.lock().unwrap() = kinds;
@@ -367,7 +375,18 @@ pub fn close(verb: &str, ok: bool) -> i32 {
     let few = groups.iter().map(|g| g.1.len()).sum::<usize>() <= 3;
     let changes: Vec<String> = groups
         .iter()
-        .map(|((noun, verb), items)| if few { crate::named(noun, verb, items) } else { format!("{} {verb}", crate::count(items.len(), noun)).trim_end().to_string() })
+        .map(|((noun, verb), items)| match few {
+            true => crate::named(noun, verb, items),
+            // A count does not break between lines, and names the declared packages that it has.
+            false => {
+                let declared: Vec<&String> = items.iter().filter(|i| *noun == "package" && DECLARED.lock().unwrap().contains(*i)).collect();
+                let text = format!("{} {verb}", crate::count(items.len(), noun)).trim_end().replace(' ', &crate::BIND.to_string());
+                match declared.len() {
+                    1..=3 if declared.len() < items.len() => format!("{text}: {} and {} more", self::items(&declared), items.len() - declared.len()),
+                    _ => text,
+                }
+            }
+        })
         .collect();
     let changes = match changes.is_empty() {
         true if code == 0 || code == 4 => "No changes.".to_string(),
@@ -597,7 +616,7 @@ pub fn summary() {
     }
     if !fresh.is_empty() {
         let names: Vec<&String> = fresh.keys().collect();
-        say!("pacnix: new install notes of {}: {}. pacnix audit shows them", crate::count(names.len(), "package"), items(&names));
+        say!("pacnix: new install notes of {}. Run pacnix audit to read them", items(&names));
     }
     for f in &pacnew {
         say!("pacnix: new file {f}: merge it with {}", f.trim_end_matches(".pacnew"));

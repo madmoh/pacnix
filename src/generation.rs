@@ -361,8 +361,8 @@ impl Plan {
         lines.iter().for_each(|l| say!("{}", report::plan_line(l)));
         self.same();
         match lines.len() {
-            0 => say!("pacnix: plan done: no change apart from the system upgrade. The system is unchanged."),
-            n => say!("pacnix: plan done: {} and the system upgrade. The system is unchanged.", crate::count(n, "change")),
+            0 => say!("pacnix: plan done: no change. The system is unchanged."),
+            n => say!("pacnix: plan done: {}. The system is unchanged.", crate::count(n, "change")),
         }
         Ok(())
     }
@@ -374,13 +374,13 @@ impl Plan {
         let m = &self.target.m;
         // What the removal of the declaration does, from the records of pacnix.
         let units = |list: &Vec<String>, state: &str| {
-            let by = |u: &String| if self.units.made(u) { "by pacnix; vendor preset when undeclared" } else { "before pacnix; stays when undeclared" };
+            let by = |u: &String| if self.units.made(u) { "by pacnix: vendor preset without its declaration" } else { "before pacnix: stays without its declaration" };
             list.iter().map(|u| (u.clone(), format!("{u} ({state} {})", by(u)))).collect::<Vec<_>>()
         };
         let plain = |list: Vec<&String>| list.into_iter().map(|i| (i.clone(), i.clone())).collect::<Vec<_>>();
         let packages = m.packages.repo.iter().chain(&m.packages.aur).chain(m.packages.local.keys());
         let declared = [
-            ("package", packages.map(|p| (p.clone(), format!("{p} (installed {})", if self.packages.made(p) { "by pacnix; removed when undeclared" } else { "before pacnix; stays when undeclared" }))).collect()),
+            ("package", packages.map(|p| (p.clone(), format!("{p} (installed {})", if self.packages.made(p) { "by pacnix: removed with its declaration" } else { "before pacnix: stays without its declaration" }))).collect()),
             ("user", plain(m.users.users.keys().collect())),
             ("file", plain(m.files.keys().collect())),
             ("unit", [units(&m.units.enable, "enabled"), units(&m.units.disable, "disabled"), units(&m.units.mask, "masked")].concat()),
@@ -475,6 +475,7 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
         Some(t) => format!("{p} (link to {t})"),
         None => p,
     };
+    report::declared(plan.packages.changing());
     report::planned(plan.sections().into_iter().skip(1).map(|(kind, lines)| (kind, lines.into_iter().map(|l| link(l.0)).collect())).collect());
     report::changing();
     let current = std::fs::canonicalize(PENDING).ok();

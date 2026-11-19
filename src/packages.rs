@@ -76,7 +76,7 @@ impl Plan {
         let name = |url: &String| url.rsplit('/').next().and_then(|f| f.rsplitn(4, '-').nth(3)).unwrap_or(url).to_string();
         l.extend(self.archive.iter().map(|u| (name(u), format!("install package from the Arch Linux Archive {u}"))));
         l.extend(self.remove.iter().map(|p| (p.clone(), format!("remove package {p} (apply asks first)"))));
-        marks.extend(self.explicit.iter().map(|p| (p.clone(), format!("{p}: installed as a dependency, set it to explicitly installed"))));
+        marks.extend(self.explicit.iter().map(|p| (p.clone(), format!("mark {p} as explicitly installed (pacman installed it as a dependency)"))));
         // A package that leaves in the same run gets its reason only as a step of the removal.
         let deps = self.deps.iter().filter(|p| !self.remove.contains(p));
         marks.extend(deps.map(|p| (p.clone(), format!("{p}: set the install reason to installed as a dependency"))));
@@ -648,6 +648,11 @@ pub fn newer() -> Result<Vec<String>> {
 
 /// Whether pacnix installed the package or set it to explicitly installed.
 impl Plan {
+    /// The packages that the plan installs or removes.
+    pub fn changing(&self) -> Vec<String> {
+        [&self.install[..], &self.archive, &self.remove].concat()
+    }
+
     pub fn made(&self, name: &str) -> bool {
         self.made.contains(name)
     }
@@ -815,7 +820,7 @@ fn signing_key() -> Result<String> {
     let key = fingerprints(&output(gpg(&["--with-colons", "--list-secret-keys"]))?).into_iter().next().context("the signing key of the local repository has no fingerprint")?;
     if !Path::new(KEY).exists() {
         run_cmd(gpg(&["--armor", "--output", KEY, "--export", &key]))?;
-        report::last(format!("pacnix: the key {key} signs the local repository. A host that installs from it declares packages.serverKey = \"{key}\";"));
+        report::last(format!("pacnix: new key of the local repository, for packages.serverKey of other hosts: {key}"));
     }
     Ok(key)
 }
