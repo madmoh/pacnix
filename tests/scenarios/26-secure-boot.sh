@@ -15,9 +15,13 @@
 # a systemd-boot update and new Secure Boot keys, it still boots; the new keys
 # change PCR 7, and the apply enrolls the TPM2 key again. A file that sbctl
 # cannot sign and the removal of Secure Boot while the firmware checks the
-# signatures are refused before any change. A TPM2 key without a PIN on PCRs 0
-# and 7 unlocks with no prompt. Without the TPM2 declaration, the TPM2 key that
-# pacnix enrolled goes, and sbctl stops signing the files that are not boot
+# signatures are refused before any change. A declared PCR that cannot be read,
+# that has no measurement (PCR 23) or that has no measurement event in the log
+# makes the TPM2 key wait, without a question and without a change, and the
+# wait is not a change: the key stays, and a device without a key gets none.
+# After a logged measurement, the key seals to the values that pacnix checked
+# and unseals. A TPM2 key without a PIN on PCRs 0 and 7 unlocks with no
+# prompt. Without the TPM2 declaration, the TPM2 key that pacnix enrolled goes, and sbctl stops signing the files that are not boot
 # files of the configuration. A TPM2 key that the user enrolls by hand and a
 # file that the user saves in sbctl stay.
 size=(4 4096 1)
@@ -188,6 +192,40 @@ scenario sbbox "{ $luks }"
 out=$(apply sbbox) && fail "the apply removed Secure Boot while the firmware checks the signatures"
 has "$out" 'pacnix: error: the firmware checks Secure Boot signatures, and without boot.loader.systemd-boot.secureBoot' || { echo "$out"; fail "the refusal does not tell to turn off Secure Boot"; }
 [[ $before == "$(on sbbox "$state")" ]] || fail "a refused apply changed the system"
+
+step "a declared PCR without a value or a measurement keeps the TPM2 key, and the key waits"
+tokens='sudo cryptsetup luksDump --dump-json-metadata /dev/vda2 | jq -c .tokens'
+pcrs() { scenario sbbox "{ $sb boot.initrd.luks.devices.root = { device = \"UUID=$uuid\"; tpm2.enable = true; tpm2.pcrs = [ $1 ]; recoveryKey = true; }; }"; }
+pcrs '7 24'
+out=$(plan sbbox)
+has "$out" 'pacnix: note: the TPM2 key of LUKS device root waits: pacnix cannot read PCR 24 of the SHA-256 bank of the TPM2 chip' || { echo "$out"; fail "the plan does not wait for a PCR that cannot be read"; }
+check sbbox 'test "$(cat /sys/class/tpm/tpm0/pcr-sha256/23)" = 0000000000000000000000000000000000000000000000000000000000000000' "PCR 23 is not zero"
+pcrs '7 23 7'
+before=$(on sbbox "$tokens")
+out=$(plan sbbox)
+has "$out" 'pacnix: note: the TPM2 key of LUKS device root waits: PCR 23 of the SHA-256 bank has no measurement for this boot' || { echo "$out"; fail "the plan does not wait for a PCR without a measurement"; }
+grep -q '^pacnix: plan done: no change' <<<"$out" || { echo "$out"; fail "the plan counts the TPM2 key that waits as a change"; }
+out=$(tty_apply)
+echo "$out" | tail -4
+has "$out" 'pacnix: the TPM2 key of LUKS device root waits: PCR 23 of the SHA-256 bank has no measurement for this boot' || fail "the apply does not show that the TPM2 key waits"
+has "$out" 'pacnix: apply done. No changes. Exit status 0.' || fail "the apply counts the TPM2 key that waits as a change"
+grep -q 'Passphrase' <<<"$out" && fail "the apply asks for the passphrase for a TPM2 key that waits"
+[[ $(on sbbox "$tokens") == "$before" ]] || fail "the apply changed the TPM2 key while a PCR has no measurement"
+on sbbox 'sudo env PASSWORD=pass1 systemd-cryptenroll --wipe-slot=tpm2 /dev/vda2 >/dev/null 2>&1' || fail "the removal of the TPM2 key by hand failed"
+tty_apply >/dev/null
+check sbbox "$tokens | jq -e 'all(.[]; .type != \"systemd-tpm2\")'" "the apply enrolled a TPM2 key while a PCR has no measurement"
+# systemd-pcrextend measures into PCR 23 and writes the event to the log of systemd.
+on sbbox 'sudo /usr/lib/systemd/systemd-pcrextend --pcr=23 pacnix-test' || fail "systemd-pcrextend failed"
+out=$(plan sbbox)
+has "$out" 'enroll the TPM2 key of LUKS device root: the device has none' || { echo "$out"; fail "the plan does not enroll the TPM2 key after the measurement"; }
+tty_apply pass1 >/dev/null
+check sbbox "$tokens | jq -e '[.[] | select(.type == \"systemd-tpm2\")] | length == 1 and .[0][\"tpm2-pcrs\"] == [7, 23] and .[0][\"tpm2-pcr-bank\"] == \"sha256\"'" "the TPM2 key is not sealed to PCRs 7 and 23 of the SHA-256 bank"
+check sbbox 'sudo cryptsetup open --test-passphrase --token-only /dev/vda2' "the new TPM2 key does not unseal"
+empty_plan sbbox
+# Without the event in the log, the value of PCR 23 has no measurement event, also for a key that is current.
+on sbbox 'sudo rm /run/log/systemd/tpm2-measure.log'
+out=$(plan sbbox)
+has "$out" 'pacnix: note: the TPM2 key of LUKS device root waits: PCR 23 of the SHA-256 bank has no measurement event in the event log of this boot' || { echo "$out"; fail "the plan does not wait for a PCR without a measurement event"; }
 
 step "a TPM2 key without a PIN on PCRs 0 and 7 unlocks with no prompt"
 scenario sbbox "{ $sb boot.initrd.luks.devices.root = { device = \"UUID=$uuid\"; tpm2 = { enable = true; pcrs = [ 0 7 ]; }; recoveryKey = true; }; }"

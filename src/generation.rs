@@ -386,6 +386,7 @@ impl Plan {
             say!("pacnix: changes ({}):", lines.len());
         }
         lines.iter().for_each(|l| say!("{}", report::plan_line(l)));
+        self.secure.notes().iter().for_each(|n| say!("pacnix: note: {n}"));
         self.same();
         let upgrade = "Apply refreshes the sync databases first, thus it can also upgrade packages that this plan does not show.";
         match lines.len() {

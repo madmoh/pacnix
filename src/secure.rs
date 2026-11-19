@@ -110,18 +110,71 @@ fn device(spec: &str) -> String {
     }
 }
 
-/// The TPM2 policy hash that systemd-cryptenroll records for PCRs of the
-/// SHA-256 bank and an optional PIN: PolicyPCR with the current values, then
-/// PolicyAuthValue. A different hash means that the key does not unseal.
-fn policy(pcrs: &[u32], pin: bool) -> Option<String> {
-    use sha2::{Digest, Sha256};
+/// The TPM2 chip of the PCR values in sysfs, for systemd-cryptenroll.
+const TPM_DEVICE: &str = "/dev/tpmrm0";
+
+/// The values of PCRs in the SHA-256 bank of the TPM2 chip, sorted by PCR.
+type Snapshot = Vec<(u32, [u8; 32])>;
+
+/// The declared PCRs, sorted and each one time.
+fn canonical(pcrs: &[u32]) -> Vec<u32> {
     let mut sorted = pcrs.to_vec();
     sorted.sort();
+    sorted.dedup();
+    sorted
+}
+
+/// Reads the values of PCRs from sysfs, and makes sure that each value has a
+/// measurement of this boot: a PCR that cannot be read, a PCR with only zeros,
+/// and a PCR without a measurement event of the SHA-256 bank in the event log
+/// of systemd-pcrlock, which has the firmware and the systemd measurements,
+/// give the reason why a TPM2 key cannot use these values.
+fn snapshot(pcrs: &[u32]) -> Result<Snapshot, String> {
+    let (mut values, mut unread, mut zero) = (Snapshot::new(), Vec::new(), Vec::new());
+    for p in canonical(pcrs) {
+        let text = std::fs::read_to_string(format!("{TPM}/pcr-sha256/{p}")).unwrap_or_default();
+        let hex = text.trim().as_bytes();
+        let digit = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+        let bytes: Option<Vec<u8>> = (hex.len() == 64).then(|| hex.chunks(2).map(|c| Some(digit(c[0])? << 4 | digit(c[1])?)).collect()).flatten();
+        match bytes.and_then(|b| <[u8; 32]>::try_from(b).ok()) {
+            None => unread.push(p.to_string()),
+            Some(v) if v == [0; 32] => zero.push(p.to_string()),
+            Some(v) => values.push((p, v)),
+        }
+    }
+    let list = |l: &[String]| if l.len() == 1 { format!("PCR {}", l[0]) } else { format!("PCRs {}", l.join(", ")) };
+    let have = |l: &[String]| if l.len() == 1 { "has" } else { "have" };
+    if !unread.is_empty() {
+        return Err(format!("pacnix cannot read {} of the SHA-256 bank of the TPM2 chip", list(&unread)));
+    }
+    if !zero.is_empty() {
+        return Err(format!("{} of the SHA-256 bank {} no measurement for this boot", list(&zero), have(&zero)));
+    }
+    if values.is_empty() {
+        return Ok(values);
+    }
+    let unlogged = || "pacnix cannot read the TPM2 event log of this boot with systemd-pcrlock".to_string();
+    let text = output(cmd("/usr/lib/systemd/systemd-pcrlock", &["log", "--json=short", "--no-pager"]).stdin(Stdio::null())).map_err(|_| unlogged())?;
+    let log: serde_json::Value = serde_json::from_str(&text).map_err(|_| unlogged())?;
+    let events = log["log"].as_array().ok_or_else(unlogged)?;
+    // An event of the type EV_NO_ACTION does not extend a PCR.
+    let measured = |p: u32| events.iter().any(|e| e["pcr"].as_u64() == Some(p as u64) && e["event"] != "no-action" && e["sha256"].as_str().is_some_and(|h| h.len() == 64));
+    let missing: Vec<String> = values.iter().filter(|(p, _)| !measured(*p)).map(|(p, _)| p.to_string()).collect();
+    match missing.is_empty() {
+        true => Ok(values),
+        false => Err(format!("{} of the SHA-256 bank {} no measurement event in the event log of this boot", list(&missing), have(&missing))),
+    }
+}
+
+/// The TPM2 policy hash that systemd-cryptenroll records for PCR values of the
+/// SHA-256 bank and an optional PIN: PolicyPCR with the values, then
+/// PolicyAuthValue. A different hash means that the key does not unseal.
+fn policy(snapshot: &Snapshot, pin: bool) -> Option<String> {
+    use sha2::{Digest, Sha256};
     let (mut select, mut values) = ([0u8; 3], Vec::new());
-    for p in &sorted {
+    for (p, v) in snapshot {
         *select.get_mut(*p as usize / 8)? |= 1 << (p % 8);
-        let hex = std::fs::read_to_string(format!("{TPM}/pcr-sha256/{p}")).ok()?;
-        values.extend((0..64).step_by(2).map(|i| u8::from_str_radix(hex.trim().get(i..i + 2)?, 16).ok()).collect::<Option<Vec<u8>>>()?);
+        values.extend(v);
     }
     let mut digest = Sha256::new().chain_update([0u8; 32]).chain_update(0x17Fu32.to_be_bytes()).chain_update(1u32.to_be_bytes());
     digest.update([0x00, 0x0B, 3]);
@@ -151,6 +204,11 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// The TPM2 keys that wait, which are not changes.
+    pub fn notes(&self) -> Vec<String> {
+        self.tpm.iter().filter_map(|(name, _, a)| if let Action::Wait(why) = a { Some(format!("the TPM2 key of LUKS device {name} waits: {why}")) } else { None }).collect()
+    }
+
     pub fn print(&self, l: &mut crate::generation::Lines) {
         if self.keys {
             l.push(("keys".to_string(), "create the Secure Boot keys of this host with sbctl".to_string()));
@@ -166,7 +224,7 @@ impl Plan {
                 Action::Enroll(why) => format!("enroll the TPM2 key of LUKS device {name}: {why}"),
                 Action::Wipe => format!("remove the TPM2 key of LUKS device {name}"),
                 Action::Recovery => format!("enroll a recovery key for LUKS device {name}"),
-                Action::Wait(why) => format!("note: the TPM2 key of LUKS device {name} waits: {why}"),
+                Action::Wait(_) => continue,
             }));
         }
     }
@@ -227,23 +285,25 @@ pub fn plan(g: &Generation, old: &Generation) -> Result<Plan> {
                 add(Action::Wipe);
             }
         } else {
-            let mut pcrs = l.tpm2.pcrs.clone();
-            pcrs.sort();
+            let pcrs = canonical(&l.tpm2.pcrs);
+            let snap = snapshot(&pcrs);
             let token_pcrs = |t: &serde_json::Value| -> Vec<u32> { t["tpm2-pcrs"].as_array().into_iter().flatten().filter_map(|p| p.as_u64().map(|p| p as u32)).collect() };
             let why = match tpm.as_slice() {
                 [] => Some("the device has none"),
                 [t] if token_pcrs(t) != pcrs || t["tpm2-pin"].as_bool().unwrap_or(false) != l.tpm2.pin => Some("the PCRs or the PIN changed"),
-                [t] if t["tpm2-pcr-bank"] != "sha256" || t.get("tpm2_pubkey").is_some() || t["tpm2-policy-hash"].as_str() != policy(&pcrs, l.tpm2.pin).as_deref() => Some("the values of the PCRs changed"),
+                [t] if t["tpm2-pcr-bank"] != "sha256" || t.get("tpm2_pubkey").is_some() || snap.as_ref().ok().and_then(|s| policy(s, l.tpm2.pin)).as_deref() != t["tpm2-policy-hash"].as_str() => Some("the values of the PCRs changed"),
                 [_] => None,
                 _ => Some("the device has more than one"),
             };
             // PCR 7 has its final value only in a boot that checks the signatures with the keys of the host.
             let ready = !pcrs.contains(&7) || (fw.enforced && (!sb.enable || fw.ours));
-            match why {
-                None => {}
-                Some(_) if !Path::new(TPM).exists() => add(Action::Wait("the system has no TPM2 chip".to_string())),
-                Some(_) if !ready => add(Action::Wait("the firmware does not check Secure Boot signatures with the keys of this host yet".to_string())),
-                Some(why) => add(Action::Enroll(why.to_string())),
+            // A PCR without a valid value always shows, also when the key seems current.
+            match (why, snap) {
+                (None, Ok(_)) => {}
+                (_, _) if !Path::new(TPM).exists() => add(Action::Wait("the system has no TPM2 chip".to_string())),
+                (Some(_), _) if !ready => add(Action::Wait("the firmware does not check Secure Boot signatures with the keys of this host yet".to_string())),
+                (_, Err(e)) => add(Action::Wait(e)),
+                (Some(why), Ok(_)) => add(Action::Enroll(why.to_string())),
             }
         }
         if declared && l.recovery_key && !tokens.iter().any(|t| t["type"] == "systemd-recovery") {
@@ -365,11 +425,20 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
             }
             (_, None) => report::last(needs()),
             (Action::Enroll(_), Some((passphrase, pin))) => {
+                let l = &g.m.boot.luks[name];
+                // The values that the key seals to are the values of the SHA-256 bank that pacnix checks now.
+                let snap = match snapshot(&l.tpm2.pcrs) {
+                    Ok(snap) => snap,
+                    Err(why) => {
+                        report::last(format!("pacnix: the TPM2 key of LUKS device {name} waits: {why}"));
+                        continue;
+                    }
+                };
                 let step = format!("enroll the TPM2 key of LUKS device {name}");
                 report::progress(&step);
-                let l = &g.m.boot.luks[name];
-                let pcrs: Vec<String> = l.tpm2.pcrs.iter().map(u32::to_string).collect();
-                let mut c = cmd("systemd-cryptenroll", &["--wipe-slot=tpm2", "--tpm2-device=auto", &format!("--tpm2-pcrs={}", pcrs.join("+"))]);
+                let hex = |v: &[u8; 32]| v.iter().map(|b| format!("{b:02x}")).collect::<String>();
+                let pcrs: Vec<String> = snap.iter().map(|(p, v)| format!("{p}:sha256={}", hex(v))).collect();
+                let mut c = cmd("systemd-cryptenroll", &["--wipe-slot=tpm2", &format!("--tpm2-device={TPM_DEVICE}"), &format!("--tpm2-pcrs={}", pcrs.join("+"))]);
                 c.arg(format!("--tpm2-with-pin={}", if l.tpm2.pin { "yes" } else { "no" })).arg(dev).env("PASSWORD", passphrase).env("NEWPIN", pin);
                 isolated(&step, || run_cmd(c.stdin(Stdio::null())))?;
             }
