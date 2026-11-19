@@ -15,9 +15,9 @@ echo "$out"
 grep -q '/srv/demo\|\.cache/demo' <<<"$out" && fail "the audit lists claimed paths"
 step "remove the feature and keep its data"
 scenario $h ''
-out=$(on $h "printf 'k\n' | script -qec 'pacnix apply' /dev/null" 2>&1) || { echo "$out" | tail; fail "apply with the answer k failed"; }
+out=$(on $h "printf 'k\n' | script -qec 'NO_COLOR=1 pacnix apply' /dev/null" 2>&1) || { echo "$out" | tail; fail "apply with the answer k failed"; }
 has "$out" 'Delete the data of removed feature demo: /srv/demo, /home/arch/.cache/demo.' || { echo "$out" | tail; fail "the question does not show the data of the feature"; }
-grep -qF 'Continue? [y/N] (k: continue and keep the data)' <<<"$out" || fail "the question does not offer to keep the data"
+grep -qF 'Continue? [y/N] (N stops pacnix, k continues and keeps the data)' <<<"$out" || fail "the question does not offer to keep the data"
 grep -q '^pacnix: the data of the removed features stays. pacnix audit shows it.' <<<"$out" || fail "the summary does not tell that the data stays"
 check $h 'test -e /srv/demo/index.html && test -e ~/.cache/demo/page' "the answer k deleted the data"
 out=$(pacnix $h audit) || fail "audit failed"

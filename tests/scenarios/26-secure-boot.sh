@@ -6,8 +6,10 @@
 # the boot files, also the kernel of the old entry and the declared tool. The
 # default enrolls the Microsoft keys. Without db additions, sbctl refuses the
 # keys because the firmware loads an option ROM, and the firmware stays in Setup
-# Mode; with the hashes of the TPM event log, the apply enrolls the keys and
-# the TPM2 key waits. After a reboot, the firmware checks the signatures, and the
+# Mode; the output shows the failure one time, with the next step. With the
+# hashes of the TPM event log, the apply enrolls the keys and the TPM2 key
+# waits; the recovery key shows until the user types written, and the end of
+# the input stops the apply and keeps the enrolled key. After a reboot, the firmware checks the signatures, and the
 # apply asks for the passphrase and the PIN, enrolls the TPM2 key with the PIN
 # and a recovery key. The system unlocks with the PIN. After a kernel update,
 # a systemd-boot update and new Secure Boot keys, it still boots; the new keys
@@ -69,7 +71,7 @@ reboot_with() {
 	"$vm" wait sbbox >/dev/null || fail "the system does not boot"
 }
 # Runs pacnix apply in a terminal, which types the lines of the arguments at its prompts.
-tty_apply() { printf '%s\n' "$@" | "$vm" ssh sbbox -tt 'pacnix apply 2>&1' | tr -d '\r'; }
+tty_apply() { printf '%s\n' "$@" | "$vm" ssh sbbox -tt 'NO_COLOR=1 pacnix apply 2>&1' | tr -d '\r'; }
 # Fails unless sbctl has the given number of files and each is signed.
 signed() { check sbbox "sudo sbctl list-files --json | jq -e 'length == $1 and all(.is_signed)'" "$2"; }
 secure_boot() { on sbbox 'bootctl status 2>/dev/null | sed -n "s/^ *Secure Boot: //p" | head -1'; }
@@ -93,8 +95,11 @@ rc=0
 out=$(apply sbbox) || rc=$?
 echo "$out" | tail -12
 ((rc == 4)) || fail "the exit status is $rc, not 4"
-has "$out" 'pacnix: failed step: enroll the Secure Boot keys of this host in the firmware' || fail "the summary does not show the failed enrollment"
-has "$out" 'pacnix: the firmware stays in Setup Mode. Read the message of sbctl' || fail "the summary does not tell the next step"
+once "$out" 'pacnix: error: enroll the Secure Boot keys of this host in the firmware:' || fail "the output does not show the failed enrollment one time"
+once "$out" 'Found OptionROM in the bootchain' || fail "the output does not show the message of sbctl one time"
+has "$out" 'pacnix: the firmware stays in Setup Mode. The firmware loads option ROMs. Add "tpm-eventlog" or "microsoft" to boot.loader.systemd-boot.secureBoot.dbAdditions, then run pacnix apply' || fail "the summary does not tell the next step"
+has "$out" 'pacnix: apply done, but 1 step failed.' || fail "the summary does not count the failed step"
+grep -q 'failed step' <<<"$out" && fail "the summary lists the failed step again"
 [[ $(secure_boot) == "disabled (setup)" ]] || fail "the firmware is not in Setup Mode after the refusal: $(secure_boot)"
 sb='boot.loader.systemd-boot.secureBoot = { enable = true; dbAdditions = [ "tpm-eventlog" ]; extraFiles = [ "/boot/EFI/tools/tool.efi" ]; };'
 scenario sbbox "{ $sb $luks }"
@@ -103,13 +108,25 @@ signed 6 "the boot files are not signed"
 for l in 'enroll the Secure Boot keys of this host in the firmware, with tpm-eventlog' 'note: the TPM2 key of LUKS device root waits: the firmware does not check Secure Boot signatures with the keys of this host yet'; do
 	has "$out" "$l" || { echo "$out"; fail "the plan does not show: $l"; }
 done
-# As on a real machine, the user runs the apply in a terminal: it asks for the passphrase for the recovery key.
-out=$(tty_apply pass1)
+# As on a real machine, the user runs the apply in a terminal: it asks for the passphrase for the
+# recovery key, and continues after the user types written.
+out=$(tty_apply pass1 written)
 echo "$out" | tail -8
 matches "$out" 'pacnix: the recovery key of LUKS device root: [a-z]{8}-' || fail "the apply does not show the recovery key"
 has "$out" 'pacnix: the firmware has the Secure Boot keys of this host. Reboot. If sbctl status then shows that Secure Boot is disabled, turn on Secure Boot in the firmware' || { echo "$out" | tail; fail "the summary does not tell to reboot"; }
 signed 6 "the boot files are not signed"
 check sbbox 'grep -qx "root UUID=.* none tpm2-device=auto" /etc/crypttab.initramfs' "crypttab.initramfs does not have the TPM2 option"
+check sbbox 'sudo systemd-cryptenroll /dev/vda2 | grep -q recovery' "the recovery key is not enrolled"
+
+step "the end of the input before written stops the apply, and the recovery key stays"
+on sbbox 'sudo env PASSWORD=pass1 systemd-cryptenroll --wipe-slot=recovery /dev/vda2 >/dev/null 2>&1' || fail "the removal of the recovery key by hand failed"
+rc=0
+out=$(on sbbox "printf 'pass1\n' | script -qec 'NO_COLOR=1 pacnix apply' /dev/null" 2>&1 | tr -d '\r') || rc=$?
+echo "$out" | tail -8
+matches "$out" 'pacnix: the recovery key of LUKS device root: [a-z]{8}-' || fail "the apply does not show the recovery key"
+has "$out" 'pacnix: error: the input ended before you typed written. The recovery key above is enrolled.' || fail "the apply does not stop at the end of the input"
+grep -q 'apply done' <<<"$out" && fail "the apply continued without the confirmation"
+check sbbox 'sudo systemd-cryptenroll /dev/vda2 | grep -q recovery' "the end of the input removed the recovery key"
 
 step "the firmware checks the signatures, and the apply enrolls the TPM2 key with the PIN"
 reboot_with "Please enter" pass1

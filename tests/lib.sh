@@ -54,6 +54,8 @@ packages_match() {
 # run of spaces and line breaks as one space, so that a broken line matches.
 flat() { tr -d '\r' <<<"$1" | tr -s ' \n' '  '; }
 has() { flat "$1" | grep -qF -- "$2"; }
+# Whether the output has a text exactly one time.
+once() { (($(flat "$1" | grep -oF -- "$2" | wc -l) == 1)); }
 matches() { flat "$1" | grep -qE -- "$2"; }
 # The change lines of a plan: the lines indented by two spaces under "pacnix: changes".
 changes() { awk '/^pacnix: changes/ { c = 1; next } /^pacnix:/ { c = 0 } c && /^  [^ ]/ { print substr($0, 3) }' <<<"$1"; }

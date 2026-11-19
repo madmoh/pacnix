@@ -71,7 +71,7 @@ step "mount the EFI system partition at /boot, and the apply builds the UKI with
 on ukibox 'sudo umount /efi && sudo mount --mkdir /dev/disk/by-label/ESP /boot'
 out=$(plan ukibox) || { echo "$out"; fail "plan failed"; }
 for p in /etc/mkinitcpio.d/linux.preset /etc/kernel/cmdline /boot/loader/loader.conf; do
-	matches "$out" "change file $p( \([^)]*\))? keep the original as /var/lib/pacnix/originals$p" || { echo "$out"; fail "the plan does not keep the original of $p"; }
+	has "$out" "change file $p (pacnix keeps the original" || { echo "$out"; fail "the plan does not keep the original of $p"; }
 done
 changes "$out" | grep -q '^run trigger initramfs: ' || { echo "$out"; fail "the plan does not build the initramfs"; }
 apply ukibox >/dev/null || fail "apply failed"

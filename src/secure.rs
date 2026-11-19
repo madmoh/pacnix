@@ -383,7 +383,7 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
                 })?;
                 // At once, because the summary does not show when a later step stops the apply.
                 if !key.is_empty() {
-                    show_key(name, &key)?;
+                    show_key(name, dev, &key)?;
                 }
             }
         }
@@ -393,7 +393,7 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
 
 /// Shows a recovery key in a separate block, and continues only after the user
 /// types "written". The enrollment needs the passphrase, thus stdin is a terminal.
-fn show_key(name: &str, key: &str) -> Result<()> {
+fn show_key(name: &str, dev: &str, key: &str) -> Result<()> {
     say!("pacnix: the recovery key of LUKS device {name}:");
     say!("\n    {}\n", report::item(key));
     say!("  Write down this key now and keep it away from this computer. Use it to\n  unlock the device when the TPM2 key fails. pacnix does not show it again.");
@@ -403,7 +403,8 @@ fn show_key(name: &str, key: &str) -> Result<()> {
         std::io::stdout().flush()?;
         answer.clear();
         if std::io::stdin().read_line(&mut answer)? == 0 {
-            break;
+            println!();
+            anyhow::bail!("the input ended before you typed written. The recovery key above is enrolled. If you do not have it, remove it with systemd-cryptenroll --wipe-slot=recovery {dev}, then run pacnix apply to get a new key");
         }
     }
     report::gap();

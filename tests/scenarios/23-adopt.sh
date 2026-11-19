@@ -28,9 +28,9 @@ scenario $h '{
   users.users.alice = { extraGroups = [ "team" "wheel" ]; description = "Alice"; };
 }'
 out=$(plan $h)
-for l in '/etc/fstab|of package filesystem ' /efi/loader/loader.conf /etc/sudoers.d/10-hand /etc/systemd/system/hand.service; do
+for l in '/etc/fstab| of package filesystem' /efi/loader/loader.conf /etc/sudoers.d/10-hand /etc/systemd/system/hand.service; do
 	p=${l%%|*} of=${l#*|}; [[ $l == *'|'* ]] || of=''
-	matches "$out" "change file $p( \([^)]*\))? keep the original ${of}as /var/lib/pacnix/originals$p" || { echo "$out"; fail "the plan does not keep the original of $p"; }
+	has "$out" "change file $p (pacnix keeps the original$of" || { echo "$out"; fail "the plan does not keep the original of $p"; }
 done
 out=$(apply $h) || { echo "$out" | tail -20; fail "the adoption failed"; }
 grep -qx 'pacnix: the new user alice has no password. Set it with: passwd alice' <<<"$out" || fail "the summary does not tell to set the password"

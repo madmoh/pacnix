@@ -11,7 +11,7 @@ step "desktop builds and serves the repository"
 out=$(apply desktop) || { echo "$out" | tail -30; fail "apply on desktop failed"; }
 packages_match desktop
 key=$(on desktop "sudo gpg --homedir /var/lib/pacnix/gnupg --with-colons --list-keys | awk -F: '/^fpr/ { print \$10; exit }'")
-has "$out" "pacnix: the key $key signs the local repository. A host that installs from it declares packages.serverKey = \"$key\";" || fail "apply does not show the key of the new repository"
+has "$out" "pacnix: new key of the local repository, for packages.serverKey of other hosts: $key" || fail "apply does not show the key of the new repository"
 served='curl -fsS http://localhost:8080/pacnix-local.db | bsdtar -xOf - | grep -A1 "^%NAME%" | grep -v "^%NAME%\|^--"'
 for p in downgrade perl-email-outlook-message perl-ole-storage-lite; do
 	check desktop "$served | grep -qx $p" "the repository of desktop does not serve $p"

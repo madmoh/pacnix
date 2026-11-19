@@ -38,8 +38,9 @@ has "$out" 'pacnix: error: build local package kg-b: it needs kg-a, which did no
 has "$out" 'pacnix: error: trigger kgnext: it runs after trigger kgfail, which failed' || fail "the trigger after the failed trigger did not wait"
 has "$out" 'pacnix: apply done, but 7 steps failed.' || fail "the summary does not count the failed steps"
 for s in 'build local package kg-a' 'build local package kg-b' 'remove the packages that the configuration does not declare' 'trigger kgfail' 'trigger kgnext' 'systemctl start kg-fail.service' 'activate the home configuration of arch'; do
-	has "$out" "pacnix: failed step: $s" || fail "the summary does not show: $s"
+	once "$out" "pacnix: error: $s:" || fail "the output does not show the failure of $s one time"
 done
+grep -q 'failed step' <<<"$out" && fail "the summary lists the failed steps again"
 check $h 'pacman -Q kg-c dconf' "the independent packages are not installed"
 refute $h 'pacman -Q kg-a || pacman -Q kg-b' "a package that did not build is installed"
 check $h 'pacman -Q cowsay' "the removal did not wait for the package that did not build"
@@ -84,7 +85,8 @@ echo "$out" | tail -12
 for n in 1 2 3; do
 	has "$out" "pacnix: attempt $n of 4 failed in the network: curl: (6) Could not resolve host: kg.invalid" || fail "the output does not show attempt $n"
 done
-has "$out" 'pacnix: failed step: build local package kg-d' || fail "the summary does not show the build that failed in the network"
+once "$out" 'pacnix: error: build local package kg-d:' || fail "the output does not show the build that failed in the network one time"
+has "$out" 'pacnix: apply done, but 1 step failed.' || fail "the summary does not count the failed step"
 check $h 'pacman -Q cowsay' "the other package is not installed"
 check $h 'sudo test -d /var/lib/pacnix/build/sources/kg-d' "the sources of the failed build do not stay"
 step "the sources go with the declaration"

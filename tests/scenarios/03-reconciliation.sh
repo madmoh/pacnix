@@ -2,7 +2,8 @@
 # Scenario 3: add and remove a repo package, a group and AUR packages, remove a whole
 # feature, and restore the original files after an override is dropped. A new AUR
 # dependency of a built AUR package and package removals are in the one
-# question of a run, which needs --yes without a terminal.
+# question of a run, which needs --yes without a terminal. The output of aur sync
+# does not show when the build succeeds.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 apply $h >/dev/null || fail "first apply failed"
@@ -10,7 +11,8 @@ repo='pacman -Slq --config /run/pacnix/pacman.conf pacnix-local'
 
 step "add a repo package and AUR packages, one with an AUR dependency"
 scenario $h '{ packages.repo = [ "htop" ]; packages.aur = [ "downgrade" "perl-email-outlook-message" ]; }'
-apply $h || fail "apply failed"
+out=$(apply $h) || { echo "$out"; fail "apply failed"; }
+grep -q 'packages ignored' <<<"$out" && fail "apply shows the list of aur sync"
 check $h "pacman -Q htop downgrade perl-email-outlook-message" "declared packages are missing"
 check $h "pacman -Qqd perl-ole-storage-lite" "the AUR dependency is not installed as a dependency"
 check $h "$repo | grep -qx perl-ole-storage-lite" "the AUR dependency is not in the local repository"
@@ -20,7 +22,8 @@ step "a new AUR dependency of a built AUR package needs a confirmation"
 on $h "sudo jq '.\"perl-email-outlook-message\".depends = []' /var/lib/pacnix/aur.json | sudo tee /var/lib/pacnix/aur.json.new >/dev/null && sudo mv /var/lib/pacnix/aur.json.new /var/lib/pacnix/aur.json && sudo GNUPGHOME=/var/lib/pacnix/gnupg repo-remove -s -q /var/lib/pacnix/repo/pacnix-local.db.tar.gz perl-email-outlook-message"
 out=$(pacnix $h apply 2>&1) && fail "apply built a package with a new AUR dependency without a confirmation"
 has "$out" 'The AUR package perl-email-outlook-message has new AUR dependencies: perl-ole-storage-lite.' || { echo "$out" | tail -5; fail "apply does not show the new AUR dependency"; }
-apply $h >/dev/null || fail "apply --yes failed"
+out=$(apply $h) || { echo "$out"; fail "apply --yes failed"; }
+grep -q 'packages ignored' <<<"$out" && fail "apply shows the list of aur sync"
 
 step "remove them"
 scenario $h ''
@@ -50,7 +53,7 @@ scenario $h '{ files."/etc/pacnix-zone".target = "/usr/share/zoneinfo/UTC"; }'
 apply $h >/dev/null || fail "apply failed"
 check $h 'test "$(readlink /etc/pacnix-zone)" = /usr/share/zoneinfo/UTC' "the link is not created"
 scenario $h '{ files."/etc/pacnix-zone".target = "/usr/share/zoneinfo/Europe/Berlin"; }'
-changes "$(plan $h)" | grep -qx 'change file /etc/pacnix-zone' || fail "the plan does not update the link"
+changes "$(plan $h)" | grep -qx 'change file /etc/pacnix-zone (link to /usr/share/zoneinfo/Europe/Berlin)' || fail "the plan does not update the link"
 apply $h >/dev/null || fail "apply failed"
 check $h 'test "$(readlink /etc/pacnix-zone)" = /usr/share/zoneinfo/Europe/Berlin' "the link target is not changed"
 empty_plan $h

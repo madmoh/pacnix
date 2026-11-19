@@ -2,8 +2,8 @@
 # Scenario 18: a pinned version. A repo package at an older version comes from
 # the Arch Linux Archive, pacnix apply keeps it and corrects a manual
 # upgrade, and an AUR package at a version that the AUR does not have is refused.
-# pacnix apply shows the changes of an AUR package before the build, without
-# a question. A new maintainer of a built AUR package needs a confirmation.
+# pacnix apply upgrades an AUR package without a question and without a diff
+# of its files. A new maintainer of a built AUR package needs a confirmation.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 now=$(on $h "pacman -Si tree | awk '/^Version/ { print \$3 }'")
@@ -39,8 +39,7 @@ old=$(on $h 'pacman -Q downgrade')
 on $h 'date +%s | sudo tee /var/lib/pacnix/news >/dev/null'
 scenario $h '{ packages.aur = [ "downgrade" ]; }'
 out=$(pacnix $h apply 2>&1) || { echo "$out" | tail -5; fail "the upgrade of the AUR package failed or asked"; }
-grep -qx 'pacnix: changes of the AUR package downgrade since its last build:' <<<"$out" || fail "the upgrade does not show the changes of the package"
-grep -q '^+pkgname=downgrade' <<<"$out" || { echo "$out" | tail -5; fail "the upgrade does not show the files of the package"; }
+grep -q '^+pkgname=downgrade' <<<"$out" && { echo "$out" | tail -5; fail "the upgrade shows a diff of the package"; }
 check $h "test \"\$(pacman -Q downgrade)\" != '$old'" "the AUR package is not upgraded"
 step "a new maintainer of a built AUR package needs a confirmation"
 on $h "sudo jq '.downgrade.maintainer = \"someone-else\"' /var/lib/pacnix/aur.json | sudo tee /var/lib/pacnix/aur.json.new >/dev/null && sudo mv /var/lib/pacnix/aur.json.new /var/lib/pacnix/aur.json && sudo GNUPGHOME=/var/lib/pacnix/gnupg repo-remove -s -q /var/lib/pacnix/repo/pacnix-local.db.tar.gz downgrade"

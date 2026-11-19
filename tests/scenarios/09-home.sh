@@ -10,7 +10,7 @@ on $h 'mkdir -p ~/.config/demo && echo mine >~/.config/demo/settings.conf && tou
 scenario $h '{ features.home.enable = true; }'
 step "the first activation stops before it links the files"
 out=$(plan $h)
-has "$out" 'change home file /home/arch/.config/demo/settings.conf keep the original as /home/arch/.config/demo/settings.conf.pacnix-hm-backup' || { echo "$out"; fail "the plan does not keep the original dotfile"; }
+has "$out" 'change home file /home/arch/.config/demo/settings.conf (pacnix keeps the original as .config/demo/settings.conf.pacnix-hm-backup)' || { echo "$out"; fail "the plan does not keep the original dotfile"; }
 apply $h >/dev/null && fail "the activation did not stop"
 check $h 'test "$(cat ~/.config/demo/settings.conf.pacnix-hm-backup)" = mine' "the original dotfile is not kept"
 step "activate the home configuration"

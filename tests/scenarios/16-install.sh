@@ -71,7 +71,7 @@ started+=(newbox)
 on newbox 'sudo install -d -o arch -g arch /etc/pacnix && git clone -q /srv/config.git /etc/pacnix && echo fail >/etc/pacnix/packages/slow/mode' || fail "git clone failed"
 out=$(plan newbox) || { echo "$out"; fail "plan failed"; }
 for p in /etc/fstab /boot/loader/loader.conf /etc/localtime; do
-	matches "$out" "change file $p( \([^)]*\))? keep the original (of package [^ ]+ )?as /var/lib/pacnix/originals$p" || { echo "$out"; fail "the plan does not keep the original of $p"; }
+	matches "$out" "change file $p \(pacnix keeps the original" || { echo "$out"; fail "the plan does not keep the original of $p"; }
 done
 has "$out" 'change user arch: shell /usr/bin/zsh' || { echo "$out"; fail "the plan does not change the shell"; }
 step "a build failure with \"timed out\" in its output does not stop the apply"
@@ -80,7 +80,8 @@ out=$(pacnix newbox apply 2>&1) || rc=$?
 echo "$out" | tail -8
 ((rc == 4)) || fail "the exit status of the apply with the failing build is $rc, not 4"
 matches "$out" 'pacnix: error: build local package slow: aur chroot .* failed with exit status: 255' || fail "the error does not name the build and its status"
-has "$out" 'pacnix: failed step: build local package slow' || fail "the summary does not show the failed build"
+once "$out" 'pacnix: error: build local package slow:' || fail "the output does not show the failed build one time"
+has "$out" 'pacnix: apply done, but 1 step failed.' || fail "the summary does not count the failed step"
 check newbox 'test "$(readlink /etc/localtime)" = /usr/share/zoneinfo/Europe/Berlin' "the apply with the failing build did not apply the rest of the configuration"
 grep -q '^ *error: the test build timed out while the file mode has the word fail' <<<"$out" || fail "the error does not show the reason of the failure"
 grep -q 'attempt 1 of' <<<"$out" && fail "pacnix tried a build failure again"
