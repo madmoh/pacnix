@@ -24,6 +24,22 @@ pub struct Manifest {
     pub users: Accounts,
     pub mounts: BTreeMap<String, String>,
     pub boot: BootSpec,
+    #[serde(rename = "installNotes")]
+    pub install_notes: BTreeMap<String, InstallNote>,
+}
+
+/// A manual step that apply shows at its end.
+#[derive(Deserialize, Clone)]
+pub struct InstallNote {
+    pub message: String,
+    pub check: Option<NoteCheck>,
+}
+
+/// A command that tells if the step of an install note is done.
+#[derive(Deserialize, Clone)]
+pub struct NoteCheck {
+    pub user: String,
+    pub command: Vec<String>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -489,6 +505,7 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
     };
     let p = &plan.target.m.packages;
     report::declared(p.repo.iter().chain(&p.aur).chain(p.local.keys()).cloned().collect());
+    report::install_notes(plan.target.m.install_notes.clone());
     report::planned(plan.sections().into_iter().skip(1).map(|(kind, lines)| (kind, lines.into_iter().map(|l| link(l.0)).collect())).collect());
     report::changing();
     let current = std::fs::canonicalize(PENDING).ok();

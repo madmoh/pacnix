@@ -1,6 +1,6 @@
 pkgbase=pacnix
 pkgname=(pacnix pacnix-keyring)
-pkgver=0.13.0
+pkgver=0.14.0
 pkgrel=1
 pkgdesc='Declarative, reconciling management of an Arch Linux host from a Nix flake'
 arch=(x86_64)
@@ -14,7 +14,7 @@ build() {
 }
 
 package_pacnix() {
-  depends=(aurutils base-devel curl devtools expect gcc-libs git glibc libarchive nix pacman pacnix-keyring sudo systemd util-linux)
+  depends=(aurutils base-devel coreutils curl devtools expect gcc-libs git glibc libarchive nix pacman pacnix-keyring sudo systemd util-linux)
   install -Dm755 "$srcdir/target/release/pacnix" "$pkgdir/usr/bin/pacnix"
   install -Dm644 "$startdir/LICENSE" "$pkgdir/usr/share/licenses/pacnix/LICENSE"
   install -Dm644 "$startdir/README.md" "$pkgdir/usr/share/doc/pacnix/README.md"

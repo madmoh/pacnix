@@ -96,6 +96,7 @@ let
       luks = lib.mapAttrs (name: d: { inherit (d) device recoveryKey; tpm2 = { inherit (d.tpm2) enable pcrs pin; }; }) cfg.boot.initrd.luks.devices;
     };
     claims = cfg.claims;
+    installNotes = cfg.installNotes;
     audit.ignore = lib.unique cfg.audit.ignore;
     home = lib.mapAttrs (user: hm: {
       directory = hm.config.home.homeDirectory;

@@ -119,6 +119,40 @@ static FAILED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 struct Notes {
     scriptlets: BTreeMap<String, String>,
     last: BTreeMap<String, String>,
+    /// The message of each install note without a check that showed.
+    manual: BTreeMap<String, String>,
+}
+
+/// The install notes of the configuration that this apply activates.
+static MANUAL: Mutex<Option<BTreeMap<String, crate::generation::InstallNote>>> = Mutex::new(None);
+
+pub fn install_notes(notes: BTreeMap<String, crate::generation::InstallNote>) {
+    *MANUAL.lock().unwrap() = Some(notes);
+}
+
+/// The install notes of the configuration that show: a note without a check
+/// one time for each message, and not after a failed step, because the step
+/// can be the installation that the note is about; a note with a check while
+/// the check exits with status 1, or the reason when the check gives no result.
+fn manual(saved: &mut Notes) -> Vec<(String, String)> {
+    let Some(notes) = MANUAL.lock().unwrap().take() else { return Vec::new() };
+    saved.manual.retain(|name, _| notes.get(name).is_some_and(|n| n.check.is_none()));
+    let mut show = Vec::new();
+    for (name, n) in notes {
+        match &n.check {
+            None if failed() || saved.manual.get(&name) == Some(&n.message) => {}
+            None => {
+                saved.manual.insert(name.clone(), n.message.clone());
+                show.push((name, n.message));
+            }
+            Some(c) => match crate::notes::check(c) {
+                Ok(false) => {}
+                Ok(true) => show.push((name, n.message)),
+                Err(why) => show.push((name, format!("the check gave no result: {why}"))),
+            },
+        }
+    }
+    show
 }
 
 /// Starts a run that changes the system: progress lines and a summary at the end.
@@ -612,31 +646,50 @@ pub fn summary() {
     } else if reboot_reasons().is_empty() && !reasons(STARTED.load(Relaxed)).is_empty() {
         say!("pacnix: no reboot is necessary");
     }
-    // The messages of the declared packages show; of the others, only the names.
+    // The messages of the declared packages and the install notes of the configuration show; of the other packages, only the names.
     let (mine, other): (Vec<_>, Vec<_>) = fresh.iter().partition(|(p, _)| DECLARED.lock().unwrap().contains(p));
-    if !mine.is_empty() {
-        say!("pacnix: new messages of the install scripts of declared packages (pacnix audit shows them again):");
+    let names: Vec<&String> = other.iter().map(|(p, _)| *p).collect();
+    let shown = saved.manual.clone();
+    let manual = manual(&mut saved);
+    let lines = |text: &str| text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n    ");
+    if manual.is_empty() {
+        if !mine.is_empty() {
+            say!("pacnix: new messages of the install scripts of declared packages (pacnix audit shows them again):");
+        }
+        for (pkg, note) in &mine {
+            say!("  {}: {}", item(pkg), lines(note));
+        }
+        if !names.is_empty() {
+            say!("pacnix: new messages of the install scripts of {}: run pacnix audit to read them", items(&names));
+        }
+    } else {
+        say!("pacnix: notes{}:", if fresh.is_empty() { "" } else { " (pacnix audit shows the messages of the install scripts)" });
+        for (pkg, note) in &mine {
+            say!("  package {}: {}", item(pkg), lines(note));
+        }
+        for (name, text) in &manual {
+            say!("  {}: {}", item(name), lines(text));
+        }
+        if !names.is_empty() {
+            say!("  new messages of the install scripts of {}", items(&names));
+        }
     }
-    for (pkg, note) in &mine {
-        let lines: Vec<&str> = note.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-        say!("  {}: {}", item(pkg), lines.join("\n    "));
-    }
-    if !other.is_empty() {
-        let names: Vec<&String> = other.iter().map(|(p, _)| *p).collect();
-        say!("pacnix: new messages of the install scripts of {}: run pacnix audit to read them", items(&names));
+    // After the notes show, so that a run that stops before them shows them again.
+    if !fresh.is_empty() || saved.manual != shown {
+        if !fresh.is_empty() {
+            saved.scriptlets.extend(fresh.clone());
+            saved.last = fresh;
+        }
+        let tmp = format!("{NOTES}.new");
+        if let Ok(b) = serde_json::to_vec(&saved) {
+            let _ = std::fs::write(&tmp, b).and_then(|_| std::fs::rename(&tmp, NOTES));
+        }
     }
     for f in &pacnew {
         say!("pacnix: new file {f}: merge it with {}", f.trim_end_matches(".pacnew"));
     }
     for l in LAST.lock().unwrap().iter() {
         say!("{l}");
-    }
-    if !fresh.is_empty() {
-        saved.scriptlets.extend(fresh.clone());
-        saved.last = fresh;
-        if let Ok(b) = serde_json::to_vec(&saved) {
-            let _ = std::fs::write(NOTES, b);
-        }
     }
 }
 

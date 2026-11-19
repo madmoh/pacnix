@@ -12,6 +12,7 @@ mod audit;
 mod files;
 mod generation;
 mod home;
+mod notes;
 mod packages;
 mod report;
 mod secure;
