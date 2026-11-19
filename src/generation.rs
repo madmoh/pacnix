@@ -359,10 +359,10 @@ impl Plan {
         let newer = packages::newer()?;
         // The local sync databases tell what is newer since their last refresh. Apply refreshes them.
         match newer.len() {
-            0 => say!("pacnix: system upgrade: plan uses the local sync databases; apply refreshes them first and can upgrade more"),
-            1 => say!("pacnix: system upgrade: {} is newer; apply checks for more", newer[0]),
-            2 | 3 => say!("pacnix: system upgrade: {} are newer; apply checks for more", newer.join(", ")),
-            n => say!("pacnix: system upgrade: {n} packages are newer; apply checks for more"),
+            0 => {}
+            1 => say!("pacnix: system upgrade: {} is newer", newer[0]),
+            2 | 3 => say!("pacnix: system upgrade: {} are newer", newer.join(", ")),
+            n => say!("pacnix: system upgrade: {n} packages are newer"),
         }
         let sections = self.sections();
         let lines: Vec<&(String, String)> = sections.iter().flat_map(|s| &s.1).collect();
@@ -371,9 +371,10 @@ impl Plan {
         }
         lines.iter().for_each(|l| say!("{}", report::plan_line(l)));
         self.same();
+        let upgrade = "Apply refreshes the sync databases first, thus it can also upgrade packages that this plan does not show.";
         match lines.len() {
-            0 => say!("pacnix: plan done: no change."),
-            n => say!("pacnix: plan done: {}. The system is unchanged.", crate::count(n, "change")),
+            0 => say!("pacnix: plan done: no change. {upgrade}"),
+            n => say!("pacnix: plan done: {}. The system is unchanged. {upgrade}", crate::count(n, "change")),
         }
         Ok(())
     }

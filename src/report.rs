@@ -623,7 +623,7 @@ pub fn summary() {
     }
     if !other.is_empty() {
         let names: Vec<&String> = other.iter().map(|(p, _)| *p).collect();
-        say!("pacnix: new messages of the install scripts of {}: pacnix audit shows them", items(&names));
+        say!("pacnix: new messages of the install scripts of {}: run pacnix audit to read them", items(&names));
     }
     for f in &pacnew {
         say!("pacnix: new file {f}: merge it with {}", f.trim_end_matches(".pacnew"));

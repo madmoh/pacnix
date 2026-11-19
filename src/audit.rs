@@ -112,10 +112,10 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
         say!("pacnix: {state}");
     }
     drop(_stage);
-    print(&report);
     let mut notes = Vec::new();
     crate::report::audit(&mut notes);
     notes.iter().for_each(|n| say!("pacnix: {n}"));
+    print(&report);
     Ok(())
 }
 
