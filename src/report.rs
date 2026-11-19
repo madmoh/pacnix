@@ -163,7 +163,7 @@ pub fn plan_line(l: &(String, String)) -> String {
 
 /// The width of a line without the marks of names.
 fn width(text: &str) -> usize {
-    text.chars().filter(|c| *c >= ' ').count()
+    text.chars().filter(|c| *c >= ' ' || *c == crate::BIND).count()
 }
 
 /// The kind of the last line: 0 for none, 1 for a line of pacnix, 2 for an
@@ -323,10 +323,10 @@ pub fn step(step: &str) {
     }
 }
 
-/// The declared packages that the plan installs or removes, for the last line.
+/// The declared packages, for the last line and the install messages.
 static DECLARED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// Sets the declared packages that the plan installs or removes.
+/// Sets the declared packages.
 pub fn declared(names: Vec<String>) {
     *DECLARED.lock().unwrap() = names;
 }
@@ -612,12 +612,18 @@ pub fn summary() {
     } else if reboot_reasons().is_empty() && !reasons(STARTED.load(Relaxed)).is_empty() {
         say!("pacnix: no reboot is necessary");
     }
-    if !fresh.is_empty() {
-        say!("pacnix: new messages of the install scripts of packages (pacnix audit shows them again):");
+    // The messages of the declared packages show; of the others, only the names.
+    let (mine, other): (Vec<_>, Vec<_>) = fresh.iter().partition(|(p, _)| DECLARED.lock().unwrap().contains(p));
+    if !mine.is_empty() {
+        say!("pacnix: new messages of the install scripts of declared packages (pacnix audit shows them again):");
     }
-    for (pkg, note) in &fresh {
+    for (pkg, note) in &mine {
         let lines: Vec<&str> = note.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
         say!("  {}: {}", item(pkg), lines.join("\n    "));
+    }
+    if !other.is_empty() {
+        let names: Vec<&String> = other.iter().map(|(p, _)| *p).collect();
+        say!("pacnix: new messages of the install scripts of {}: pacnix audit shows them", items(&names));
     }
     for f in &pacnew {
         say!("pacnix: new file {f}: merge it with {}", f.trim_end_matches(".pacnew"));

@@ -144,7 +144,8 @@ fn print(report: &[String]) {
     }
     say!("pacnix: apply corrects the managed files, the declared units, the boot files and the TPM2 keys. It never removes a package that it did not install. Declare each other item, add it to claims or audit.ignore, or remove it.");
     crate::report::gap();
-    say!("pacnix: audit done: {}.", crate::count(report.len(), "item"));
+    let kinds: Vec<String> = kinds.iter().map(|(kind, items)| format!("{} {kind}", items.len())).collect();
+    say!("pacnix: audit done: {}: {}.", crate::count(report.len(), "item"), kinds.join(", "));
 }
 
 /// Lists entries of ~/.config, ~/.local/share, ~/.cache and dot entries of

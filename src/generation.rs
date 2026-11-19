@@ -229,10 +229,13 @@ fn eval_error(ctx: &Ctx, lines: &[String]) -> String {
     }
     out.push_str(rest);
     // Nix names only the file of an option that does not exist: the line comes from the first line with the last part of the name.
-    let option = out.split_once("The option `").and_then(|(_, r)| r.split_once("' does not exist")).map(|(o, _)| o.rsplit('.').next().unwrap_or(o).to_string());
+    // The full name first, then its last part, for a name inside a nested set.
+    let option = out.split_once("The option `").and_then(|(_, r)| r.split_once("' does not exist")).map(|(o, _)| o.to_string());
     let file = out.split_once("- In `").and_then(|(_, r)| r.split_once('\'')).map(|(f, _)| f.to_string());
     if let (Some(option), Some(file)) = (option, file) {
-        if let Some(n) = std::fs::read_to_string(&file).ok().and_then(|t| t.lines().position(|l| l.contains(&option))) {
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        let find = |o: &str| text.lines().position(|l| l.contains(o));
+        if let Some(n) = find(&option).or_else(|| find(option.rsplit('.').next().unwrap_or(&option))) {
             out = out.replacen(&format!("- In `{file}'"), &format!("- In `{file}:{}'", n + 1), 1);
         }
     }
@@ -356,7 +359,7 @@ impl Plan {
         let newer = packages::newer()?;
         // The local sync databases tell what is newer since their last refresh. Apply refreshes them.
         match newer.len() {
-            0 => say!("pacnix: system upgrade: apply refreshes the sync databases first"),
+            0 => say!("pacnix: system upgrade: plan uses the local sync databases; apply refreshes them first and can upgrade more"),
             1 => say!("pacnix: system upgrade: {} is newer; apply checks for more", newer[0]),
             2 | 3 => say!("pacnix: system upgrade: {} are newer; apply checks for more", newer.join(", ")),
             n => say!("pacnix: system upgrade: {n} packages are newer; apply checks for more"),
@@ -483,7 +486,8 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<Plan>) -> Result<()> {
         Some(t) => format!("{p} (link to {t})"),
         None => p,
     };
-    report::declared(plan.packages.changing());
+    let p = &plan.target.m.packages;
+    report::declared(p.repo.iter().chain(&p.aur).chain(p.local.keys()).cloned().collect());
     report::planned(plan.sections().into_iter().skip(1).map(|(kind, lines)| (kind, lines.into_iter().map(|l| link(l.0)).collect())).collect());
     report::changing();
     let current = std::fs::canonicalize(PENDING).ok();

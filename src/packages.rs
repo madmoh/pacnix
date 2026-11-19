@@ -651,11 +651,6 @@ pub fn newer() -> Result<Vec<String>> {
 
 /// Whether pacnix installed the package or set it to explicitly installed.
 impl Plan {
-    /// The packages that the plan installs or removes.
-    pub fn changing(&self) -> Vec<String> {
-        [&self.install[..], &self.archive, &self.remove].concat()
-    }
-
     pub fn made(&self, name: &str) -> bool {
         self.made.contains(name)
     }
