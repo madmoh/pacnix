@@ -635,6 +635,9 @@ fn uname() -> String {
 fn suggest(name: String, sync: &BTreeSet<String>) -> String {
     let mut close: Vec<(usize, &String)> = sync.iter().map(|s| (strsim::levenshtein(&name, s), s)).filter(|(d, _)| *d <= 2).collect();
     close.sort();
+    // Only the closest names.
+    let best = close.first().map_or(0, |c| c.0);
+    close.retain(|c| c.0 == best);
     match close.len() {
         0 => format!("{name} (not in the sync databases; search with pacman -Ss, or declare an AUR package in packages.aur)"),
         _ => format!("{name} (did you mean {}?)", close.iter().take(3).map(|c| c.1.as_str()).collect::<Vec<_>>().join(", ")),

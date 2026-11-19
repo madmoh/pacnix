@@ -348,7 +348,7 @@ impl Plan {
         let newer = packages::newer()?;
         // The local sync databases tell what is newer since their last refresh. Apply refreshes them.
         match newer.len() {
-            0 => {}
+            0 => say!("pacnix: system upgrade: apply refreshes the sync databases and upgrades the packages first"),
             1 => say!("pacnix: system upgrade: {} is newer; apply checks for more", newer[0]),
             2 | 3 => say!("pacnix: system upgrade: {} are newer; apply checks for more", newer.join(", ")),
             n => say!("pacnix: system upgrade: {n} packages are newer; apply checks for more"),
@@ -361,7 +361,7 @@ impl Plan {
         lines.iter().for_each(|l| say!("{}", report::plan_line(l)));
         self.same();
         match lines.len() {
-            0 => say!("pacnix: plan done: no change. The system is unchanged."),
+            0 => say!("pacnix: plan done: no change."),
             n => say!("pacnix: plan done: {}. The system is unchanged.", crate::count(n, "change")),
         }
         Ok(())
@@ -374,13 +374,13 @@ impl Plan {
         let m = &self.target.m;
         // What the removal of the declaration does, from the records of pacnix.
         let units = |list: &Vec<String>, state: &str| {
-            let by = |u: &String| if self.units.made(u) { "by pacnix: vendor preset without its declaration" } else { "before pacnix: stays without its declaration" };
+            let by = |u: &String| if self.units.made(u) { "by pacnix; vendor preset if you remove the declaration" } else { "before pacnix; stays if you remove the declaration" };
             list.iter().map(|u| (u.clone(), format!("{u} ({state} {})", by(u)))).collect::<Vec<_>>()
         };
         let plain = |list: Vec<&String>| list.into_iter().map(|i| (i.clone(), i.clone())).collect::<Vec<_>>();
         let packages = m.packages.repo.iter().chain(&m.packages.aur).chain(m.packages.local.keys());
         let declared = [
-            ("package", packages.map(|p| (p.clone(), format!("{p} (installed {})", if self.packages.made(p) { "by pacnix: removed with its declaration" } else { "before pacnix: stays without its declaration" }))).collect()),
+            ("package", packages.map(|p| (p.clone(), format!("{p} (installed {})", if self.packages.made(p) { "by pacnix; removed if you remove the declaration" } else { "before pacnix; stays if you remove the declaration" }))).collect()),
             ("user", plain(m.users.users.keys().collect())),
             ("file", plain(m.files.keys().collect())),
             ("unit", [units(&m.units.enable, "enabled"), units(&m.units.disable, "disabled"), units(&m.units.mask, "masked")].concat()),

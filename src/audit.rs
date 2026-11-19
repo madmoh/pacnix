@@ -143,6 +143,8 @@ fn print(report: &[String]) {
         items.iter().for_each(|i| say!("    {}", i.replace('\n', "\n    ")));
     }
     say!("pacnix: apply corrects the managed files, the declared units, the boot files and the TPM2 keys. It never removes a package that it did not install. Declare each other item, add it to claims or audit.ignore, or remove it.");
+    crate::report::gap();
+    say!("pacnix: audit done: {}.", crate::count(report.len(), "item"));
 }
 
 /// Lists entries of ~/.config, ~/.local/share, ~/.cache and dot entries of

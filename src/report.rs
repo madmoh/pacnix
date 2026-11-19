@@ -371,11 +371,10 @@ pub fn close(verb: &str, ok: bool) -> i32 {
     if code == 0 || code == 4 {
         groups.extend(PLANNED.lock().unwrap().iter().filter(|(_, items)| !items.is_empty()).cloned());
     }
-    // The items show by name only when there are three or fewer in total.
-    let few = groups.iter().map(|g| g.1.len()).sum::<usize>() <= 3;
+    // The items of a kind show by name when it has three or fewer.
     let changes: Vec<String> = groups
         .iter()
-        .map(|((noun, verb), items)| match few {
+        .map(|((noun, verb), items)| match items.len() <= 3 {
             true => crate::named(noun, verb, items),
             // A count does not break between lines, and names the declared packages that it has.
             false => {
@@ -615,8 +614,12 @@ pub fn summary() {
         say!("pacnix: no reboot is necessary");
     }
     if !fresh.is_empty() {
-        let names: Vec<&String> = fresh.keys().collect();
-        say!("pacnix: new install notes of {}. Run pacnix audit to read them", items(&names));
+        say!("pacnix: new install notes (pacnix audit shows them all):");
+    }
+    for (pkg, note) in &fresh {
+        let lines: Vec<&str> = note.lines().filter(|l| !l.trim().is_empty()).collect();
+        let more = if lines.len() > 1 { format!(" (and {} more)", crate::count(lines.len() - 1, "line")) } else { String::new() };
+        say!("  {}: {}{more}", item(pkg), lines.first().map_or("", |l| l.trim()));
     }
     for f in &pacnew {
         say!("pacnix: new file {f}: merge it with {}", f.trim_end_matches(".pacnew"));
