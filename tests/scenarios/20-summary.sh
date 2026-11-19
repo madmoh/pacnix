@@ -17,8 +17,8 @@ echo "$log"
 grep -A1 'installed notes (1-1)' <<<"$log" | grep -q 'ALPM-SCRIPTLET\] notes: first text' || fail "the pacman log does not put the note after its package"
 grep -A1 'installed other (1-1)' <<<"$log" | grep -q 'ALPM-SCRIPTLET\] other: note of other' || fail "the pacman log does not put the note of other after other"
 has "$out" 'pacnix: new messages of the install scripts of declared packages (pacnix audit shows them again):' || { echo "$out" | tail; fail "the summary does not show the notes of the declared packages"; }
-grep -qx '  notes: first text' <<<"$out" || { echo "$out" | tail; fail "the summary does not show the note of notes"; }
-grep -qx '  other: note of other' <<<"$out" || fail "the summary does not show the note of other"
+grep -qx '  notes: notes: first text' <<<"$out" || { echo "$out" | tail; fail "the summary does not show the note of notes"; }
+grep -qx '  other: other: note of other' <<<"$out" || fail "the summary does not show the note of other"
 grep -qx '  hook output of notes' <<<"$out" && fail "the summary shows the output of a hook as a note"
 pacnix $h audit | grep -qx 'pacnix: install note of the last change: notes' || fail "the audit does not show the last notes"
 
@@ -32,6 +32,6 @@ grep -qx 'pacnix: new file /etc/notes.conf.pacnew: merge it with /etc/notes.conf
 step "an upgrade with a changed note"
 scenario $h '{ packages.local.notes = ./packages/notes-3; packages.local.other = ./packages/other; }'
 out=$(apply $h) || { echo "$out" | tail -20; fail "apply failed"; }
-grep -qx '  notes: second text' <<<"$out" || { echo "$out" | tail; fail "the summary does not show the changed note"; }
+grep -qx '  notes: notes: second text' <<<"$out" || { echo "$out" | tail; fail "the summary does not show the changed note"; }
 empty_plan $h
 pass

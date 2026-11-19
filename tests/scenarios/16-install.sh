@@ -13,9 +13,9 @@
 # again, applies the rest of the configuration and exits with status 4, and
 # the download stays for the next attempt. After
 # the correction, the build is silent for 65 s, then redraws a progress meter
-# for 65 s: the output shows each step, a line for the silence, a line with the
-# last state of the meter and the end, without Nix notes, other progress meter
-# redraws or escape sequences. The download goes after the build succeeds. After a reboot, the system
+# for 65 s: the output shows each step, a line for the silence and a line with
+# the last state of the meter, without the output of the build, Nix notes or
+# escape sequences. The download goes after the build succeeds. After a reboot, the system
 # boots the declared loader entry, and has the declared swap, locale, user and
 # home configuration and an empty plan.
 size=(6 4096 1)
@@ -90,9 +90,10 @@ check newbox 'sudo test -s /var/lib/pacnix/build/sources/slow/lastupdate' "the d
 step "the next apply builds the package and asks no question"
 on newbox 'echo ok >/etc/pacnix/packages/slow/mode'
 out=$(pacnix newbox apply 2>&1) || { echo "$out" | tail -30; fail "the apply after the correction failed"; }
-for l in 'pacnix: build local package 1/1: slow' 'pacnix: the step continues after 1 min without output: build local package 1/1: slow' '==> colored line' 'progress done'; do
+for l in 'pacnix: build local package 1/1: slow' 'pacnix: the step continues after 1 min without output: build local package 1/1: slow'; do
 	has "$out" "$l" || fail "the output does not show: $l"
 done
+grep -q '==> colored line\|progress done' <<<"$out" && fail "the output shows the output of a build that succeeded"
 refute newbox 'sudo test -e /var/lib/pacnix/build/sources/slow' "the download stays after the build succeeded"
 matches "$out" 'pacnix: the step continues after 2 min: build local package 1/1: slow: downloaded [0-9]+ MB' || fail "the output does not show the progress meter after 60 s of redraws"
 grep -q 'progress 10%\|not writing modified lock file\|Added input' <<<"$out" && fail "the output shows progress meter redraws or Nix notes"

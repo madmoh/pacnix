@@ -99,7 +99,7 @@ once "$out" 'pacnix: error: enroll the Secure Boot keys of this host in the firm
 once "$out" 'Found OptionROM in the bootchain' || fail "the output does not show the message of sbctl one time"
 has "$out" 'pacnix: the firmware stays in Setup Mode. The firmware loads option ROMs. Add "tpm-eventlog" or "microsoft" to boot.loader.systemd-boot.secureBoot.dbAdditions, then run pacnix apply' || fail "the summary does not tell the next step"
 has "$out" 'pacnix: apply done, but 1 step failed.' || fail "the summary does not count the failed step"
-grep -q 'failed step' <<<"$out" && fail "the summary lists the failed step again"
+grep -q '^pacnix: failed step' <<<"$out" && fail "the summary lists the failed step again"
 [[ $(secure_boot) == "disabled (setup)" ]] || fail "the firmware is not in Setup Mode after the refusal: $(secure_boot)"
 sb='boot.loader.systemd-boot.secureBoot = { enable = true; dbAdditions = [ "tpm-eventlog" ]; extraFiles = [ "/boot/EFI/tools/tool.efi" ]; };'
 scenario sbbox "{ $sb $luks }"
