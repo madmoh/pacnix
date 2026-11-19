@@ -211,6 +211,14 @@ pub fn stage(step: &str) -> Stage {
     Stage(id)
 }
 
+/// Names the step that runs, without a line: a stop then names it.
+pub fn step(step: &str) {
+    if let Some((s, start, _, _)) = RUN.lock().unwrap().as_mut() {
+        *s = step.to_string();
+        *start = Instant::now();
+    }
+}
+
 /// The number of planned changes of each kind, for the last line.
 pub fn planned(kinds: Vec<((&'static str, &'static str), Vec<String>)>) {
     *PLANNED.lock().unwrap() = kinds;

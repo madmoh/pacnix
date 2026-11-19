@@ -32,13 +32,13 @@ rc=0
 out=$(apply $h) || rc=$?
 echo "$out" | tail -30
 ((rc == 4)) || fail "the exit status is $rc, not 4"
-grep -q '^pacnix: error: build local package kg-a: aur chroot .* failed' <<<"$out" || fail "the output does not show the failed build"
+matches "$out" 'pacnix: error: build local package kg-a: aur chroot .* failed' || fail "the output does not show the failed build"
 grep -q '^ *error: the test build fails while the file mode has the word fail' <<<"$out" || fail "the output does not show the reason of the failed build"
-grep -qx 'pacnix: error: build local package kg-b: it needs kg-a, which did not build' <<<"$out" || fail "the output does not show that kg-b needs kg-a"
-grep -qx 'pacnix: error: trigger kgnext: it runs after trigger kgfail, which failed' <<<"$out" || fail "the trigger after the failed trigger did not wait"
-grep -qx 'pacnix: the apply is done, but 7 steps failed. The next apply does them again:' <<<"$out" || fail "the summary does not count the failed steps"
+has "$out" 'pacnix: error: build local package kg-b: it needs kg-a, which did not build' || fail "the output does not show that kg-b needs kg-a"
+has "$out" 'pacnix: error: trigger kgnext: it runs after trigger kgfail, which failed' || fail "the trigger after the failed trigger did not wait"
+has "$out" 'pacnix: apply done, but 7 steps failed.' || fail "the summary does not count the failed steps"
 for s in 'build local package kg-a' 'build local package kg-b' 'remove the packages that the configuration does not declare' 'trigger kgfail' 'trigger kgnext' 'systemctl start kg-fail.service' 'activate the home configuration of arch'; do
-	grep -qxF "  $s" <<<"$out" || fail "the summary does not show: $s"
+	has "$out" "pacnix: failed step: $s" || fail "the summary does not show: $s"
 done
 check $h 'pacman -Q kg-c dconf' "the independent packages are not installed"
 refute $h 'pacman -Q kg-a || pacman -Q kg-b' "a package that did not build is installed"
@@ -48,8 +48,8 @@ check $h 'systemctl is-enabled kg-fail.service' "the unit is not enabled"
 refute $h 'test -e /var/tmp/kgnext' "the trigger after the failed trigger ran"
 out=$(plan $h)
 for l in 'build local package kg-a' 'build local package kg-b' 'install package kg-a' 'remove package cowsay' 'run trigger kgfail: test -e /etc/kg-ok' 'run trigger kgnext: touch /var/tmp/kgnext' \
-	'run systemctl start kg-fail.service again (it failed at the last apply)' 'activate home configuration of arch: '; do
-	grep -qF "$l" <<<"$out" || { echo "$out"; fail "the plan does not show: $l"; }
+	'run systemctl start kg-fail.service (the last apply did not complete it)' 'activate the home configuration of arch'; do
+	has "$out" "$l" || { echo "$out"; fail "the plan does not show: $l"; }
 done
 
 step "the next apply does the failed steps again"
@@ -82,9 +82,9 @@ out=$(apply $h) || rc=$?
 echo "$out" | tail -12
 ((rc == 4)) || fail "the exit status is $rc, not 4"
 for n in 1 2 3; do
-	grep -q "^pacnix: attempt $n of 4 failed in the network: curl: (6) Could not resolve host: kg.invalid" <<<"$out" || fail "the output does not show attempt $n"
+	has "$out" "pacnix: attempt $n of 4 failed in the network: curl: (6) Could not resolve host: kg.invalid" || fail "the output does not show attempt $n"
 done
-grep -qx '  build local package kg-d' <<<"$out" || fail "the summary does not show the build that failed in the network"
+has "$out" 'pacnix: failed step: build local package kg-d' || fail "the summary does not show the build that failed in the network"
 check $h 'pacman -Q cowsay' "the other package is not installed"
 check $h 'sudo test -d /var/lib/pacnix/build/sources/kg-d' "the sources of the failed build do not stay"
 step "the sources go with the declaration"

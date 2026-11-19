@@ -18,7 +18,7 @@ step "switch the stack"
 switch='{ features.desktop = "fluxbox"; features.base = { kernel = "linux-lts"; network = "NetworkManager"; }; packages.providers.initramfs = "booster"; }'
 scenario $h "$switch"
 out=$(apply $h) && fail "apply removed the booted kernel without the override"
-grep -q 'protected packages: linux' <<<"$out" || { echo "$out" | tail; fail "wrong error for the booted kernel"; }
+has "$out" 'protected packages: linux' || { echo "$out" | tail; fail "wrong error for the booted kernel"; }
 apply $h --allow-protected-removal || fail "apply of the switch failed"
 for p in i3-wm lightdm linux mkinitcpio; do refute $h "pacman -Q $p" "$p is still installed"; done
 check $h 'pacman -Q fluxbox greetd linux-lts booster networkmanager' "the new stack is not installed"

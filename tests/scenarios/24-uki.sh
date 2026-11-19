@@ -65,16 +65,15 @@ uuid=$(on ukibox 'sudo cryptsetup luksUUID /dev/vda2')
 params="\"rd.luks.name=$uuid=root\" \"rd.luks.key=$uuid=/etc/cryptsetup-keys.d/root.key\" \"rd.luks.options=discard\""
 scenario ukibox "{ boot.kernelParams = [ $params ]; }"
 out=$(plan ukibox) && fail "the plan accepts /boot without the EFI system partition"
-grep -qxF 'pacnix: error: /boot is not a mount point, and pacnix writes files below it only on the declared vfat file system. Mount it, then run pacnix again. A change of /etc/fstab mounts it only at the next boot' <<<"$out" || { echo "$out"; fail "the refusal does not tell to mount /boot"; }
+has "$out" 'pacnix: error: /boot is not a mount point, and pacnix writes files below it only on the declared vfat file system. Mount it, then run pacnix again. A change of /etc/fstab mounts it only at the next boot' || { echo "$out"; fail "the refusal does not tell to mount /boot"; }
 
 step "mount the EFI system partition at /boot, and the apply builds the UKI with the complete command line"
 on ukibox 'sudo umount /efi && sudo mount --mkdir /dev/disk/by-label/ESP /boot'
 out=$(plan ukibox) || { echo "$out"; fail "plan failed"; }
-for l in 'write file /etc/mkinitcpio.d/linux.preset (replace the unmanaged file, keep the original)' 'write file /etc/kernel/cmdline (replace the unmanaged file, keep the original)' \
-	'write file /boot/loader/loader.conf (replace the unmanaged file, keep the original)'; do
-	grep -qxF "$l" <<<"$out" || { echo "$out"; fail "the plan does not show: $l"; }
+for p in /etc/mkinitcpio.d/linux.preset /etc/kernel/cmdline /boot/loader/loader.conf; do
+	matches "$out" "change file $p( \([^)]*\))? keep the original as /var/lib/pacnix/originals$p" || { echo "$out"; fail "the plan does not keep the original of $p"; }
 done
-grep -q '^run trigger initramfs: ' <<<"$out" || { echo "$out"; fail "the plan does not build the initramfs"; }
+changes "$out" | grep -q '^run trigger initramfs: ' || { echo "$out"; fail "the plan does not build the initramfs"; }
 apply ukibox >/dev/null || fail "apply failed"
 cmdline="root=/dev/mapper/root rw rootflags=subvol=/@ rd.luks.name=$uuid=root rd.luks.key=$uuid=/etc/cryptsetup-keys.d/root.key rd.luks.options=discard"
 uki() { on ukibox "sudo bootctl list --json=short | jq -r '.[] | select(.id == \"arch-linux.efi\") | .options'"; }

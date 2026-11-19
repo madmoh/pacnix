@@ -6,5 +6,6 @@
   features.fixtures = {
     enable = true;
     machine = "workstation";
+    exclude.exfat-utils = "it conflicts with exfatprogs, which the list also has";
   };
 }

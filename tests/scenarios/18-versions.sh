@@ -11,7 +11,8 @@ old=$(curl -fsS https://archive.archlinux.org/packages/t/tree/ | grep -o 'tree-[
 [[ -n $old ]] || fail "the archive has no older version of tree"
 step "pin tree to $old (the repository has $now)"
 scenario $h "{ packages.repo = [ \"tree\" ]; packages.versions.tree = \"$old\"; }"
-plan $h | grep -q '^install package from the Arch Linux Archive https://archive.archlinux.org/packages/t/tree/' || fail "the plan does not use the archive"
+out=$(plan $h)
+has "$out" 'install package from the Arch Linux Archive https://archive.archlinux.org/packages/t/tree/tree-' || { echo "$out"; fail "the plan does not use the archive"; }
 apply $h >/dev/null || fail "apply failed"
 check $h "test \"\$(pacman -Q tree)\" = 'tree $old'" "tree is not at the pinned version"
 empty_plan $h
@@ -27,7 +28,7 @@ empty_plan $h
 step "an AUR version that the AUR does not have"
 scenario $h '{ packages.aur = [ "downgrade" ]; packages.versions.downgrade = "0.1-1"; }'
 out=$(apply $h 2>&1) && fail "apply accepted an AUR version that does not exist"
-grep -q 'downgrade 0.1-1 (the AUR or the local repository has' <<<"$out" || { echo "$out" | tail -3; fail "the refusal does not name the version"; }
+has "$out" 'downgrade 0.1-1 (the AUR or the local repository has' || { echo "$out" | tail -3; fail "the refusal does not name the version"; }
 step "pacnix apply shows the changes of an AUR package before the build"
 # An older revision of the AUR package downgrade, built as a local package.
 on $h 'sudo git clone -q https://aur.archlinux.org/downgrade.git /etc/pacnix/old-downgrade && cd /etc/pacnix/old-downgrade && v=$(sudo git show HEAD:.SRCINFO | grep -m1 pkgver) && for c in $(sudo git rev-list HEAD -- .SRCINFO); do sudo git show $c:.SRCINFO | grep -qx "$v" || { sudo git checkout -q $c; break; }; done && sudo rm -rf .git' || fail "no older revision of downgrade"
@@ -44,8 +45,8 @@ check $h "test \"\$(pacman -Q downgrade)\" != '$old'" "the AUR package is not up
 step "a new maintainer of a built AUR package needs a confirmation"
 on $h "sudo jq '.downgrade.maintainer = \"someone-else\"' /var/lib/pacnix/aur.json | sudo tee /var/lib/pacnix/aur.json.new >/dev/null && sudo mv /var/lib/pacnix/aur.json.new /var/lib/pacnix/aur.json && sudo GNUPGHOME=/var/lib/pacnix/gnupg repo-remove -s -q /var/lib/pacnix/repo/pacnix-local.db.tar.gz downgrade"
 out=$(pacnix $h apply 2>&1) && fail "apply built a package with a new maintainer without a confirmation"
-grep -q '^The AUR package downgrade has new maintainers: .*, before: someone-else (co-maintainers: .*).$' <<<"$out" || { echo "$out" | tail -5; fail "apply does not show the new maintainer"; }
-grep -qx 'pacnix: error: these items need a confirmation. Give --yes to continue without a terminal' <<<"$out" || fail "apply without a terminal does not ask for --yes"
+matches "$out" 'The AUR package downgrade has new maintainers: .*, before: someone-else \(co-maintainers: .*\)\.' || { echo "$out" | tail -5; fail "apply does not show the new maintainer"; }
+has "$out" 'pacnix: error: these items need a confirmation. Give --yes to continue without a terminal' || fail "apply without a terminal does not ask for --yes"
 apply $h >/dev/null || fail "apply --yes failed"
 out=$(pacnix $h apply 2>&1) || { echo "$out" | tail -5; fail "apply asks again after the confirmation"; }
 pass

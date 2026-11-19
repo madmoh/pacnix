@@ -8,6 +8,6 @@ fresh $h
 s=$(date +%s)
 out=$(pacnix $h plan --host workstation) || { echo "$out" | tail; fail "plan failed"; }
 echo "plan took $(($(date +%s) - s)) s"
-grep '^unknown package' <<<"$out" && fail "the plan has unknown packages"
-echo "AUR builds: $(grep -c '^build AUR package' <<<"$out"), packages to install: $(grep -c '^install package' <<<"$out")"
+grep 'unknown package' <<<"$out" && fail "the plan has unknown packages"
+echo "AUR builds: $(changes "$out" | grep -c '^build AUR package'), packages to install: $(changes "$out" | grep -c '^install package')"
 pass

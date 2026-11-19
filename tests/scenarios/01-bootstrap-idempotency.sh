@@ -16,7 +16,7 @@ pass
 name=02-idempotency
 step "second apply changes nothing"
 out=$(apply $h) || fail "second apply failed"
-grep -qx 'No changes.' <<<"$out" || { echo "$out"; fail "second apply has changes"; }
+grep -q '^pacnix: apply done. No changes.' <<<"$out" || { echo "$out"; fail "second apply has changes"; }
 empty_plan $h
 pass
 vmlog

@@ -16,14 +16,14 @@ grep -q '/srv/demo\|\.cache/demo' <<<"$out" && fail "the audit lists claimed pat
 step "remove the feature and keep its data"
 scenario $h ''
 out=$(on $h "printf 'k\n' | script -qec 'pacnix apply' /dev/null" 2>&1) || { echo "$out" | tail; fail "apply with the answer k failed"; }
-grep -q '^Delete the data of removed feature demo: /srv/demo, /home/arch/.cache/demo\.' <<<"$out" || { echo "$out" | tail; fail "the question does not show the data of the feature"; }
+has "$out" 'Delete the data of removed feature demo: /srv/demo, /home/arch/.cache/demo.' || { echo "$out" | tail; fail "the question does not show the data of the feature"; }
 grep -qF 'Continue? [y/N] (k: continue and keep the data)' <<<"$out" || fail "the question does not offer to keep the data"
 grep -q '^pacnix: the data of the removed features stays. pacnix audit shows it.' <<<"$out" || fail "the summary does not tell that the data stays"
 check $h 'test -e /srv/demo/index.html && test -e ~/.cache/demo/page' "the answer k deleted the data"
 out=$(pacnix $h audit) || fail "audit failed"
 echo "$out"
-grep -qE '^unowned directory: /srv/demo \(claimed by feature demo in generation [0-9]+; the feature is no longer enabled\)$' <<<"$out" || fail "the audit does not list /srv/demo with its origin"
-grep -qE '^unclaimed home path: /home/arch/.cache/demo \(claimed by feature demo in generation [0-9]+; the feature is no longer enabled\)$' <<<"$out" || fail "the audit does not list ~/.cache/demo with its origin"
+matches "$out" 'unowned directory \([0-9]+\):.* /srv/demo \(claimed by feature demo in generation [0-9]+; the feature is no longer enabled\)' || fail "the audit does not list /srv/demo with its origin"
+matches "$out" 'unclaimed home path \([0-9]+\):.* /home/arch/.cache/demo \(claimed by feature demo in generation [0-9]+; the feature is no longer enabled\)' || fail "the audit does not list ~/.cache/demo with its origin"
 step "remove the feature again and delete its data"
 scenario $h "$demo"
 apply $h >/dev/null || fail "apply failed"

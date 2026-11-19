@@ -38,12 +38,12 @@ hm=$(on $h 'cd "$(readlink -f ~/.local/state/home-manager/gcroots/current-home)/
 
 step "uninstall"
 out=$(pacnix $h uninstall --yes) || { echo "$out" | tail -20; fail "uninstall failed"; }
-grep '^Remove\|^Delete' <<<"$out"
+grep '^  Remove\|^  Delete' <<<"$out"
 for p in pacnix aurutils nix devtools; do
-	grep -q "^Remove [0-9]* packages: .*\b$p\b" <<<"$out" || fail "the question does not list the removal of $p"
+	matches "$out" "Remove [0-9]+ packages: .*\b$p\b" || fail "the question does not list the removal of $p"
 done
-grep -q '^Delete the data of removed feature pacnix: /nix, /var/lib/pacnix, /var/lib/aurbuild, ' <<<"$out" || fail "the question does not list the data of pacnix"
-grep -q '^Delete the users .*\bpacnix\b.* and the groups pacnix nixbld\.$' <<<"$out" || fail "the question does not list the users and groups"
+has "$out" 'Delete the data of removed feature pacnix: /nix, /var/lib/pacnix, /var/lib/aurbuild, ' || fail "the question does not list the data of pacnix"
+matches "$out" 'Delete the users .*\bpacnix\b.* and the groups pacnix nixbld\.' || fail "the question does not list the users and groups"
 
 step "the system stays as configured"
 [[ $(contents) == "$files" ]] || fail "a declared file changed"

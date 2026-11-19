@@ -72,7 +72,9 @@ impl Plan {
         add("build local package", &self.local);
         add("drop from local repository", &self.drop);
         add("install package", &self.install);
-        add("install package from the Arch Linux Archive", &self.archive);
+        // An archive package is a URL: its item is the name of the package.
+        let name = |url: &String| url.rsplit('/').next().and_then(|f| f.rsplitn(4, '-').nth(3)).unwrap_or(url).to_string();
+        l.extend(self.archive.iter().map(|u| (name(u), format!("install package from the Arch Linux Archive {u}"))));
         l.extend(self.remove.iter().map(|p| (p.clone(), format!("remove package {p} (apply asks first)"))));
         marks.extend(self.explicit.iter().map(|p| (p.clone(), format!("{p}: installed as a dependency, set it to explicitly installed"))));
         // A package that leaves in the same run gets its reason only as a step of the removal.
@@ -1260,6 +1262,7 @@ pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
         report::progress(&format!("system upgrade: {}", crate::named("package", "to upgrade", &newer)));
         let start = report::log_end();
         download(&[&["-u"][..], &pins].concat())?;
+        report::step("system upgrade");
         transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
         let done: Vec<String> = report::changed_packages(start).into_iter().map(|(verb, names)| crate::named("package", verb, &names)).collect();
         say!("pacnix: system upgrade: {}", if done.is_empty() { "no package changed".to_string() } else { done.join(", ") });

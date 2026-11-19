@@ -21,7 +21,7 @@ empty_plan $h
 step "refuse a provider that does not provide the dependency"
 scenario $h '{ packages.repo = [ "a2jmidid" ]; packages.providers.jack = "htop"; }'
 out=$(apply $h) && fail "apply accepted a wrong provider"
-grep -q 'htop (it does not provide jack)' <<<"$out" || { echo "$out"; fail "wrong error for a wrong provider"; }
+has "$out" 'packages.providers: unknown package htop (it does not provide jack)' || { echo "$out"; fail "wrong error for a wrong provider"; }
 step "remove the packages"
 scenario $h ''
 apply $h >/dev/null || fail "apply failed"

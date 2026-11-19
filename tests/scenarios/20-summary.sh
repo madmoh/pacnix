@@ -19,7 +19,7 @@ grep -A1 'installed other (1-1)' <<<"$log" | grep -q 'ALPM-SCRIPTLET\] other: no
 grep -qx 'pacnix: install note of notes:' <<<"$out" && grep -qx '  notes: first text' <<<"$out" || { echo "$out" | tail; fail "the summary does not show the note of notes"; }
 grep -qx 'pacnix: install note of other:' <<<"$out" && grep -qx '  other: note of other' <<<"$out" || fail "the summary does not show the note of other"
 grep -qx '  hook output of notes' <<<"$out" && fail "the summary shows the output of a hook as a note"
-pacnix $h audit | grep -qx 'install note of notes from the last change:' || fail "the audit does not show the last notes"
+pacnix $h audit | grep -qx 'pacnix: install note of the last change: notes' || fail "the audit does not show the last notes"
 
 step "an upgrade with the same note and a changed backup file"
 on $h 'echo "# local change" | sudo tee -a /etc/notes.conf >/dev/null'

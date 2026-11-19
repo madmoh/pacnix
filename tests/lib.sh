@@ -50,11 +50,28 @@ packages_match() {
 	fi
 	if [[ -n $(on "$1" 'pacman -Qqdtt' || true) ]]; then fail "$1 has orphan packages"; fi
 }
+# pacnix breaks its lines before column 80. The output as one line, with each
+# run of spaces and line breaks as one space, so that a broken line matches.
+flat() { tr -d '\r' <<<"$1" | tr -s ' \n' '  '; }
+has() { flat "$1" | grep -qF -- "$2"; }
+matches() { flat "$1" | grep -qE -- "$2"; }
+# The change lines of a plan: the lines indented by two spaces under "pacnix: changes".
+changes() { awk '/^pacnix: changes/ { c = 1; next } /^pacnix:/ { c = 0 } c && /^  [^ ]/ { print substr($0, 3) }' <<<"$1"; }
+# Whether the audit output lists an item under a kind: audit_has <output> <kind> <item>.
+audit_has() {
+	awk -v k="$2" -v i="$3" '
+		function check() { if (kind == k && item == i) found = 1 }
+		/^  [^ ]/ { check(); item = ""; kind = substr($0, 3); sub(/ \([0-9]+\):$/, "", kind); next }
+		/^    [^ ]/ { check(); item = substr($0, 5); next }
+		/^      / { sub(/^ +/, ""); item = item " " $0; next }
+		{ check(); item = "" }
+		END { check(); exit !found }' <<<"$1"
+}
 # Fails unless the plan of a host is empty.
 empty_plan() {
 	local out
 	out=$(plan "$1")
-	if ! grep -qx 'No changes.' <<<"$out"; then
+	if ! grep -q '^pacnix: plan done: no change' <<<"$out"; then
 		printf '%s\n' "$out"
 		fail "the plan of $1 is not empty"
 	fi

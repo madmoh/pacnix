@@ -13,14 +13,14 @@ refused() {
 	on $h "sudo touch /var/tmp/pacnix-marker"
 	before=$(on $h "$state")
 	out=$(apply $h) && fail "apply accepted: $3"
-	grep -q "$2" <<<"$out" || { echo "$out"; fail "wrong error for $3"; }
+	has "$out" "$2" || { echo "$out"; fail "wrong error for $3"; }
 	after=$(on $h "$state")
 	[[ $before == "$after" ]] || { diff <(echo "$before") <(echo "$after"); fail "the system changed for $3"; }
 	echo "refused: $3"
 }
 step "refuse unsafe configurations"
-refused '{ packages.repo = [ "htopp" ]; }' 'unknown packages: htopp' 'a misspelled repo package'
-refused '{ packages.aur = [ "downgradee" ]; }' 'unknown packages: downgradee' 'a misspelled AUR package'
+refused '{ packages.repo = [ "htopp" ]; }' 'packages.repo: unknown package htopp' 'a misspelled repo package'
+refused '{ packages.aur = [ "downgradee" ]; }' 'packages.aur: unknown package downgradee' 'a misspelled AUR package'
 refused '{ imports = [ { files."/etc/x.conf".text = "a"; } { files."/etc/x.conf".text = "b"; } ]; }' 'conflicting definition values' 'two contents for one file'
 refused '{ units.mask = [ "sshd.service" ]; }' 'enabled and also masked or disabled' 'a unit that is enabled and masked'
 refused '{ packages.aur = [ "htop" ]; packages.repo = [ "htop" ]; }' 'more than one of repo, aur and local' 'a package in repo and aur'

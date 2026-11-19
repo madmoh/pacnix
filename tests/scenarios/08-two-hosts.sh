@@ -11,7 +11,7 @@ step "desktop builds and serves the repository"
 out=$(apply desktop) || { echo "$out" | tail -30; fail "apply on desktop failed"; }
 packages_match desktop
 key=$(on desktop "sudo gpg --homedir /var/lib/pacnix/gnupg --with-colons --list-keys | awk -F: '/^fpr/ { print \$10; exit }'")
-grep -qxF "pacnix: the key $key signs the local repository. A host that installs from it declares packages.serverKey = \"$key\";" <<<"$out" || fail "apply does not show the key of the new repository"
+has "$out" "pacnix: the key $key signs the local repository. A host that installs from it declares packages.serverKey = \"$key\";" || fail "apply does not show the key of the new repository"
 served='curl -fsS http://localhost:8080/pacnix-local.db | bsdtar -xOf - | grep -A1 "^%NAME%" | grep -v "^%NAME%\|^--"'
 for p in downgrade perl-email-outlook-message perl-ole-storage-lite; do
 	check desktop "$served | grep -qx $p" "the repository of desktop does not serve $p"
@@ -33,12 +33,12 @@ empty_plan desktop
 step "newpc joins as a new machine"
 scenario newpc '{ packages.serverKey = "0000000000000000000000000000000000000000"; }'
 out=$(apply newpc) && fail "apply on newpc with a wrong key succeeded"
-grep -q "^pacnix: error: the key in http://desktop:8080/pacnix-local.asc has the fingerprint $key, but packages.serverKey is 0000" <<<"$out" || { echo "$out" | tail; fail "the error does not show the wrong key"; }
+has "$out" "pacnix: error: the key in http://desktop:8080/pacnix-local.asc has the fingerprint $key, but packages.serverKey is 0000" || { echo "$out" | tail; fail "the error does not show the wrong key"; }
 refute newpc 'pacman -Q zsh-antidote' "newpc installed a package with a wrong key"
 scenario newpc "{ packages.serverKey = \"$key\"; }"
 on desktop 'f=$(ls /var/lib/pacnix/repo/trash-d-[0-9]*.pkg.tar.zst) && sudo cp "$f" /root/ && printf x | sudo dd of="$f" bs=1 seek=100 conv=notrunc status=none'
 out=$(apply newpc) && fail "apply on newpc with a changed package succeeded"
-grep -q 'error: failed to commit transaction (invalid or corrupted package)' <<<"$out" || { echo "$out" | tail; fail "pacman does not refuse the changed package"; }
+has "$out" 'error: failed to commit transaction (invalid or corrupted package)' || { echo "$out" | tail; fail "pacman does not refuse the changed package"; }
 refute newpc 'pacman -Q zsh-antidote' "newpc installed packages with a changed package"
 on desktop "sudo sh -c 'cp /root/trash-d-[0-9]*.pkg.tar.zst /var/lib/pacnix/repo/'"
 apply newpc || fail "apply on newpc failed"

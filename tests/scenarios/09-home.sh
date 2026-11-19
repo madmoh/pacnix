@@ -10,7 +10,7 @@ on $h 'mkdir -p ~/.config/demo && echo mine >~/.config/demo/settings.conf && tou
 scenario $h '{ features.home.enable = true; }'
 step "the first activation stops before it links the files"
 out=$(plan $h)
-grep -qxF 'replace the unmanaged home file /home/arch/.config/demo/settings.conf, keep the original' <<<"$out" || { echo "$out"; fail "the plan does not keep the original dotfile"; }
+has "$out" 'change home file /home/arch/.config/demo/settings.conf keep the original as /home/arch/.config/demo/settings.conf.pacnix-hm-backup' || { echo "$out"; fail "the plan does not keep the original dotfile"; }
 apply $h >/dev/null && fail "the activation did not stop"
 check $h 'test "$(cat ~/.config/demo/settings.conf.pacnix-hm-backup)" = mine' "the original dotfile is not kept"
 step "activate the home configuration"
@@ -27,7 +27,7 @@ step "an application replaces the dotfile, then the configuration changes"
 on $h 'f=~/.config/demo/settings.conf; rm $f && echo changed >$f'
 scenario $h '{ features.home.enable = true; home.users.arch.home.sessionVariables.PACNIX_TEST = "1"; }'
 out=$(plan $h)
-grep -qxF 'replace the changed home file /home/arch/.config/demo/settings.conf' <<<"$out" || { echo "$out"; fail "the plan does not replace the changed dotfile"; }
+has "$out" 'change home file /home/arch/.config/demo/settings.conf (it differs from the declaration)' || { echo "$out"; fail "the plan does not replace the changed dotfile"; }
 apply $h >/dev/null || fail "apply failed"
 check $h 'grep -qx "theme = dark" ~/.config/demo/settings.conf && test "$(cat ~/.config/demo/settings.conf.pacnix-hm-backup)" = mine' "the changed dotfile is not replaced, or the original changed"
 step "the editor rewrites its settings, then the configuration changes"
@@ -46,5 +46,5 @@ empty_plan $h
 step "home.packages must stay empty"
 scenario $h '{ features.home.enable = true; home.users.arch = { pkgs, ... }: { home.packages = [ pkgs.hello ]; }; }'
 out=$(plan $h) && fail "the plan accepts home.packages"
-grep -q 'home.packages must stay empty' <<<"$out" || { echo "$out"; fail "wrong error for home.packages"; }
+has "$out" 'Home Manager installs these packages from Nix: hello' || { echo "$out"; fail "wrong error for home.packages"; }
 pass

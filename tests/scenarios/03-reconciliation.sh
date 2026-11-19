@@ -6,7 +6,7 @@
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 apply $h >/dev/null || fail "first apply failed"
-repo='pacman -Slq --config /var/lib/pacnix/pacman.conf pacnix-local'
+repo='pacman -Slq --config /run/pacnix/pacman.conf pacnix-local'
 
 step "add a repo package and AUR packages, one with an AUR dependency"
 scenario $h '{ packages.repo = [ "htop" ]; packages.aur = [ "downgrade" "perl-email-outlook-message" ]; }'
@@ -19,14 +19,14 @@ packages_match $h
 step "a new AUR dependency of a built AUR package needs a confirmation"
 on $h "sudo jq '.\"perl-email-outlook-message\".depends = []' /var/lib/pacnix/aur.json | sudo tee /var/lib/pacnix/aur.json.new >/dev/null && sudo mv /var/lib/pacnix/aur.json.new /var/lib/pacnix/aur.json && sudo GNUPGHOME=/var/lib/pacnix/gnupg repo-remove -s -q /var/lib/pacnix/repo/pacnix-local.db.tar.gz perl-email-outlook-message"
 out=$(pacnix $h apply 2>&1) && fail "apply built a package with a new AUR dependency without a confirmation"
-grep -qx 'The AUR package perl-email-outlook-message has new AUR dependencies: perl-ole-storage-lite.' <<<"$out" || { echo "$out" | tail -5; fail "apply does not show the new AUR dependency"; }
+has "$out" 'The AUR package perl-email-outlook-message has new AUR dependencies: perl-ole-storage-lite.' || { echo "$out" | tail -5; fail "apply does not show the new AUR dependency"; }
 apply $h >/dev/null || fail "apply --yes failed"
 
 step "remove them"
 scenario $h ''
 out=$(pacnix $h apply 2>&1) && fail "apply removed packages without a confirmation"
-grep -q '^Remove [0-9]* packages: .*downgrade .*htop' <<<"$out" || { echo "$out" | tail -5; fail "apply does not list the removals in the question"; }
-grep -qx 'pacnix: error: these items need a confirmation. Give --yes to continue without a terminal' <<<"$out" || fail "apply without a terminal does not ask for --yes"
+matches "$out" 'Remove [0-9]+ packages that are no longer declared and that pacnix installed, with the dependencies that only they need: .*downgrade.*htop' || { echo "$out" | tail -5; fail "apply does not list the removals in the question"; }
+has "$out" 'pacnix: error: these items need a confirmation. Give --yes to continue without a terminal' || fail "apply without a terminal does not ask for --yes"
 check $h "pacman -Q htop" "apply changed the system before the confirmation"
 apply $h || fail "apply failed"
 for p in htop downgrade perl-email-outlook-message perl-ole-storage-lite; do
@@ -40,7 +40,7 @@ scenario $h '{ packages.repo = [ "fprint" ]; }'
 apply $h >/dev/null || fail "apply failed"
 check $h "pacman -Qqe fprintd libfprint" "the members of the group are not explicitly installed"
 empty_plan $h
-pacnix $h audit | grep -q 'explicit package not declared: .*fprint' && fail "the audit does not count the members as declared"
+pacnix $h audit | grep -q '^    fprint' && fail "the audit does not count the members as declared"
 scenario $h ''
 apply $h >/dev/null || fail "apply failed"
 refute $h "pacman -Q fprintd" "a member of the removed group is still installed"
@@ -50,7 +50,7 @@ scenario $h '{ files."/etc/pacnix-zone".target = "/usr/share/zoneinfo/UTC"; }'
 apply $h >/dev/null || fail "apply failed"
 check $h 'test "$(readlink /etc/pacnix-zone)" = /usr/share/zoneinfo/UTC' "the link is not created"
 scenario $h '{ files."/etc/pacnix-zone".target = "/usr/share/zoneinfo/Europe/Berlin"; }'
-plan $h | grep -qx 'write file /etc/pacnix-zone (update)' || fail "the plan does not update the link"
+changes "$(plan $h)" | grep -qx 'change file /etc/pacnix-zone' || fail "the plan does not update the link"
 apply $h >/dev/null || fail "apply failed"
 check $h 'test "$(readlink /etc/pacnix-zone)" = /usr/share/zoneinfo/Europe/Berlin' "the link target is not changed"
 empty_plan $h

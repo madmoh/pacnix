@@ -28,9 +28,9 @@ scenario $h '{
   users.users.alice = { extraGroups = [ "team" "wheel" ]; description = "Alice"; };
 }'
 out=$(plan $h)
-for l in '/etc/fstab (override the file of package filesystem' '/efi/loader/loader.conf (replace the unmanaged file' '/etc/sudoers.d/10-hand (replace the unmanaged file' \
-	'/etc/systemd/system/hand.service (replace the unmanaged file'; do
-	grep -qxF "write file $l, keep the original)" <<<"$out" || { echo "$out"; fail "the plan does not show: write file $l, keep the original)"; }
+for l in '/etc/fstab|of package filesystem ' /efi/loader/loader.conf /etc/sudoers.d/10-hand /etc/systemd/system/hand.service; do
+	p=${l%%|*} of=${l#*|}; [[ $l == *'|'* ]] || of=''
+	matches "$out" "change file $p( \([^)]*\))? keep the original ${of}as /var/lib/pacnix/originals$p" || { echo "$out"; fail "the plan does not keep the original of $p"; }
 done
 out=$(apply $h) || { echo "$out" | tail -20; fail "the adoption failed"; }
 grep -qx 'pacnix: the new user alice has no password. Set it with: passwd alice' <<<"$out" || fail "the summary does not tell to set the password"
@@ -44,7 +44,7 @@ step "remove the declarations"
 scenario $h ''
 out=$(plan $h)
 for p in $paths; do
-	grep -qxF "restore the original of file $p" <<<"$out" || { echo "$out"; fail "the plan does not restore the original of $p"; }
+	has "$out" "restore file $p (the original from before pacnix)" || { echo "$out"; fail "the plan does not restore the original of $p"; }
 done
 apply $h >/dev/null || fail "the restore failed"
 after=$(on $h "$sum")
