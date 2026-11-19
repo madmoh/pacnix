@@ -212,7 +212,7 @@ fn paint(text: &str) -> String {
     let prefix = Style::new().bold().fg_color(Some(AnsiColor::Blue.into()));
     let red = Style::new().bold().fg_color(Some(AnsiColor::Red.into()));
     let text = text.replace('\u{2}', &bold.render().to_string()).replace('\u{3}', &bold.render_reset().to_string());
-    let red_from = ["pacnix: error: ", "pacnix: failed step: "].iter().any(|p| text.starts_with(p));
+    let red_from = text.starts_with("pacnix: error: ");
     match text.strip_prefix("pacnix: ") {
         Some(rest) if red_from => format!("{prefix}pacnix:{prefix:#} {red}{}{red:#}", rest.replace(&bold.render_reset().to_string(), &format!("{bold:#}{red}"))),
         Some(rest) => format!("{prefix}pacnix:{prefix:#} {rest}"),
@@ -297,11 +297,10 @@ impl Drop for Stage {
 /// A stage of the work that changes nothing, for example the evaluation. It
 /// shows only when it takes 2 s or more, and an interrupt names it.
 pub fn stage(step: &str) -> Stage {
-    let id = {
-        let mut s = STAGE.lock().unwrap();
-        *s += 1;
-        *s
-    };
+    // Each stage has its own number, also after an earlier stage ended.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = NEXT.fetch_add(1, Relaxed);
+    *STAGE.lock().unwrap() = id;
     if let Some((s, start, _, _)) = RUN.lock().unwrap().as_mut() {
         *s = step.to_string();
         *start = Instant::now();
@@ -381,7 +380,7 @@ pub fn close(verb: &str, ok: bool) -> i32 {
                 let declared: Vec<&String> = items.iter().filter(|i| *noun == "package" && DECLARED.lock().unwrap().contains(*i)).collect();
                 let text = format!("{} {verb}", crate::count(items.len(), noun)).trim_end().replace(' ', &crate::BIND.to_string());
                 match declared.len() {
-                    1..=3 if declared.len() < items.len() => format!("{text}: {} and {} more", self::items(&declared), items.len() - declared.len()),
+                    1..=3 if declared.len() < items.len() => format!("{text}: {} and {} {}", self::items(&declared), items.len() - declared.len(), if items.len() - declared.len() == 1 { "dependency" } else { "dependencies" }),
                     _ => text,
                 }
             }
@@ -614,21 +613,17 @@ pub fn summary() {
         say!("pacnix: no reboot is necessary");
     }
     if !fresh.is_empty() {
-        say!("pacnix: new install notes (pacnix audit shows them all):");
+        say!("pacnix: new messages of the install scripts of packages (pacnix audit shows them again):");
     }
     for (pkg, note) in &fresh {
-        let lines: Vec<&str> = note.lines().filter(|l| !l.trim().is_empty()).collect();
-        let more = if lines.len() > 1 { format!(" (and {} more)", crate::count(lines.len() - 1, "line")) } else { String::new() };
-        say!("  {}: {}{more}", item(pkg), lines.first().map_or("", |l| l.trim()));
+        let lines: Vec<&str> = note.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        say!("  {}: {}", item(pkg), lines.join("\n    "));
     }
     for f in &pacnew {
         say!("pacnix: new file {f}: merge it with {}", f.trim_end_matches(".pacnew"));
     }
     for l in LAST.lock().unwrap().iter() {
         say!("{l}");
-    }
-    for f in FAILED.lock().unwrap().iter() {
-        say!("pacnix: failed step: {f}");
     }
     if !fresh.is_empty() {
         saved.scriptlets.extend(fresh.clone());

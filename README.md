@@ -221,7 +221,7 @@ pacnix creates the keys in `/var/lib/sbctl` when they are missing, and signs sys
 Do these steps in the firmware setup. The summary of the apply tells the next step:
 
 1. Set Secure Boot to custom mode, and reset it to Setup Mode. This deletes the factory keys.
-2. Run `pacnix apply` in a terminal. It enrolls the keys of this host. With `recoveryKey`, it asks for the current passphrase of each device and shows the recovery key one time, in a separate block. Write down the recovery key, then type `written` to continue. `--yes` does not skip this step.
+2. Run `pacnix apply` in a terminal. It enrolls the keys of this host. With `recoveryKey`, it asks for the current passphrase of each device and shows the recovery key one time, in a separate block. Write down the recovery key, then type `written` to continue. `--yes` does not skip this step. When sbctl refuses the keys, the firmware stays in Setup Mode, and pacnix tells the correction from the message of sbctl: for example, add `tpm-eventlog` or `microsoft` to `dbAdditions` when the firmware loads option ROMs, or remove `tpm-eventlog` when the TPM event log has no option ROM.
 3. Reboot, and turn on Secure Boot if it is off.
 4. Run `pacnix apply` in a terminal. It asks for the current passphrase of each device and for a new PIN, then enrolls the TPM2 key.
 
@@ -310,7 +310,7 @@ A failed step that changes only one item does not stop `apply`, as with [`nix bu
 - a `systemctl` command that starts, stops, restarts, masks or unmasks a unit
 - the activation of a home configuration
 
-pacnix shows the reason of each failed step and applies the rest of the configuration. The summary shows the failed steps, and the exit status is 4. The next `apply` does the failed steps again, and `plan` shows them. A failed `systemctl` command runs again only while the configuration wants its result: for example, when you remove a unit from `units.enable`, pacnix does not start it again. A failure in the network stops a step only after the last attempt. Each other failure, for example an error in the configuration, a refused plan or a pacman transaction that fails, stops pacnix with the reason and the exit status 1.
+pacnix shows the reason of each failed step when it fails, and applies the rest of the configuration. The last line shows the number of failed steps, and the exit status is 4. The next `apply` does the failed steps again, and `plan` shows them. A failed `systemctl` command runs again only while the configuration wants its result: for example, when you remove a unit from `units.enable`, pacnix does not start it again. A failure in the network stops a step only after the last attempt. Each other failure, for example an error in the configuration, a refused plan or a pacman transaction that fails, stops pacnix with the reason and the exit status 1.
 
 pacnix refuses to remove `base`, `pacman`, `nix`, `pacnix` and the kernel that runs, unless you give `--allow-protected-removal`. Each apply keeps a generation in the Nix profile `/nix/var/nix/profiles/pacnix`.
 

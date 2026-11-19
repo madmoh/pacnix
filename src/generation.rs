@@ -244,8 +244,16 @@ fn eval_error(ctx: &Ctx, lines: &[String]) -> String {
         let full = lines.remove(i).trim_start();
         let hint = first_hint.as_deref().unwrap_or(full);
         let first = lines[0].split_once(" Definition values:").map(|(head, _)| head).unwrap_or(lines[0]);
-        let at = lines[1..].iter().filter(|l| l.trim_start().starts_with("- In `")).map(|l| l.trim_start());
-        lines = [first, hint].into_iter().chain(at).collect();
+        // Each location shows with its line of the file, not with the value of Nix.
+        let at: Vec<String> = lines[1..]
+            .iter()
+            .filter_map(|l| l.trim_start().strip_prefix("- In `")?.split_once('\'').map(|(at, _)| at.to_string()))
+            .map(|at| {
+                let source = at.rsplit_once(':').and_then(|(f, n)| std::fs::read_to_string(f).ok()?.lines().nth(n.parse::<usize>().ok()? - 1).map(|l| l.trim().to_string()));
+                format!("- in {at}{}", source.map(|s| format!(": {s}")).unwrap_or_default())
+            })
+            .collect();
+        return format!("the configuration has an error:\n  {first}\n  {hint}{}", at.iter().map(|a| format!("\n  {a}")).collect::<String>());
     }
     format!("the configuration has an error:\n  {}", lines.join("\n").replace('\n', "\n  "))
 }
@@ -348,7 +356,7 @@ impl Plan {
         let newer = packages::newer()?;
         // The local sync databases tell what is newer since their last refresh. Apply refreshes them.
         match newer.len() {
-            0 => say!("pacnix: system upgrade: apply refreshes the sync databases and upgrades the packages first"),
+            0 => say!("pacnix: system upgrade: apply refreshes the sync databases first"),
             1 => say!("pacnix: system upgrade: {} is newer; apply checks for more", newer[0]),
             2 | 3 => say!("pacnix: system upgrade: {} are newer; apply checks for more", newer.join(", ")),
             n => say!("pacnix: system upgrade: {n} packages are newer; apply checks for more"),

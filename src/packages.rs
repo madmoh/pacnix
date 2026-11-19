@@ -76,7 +76,7 @@ impl Plan {
         let name = |url: &String| url.rsplit('/').next().and_then(|f| f.rsplitn(4, '-').nth(3)).unwrap_or(url).to_string();
         l.extend(self.archive.iter().map(|u| (name(u), format!("install package from the Arch Linux Archive {u}"))));
         l.extend(self.remove.iter().map(|p| (p.clone(), format!("remove package {p} (apply asks first)"))));
-        marks.extend(self.explicit.iter().map(|p| (p.clone(), format!("mark {p} as explicitly installed (pacman installed it as a dependency)"))));
+        marks.extend(self.explicit.iter().map(|p| (p.clone(), format!("set the install reason of {p} to explicit (it is installed as a dependency)"))));
         // A package that leaves in the same run gets its reason only as a step of the removal.
         let deps = self.deps.iter().filter(|p| !self.remove.contains(p));
         marks.extend(deps.map(|p| (p.clone(), format!("{p}: set the install reason to installed as a dependency"))));

@@ -333,10 +333,19 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
             report::progress(step);
             let flags: Vec<String> = sb.db_additions.iter().map(|a| format!("--{a}")).collect();
             // sbctl refuses keys without the hashes of the option ROMs that the firmware loads, before it changes the firmware.
-            if isolated(step, || run_cmd(sbctl(&["enroll-keys"]).args(&flags)))? {
+            let mut message = String::new();
+            if isolated(step, || run_cmd(sbctl(&["enroll-keys"]).args(&flags)).inspect_err(|e| message = format!("{e:#}")))? {
                 report::last("pacnix: the firmware has the Secure Boot keys of this host. Reboot. If sbctl status then shows that Secure Boot is disabled, turn on Secure Boot in the firmware".to_string());
             } else {
-                report::last("pacnix: the firmware stays in Setup Mode. Read the message of sbctl. When it tells about option ROMs, add \"tpm-eventlog\" or \"microsoft\" to boot.loader.systemd-boot.secureBoot.dbAdditions, then run pacnix apply".to_string());
+                let option = "boot.loader.systemd-boot.secureBoot.dbAdditions";
+                let next = if message.contains("could not find any OpROM entries in the TPM eventlog") && sb.db_additions.iter().any(|a| a == "tpm-eventlog") {
+                    format!("The TPM event log has no option ROM. Remove \"tpm-eventlog\" from {option}, then run pacnix apply")
+                } else if message.contains("Found OptionROM in the bootchain") {
+                    format!("The firmware loads option ROMs. Add \"tpm-eventlog\" or \"microsoft\" to {option}, then run pacnix apply")
+                } else {
+                    "Correct the cause that sbctl tells, then run pacnix apply".to_string()
+                };
+                report::last(format!("pacnix: the firmware stays in Setup Mode. {next}"));
             }
         } else if !fw.ours {
             report::last("pacnix: Secure Boot: reset Secure Boot to Setup Mode in the firmware, then run pacnix apply. The firmware then gets the keys of this host".to_string());

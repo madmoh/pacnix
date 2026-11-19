@@ -92,7 +92,7 @@ pub fn plan(g: &Generation) -> Result<Plan> {
             } else if path.symlink_metadata().is_err() {
                 plan.lines[0].push((p.clone(), format!("create home file {p}")));
             } else if !linked {
-                let why = if kept { "it differs from the declaration" } else { "pacnix keeps the original" };
+                let why = if kept { "it differs from the declaration".to_string() } else { format!("pacnix keeps the original as {}", backup(Path::new(rel)).display()) };
                 plan.lines[1].push((p.clone(), format!("change home file {p} ({why})")));
                 plan.replace.push((p, kept));
             } else if changed {
