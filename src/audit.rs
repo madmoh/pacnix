@@ -47,7 +47,7 @@ impl Origins {
 
 pub fn audit(ctx: &Ctx) -> Result<()> {
     let g = build(ctx)?;
-    let _stage = crate::report::stage("check the system");
+    let _stage = crate::report::stage("Checking the system");
     let origins = Origins::new(&g)?;
     let mut report: Vec<String> = Vec::new();
 
@@ -109,12 +109,12 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
 
     home(&g, &origins, &mut report)?;
     if let Some(state) = crate::secure::audit(&g, &mut report)? {
-        say!("pacnix: {state}");
+        say!("• {state}");
     }
     drop(_stage);
     let mut notes = Vec::new();
     crate::report::audit(&mut notes);
-    notes.iter().for_each(|n| say!("pacnix: {n}"));
+    notes.iter().for_each(|n| say!("• {n}"));
     print(&report);
     Ok(())
 }
@@ -123,7 +123,7 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
 /// each kind, and at the end one line that tells what to do.
 fn print(report: &[String]) {
     if report.is_empty() {
-        say!("pacnix: the system agrees with the configuration.");
+        say!("• the system agrees with the configuration.");
         return;
     }
     let mut kinds: Vec<(&str, Vec<&str>)> = Vec::new();
@@ -135,17 +135,17 @@ fn print(report: &[String]) {
         }
     }
     match report.len() {
-        1 => say!("pacnix: 1 item that is not declared or that differs from the configuration"),
-        n => say!("pacnix: {n} items that are not declared or that differ from the configuration"),
+        1 => say!("• 1 item that is not declared or that differs from the configuration"),
+        n => say!("• {n} items that are not declared or that differ from the configuration"),
     }
     for (kind, items) in &kinds {
         say!("  {kind} ({}):", items.len());
         items.iter().for_each(|i| say!("    {}", i.replace('\n', "\n    ")));
     }
-    say!("pacnix: apply corrects the managed files, the declared units, the boot files and the TPM2 keys. It never removes a package that it did not install. Declare each other item, add it to claims or audit.ignore, or remove it.");
+    say!("• apply corrects the managed files, the declared units, the boot files and the TPM2 keys. It never removes a package that it did not install. Declare each other item, add it to claims or audit.ignore, or remove it.");
     crate::report::gap();
     let kinds: Vec<String> = kinds.iter().map(|(kind, items)| format!("{} {kind}", items.len())).collect();
-    say!("pacnix: audit done: {}: {}.", crate::count(report.len(), "item"), kinds.join(", "));
+    say!("• audit done: {}: {}.", crate::count(report.len(), "item"), kinds.join(", "));
 }
 
 /// Lists entries of ~/.config, ~/.local/share, ~/.cache and dot entries of
@@ -285,7 +285,7 @@ pub fn asks(data: &[(String, Vec<String>)]) -> Vec<String> {
 pub fn delete(target: &Generation, data: &[(String, Vec<String>)]) -> Result<()> {
     let keep = Keep::new(target)?;
     for (feature, paths) in data {
-        crate::report::progress(&format!("delete the data of removed feature {feature}"));
+        crate::report::progress(&format!("Deleting the data of removed feature {feature}"));
         for path in paths {
             for e in walkdir::WalkDir::new(path).follow_root_links(false).contents_first(true) {
                 let e = e?;

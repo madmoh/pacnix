@@ -717,7 +717,7 @@ fn download(args: &[&str]) -> Result<()> {
         return Ok(());
     }
     let names: Vec<&str> = files.iter().filter_map(|f| f.0.rsplitn(4, '-').nth(3)).collect();
-    let label = format!("download {}", if names.len() <= 3 { names.join(", ") } else { count(files.len(), "package") });
+    let label = format!("Downloading {}", if names.len() <= 3 { names.join(", ") } else { count(files.len(), "package") });
     let size = files.iter().map(|f| f.1).sum::<u64>() as f64;
     report::progress(&match size < 1048576.0 {
         true => format!("{label}: {:.0} KiB", (size / 1024.0).ceil()),
@@ -818,7 +818,7 @@ fn signing_key() -> Result<String> {
     let key = fingerprints(&output(gpg(&["--with-colons", "--list-secret-keys"]))?).into_iter().next().context("the signing key of the local repository has no fingerprint")?;
     if !Path::new(KEY).exists() {
         run_cmd(gpg(&["--armor", "--output", KEY, "--export", &key]))?;
-        report::last(format!("pacnix: new key of the local repository, for packages.serverKey of other hosts: {key}"));
+        report::last(format!("• new key of the local repository, for packages.serverKey of other hosts: {key}"));
     }
     Ok(key)
 }
@@ -842,7 +842,7 @@ fn trust_server(g: &Generation) -> Result<()> {
     if run_cmd(cmd("pacman-key", &["--list-keys", &key])).is_ok() {
         return Ok(());
     }
-    report::progress("trust the signing key of the server");
+    report::progress("Trusting the signing key of the server");
     let url = format!("{}/pacnix-local.asc", url.trim_end_matches('/'));
     let file = format!("/run/pacnix/server-{}.asc", std::process::id());
     std::fs::create_dir_all("/run/pacnix")?;
@@ -872,10 +872,10 @@ fn chroot(args: &[&str]) -> Command {
 fn ensure_chroot() -> Result<()> {
     let root = Path::new("/var/lib/aurbuild/x86_64/root");
     if root.join(".arch-chroot").exists() {
-        report::progress("update the clean chroot");
+        report::progress("Updating the build chroot");
         return run_cmd(chroot(&["--update"]));
     }
-    report::progress("create the clean chroot for the builds");
+    report::progress("Creating the build chroot");
     if root.exists() {
         run_cmd(cmd("rm", &["-rf", "--one-file-system"]).arg(root))?;
     }
@@ -937,7 +937,7 @@ pub fn fetch_builds(g: &Generation, plan: &Plan) -> Result<Builds> {
     aur.dedup();
     let mut queue = Vec::new();
     if !aur.is_empty() {
-        report::progress(&format!("download {} and their AUR dependencies", count(aur.len(), "AUR package")));
+        report::progress(&format!("Downloading {} and their AUR dependencies", count(aur.len(), "AUR package")));
         let fetched = fetch(as_builder(&["aur", "sync", "--no-view", "--no-build"]).args(AUR_ARGS).args(ignored(g)).args(&aur))?;
         queue.extend(fetched.into_iter().map(|d| (d, false)));
     }
@@ -1004,7 +1004,7 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<BTreeSet<String>> {
     for (i, (dir, local)) in builds.queue.iter().enumerate() {
         let name = base(dir);
         let step = format!("build {} package {name}", if *local { "local" } else { "AUR" });
-        report::progress(&format!("build {} package {}/{count}: {name}", if *local { "local" } else { "AUR" }, i + 1));
+        report::progress(&format!("Building {} package {}/{count}: {name}", if *local { "local" } else { "AUR" }, i + 1));
         let (names, version, deps) = srcinfo_file(dir);
         if let Some(d) = deps.iter().find(|d| failed.contains(*d)) {
             report::failure(&step, &format!("it needs {d}, which did not build"));
@@ -1090,12 +1090,12 @@ pub fn recover_lock() -> Result<()> {
         if running {
             bail!("pacman is running");
         }
-        esay!("pacnix: remove the stale pacman lock of an interrupted transaction");
+        esay!("• Removing the stale pacman lock of an interrupted transaction");
         std::fs::remove_file(lock)?;
     }
     for e in std::fs::read_dir("/var/lib/pacman/local")?.flatten() {
         if e.path().is_dir() && !(e.path().join("desc").exists() && e.path().join("files").exists()) {
-            esay!("pacnix: remove the incomplete database entry {}", e.path().display());
+            esay!("• Removing the incomplete database entry {}", e.path().display());
             std::fs::remove_dir_all(e.path())?;
         }
     }
@@ -1122,7 +1122,7 @@ fn transaction(args: &[&str]) -> Result<()> {
     if conflicts.is_empty() {
         return Err(failed(&c, status, &lines));
     }
-    report::progress(&format!("replace {} that no installed package owns, left by an interrupted transaction", count(conflicts.len(), "file")));
+    report::progress(&format!("Replacing {} left by an interrupted transaction", count(conflicts.len(), "file")));
     let mut c = pacman(args);
     for f in conflicts {
         c.args(["--overwrite", f]);
@@ -1179,13 +1179,13 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
     std::fs::write(MADE, serde_json::to_vec(&list)?)?;
     let targets = plan.targets(skip);
     if !targets.is_empty() {
-        report::progress(&format!("install {}: {}", count(targets.len(), "package"), report::items(&targets)));
+        report::progress(&format!("Installing {}: {}", count(targets.len(), "package"), report::items(&targets)));
         let mut args = vec!["-S", "--needed", "--noconfirm", "--ask=4", "--config", CONF];
         args.extend(targets);
         transaction(&args)?;
     }
     if !plan.archive.is_empty() {
-        report::progress(&format!("install {} from the Arch Linux Archive: {}", count(plan.archive.len(), "package"), report::items(&plan.archive)));
+        report::progress(&format!("Installing {} from the Arch Linux Archive: {}", count(plan.archive.len(), "package"), report::items(&plan.archive)));
         let mut args = vec!["-U", "--noconfirm", "--ask=4", "--config", CONF];
         args.extend(plan.archive.iter().map(String::as_str));
         // pacman downloads the files of -U first and stops before a change when a download fails.
@@ -1205,13 +1205,13 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
         run_cmd(pacman(&["-D", "--asdeps"]).args(&plan.deps))?;
     }
     if !plan.remove.is_empty() {
-        report::progress(&format!("remove {}: {}", count(plan.remove.len(), "package"), report::items(&plan.remove)));
+        report::progress(&format!("Removing {}: {}", count(plan.remove.len(), "package"), report::items(&plan.remove)));
         transaction(&[&["-Rns", "--noconfirm"][..], &plan.remove.iter().map(String::as_str).collect::<Vec<_>>()].concat())?;
     }
     let orphans = output_any(&mut pacman(&["-Qqdtt"]))?;
     let orphans: Vec<&str> = orphans.split_whitespace().filter(|n| !plan.orphans.contains(*n)).collect();
     if !orphans.is_empty() {
-        report::progress(&format!("remove {} that no declared package needs: {}", count(orphans.len(), "package"), report::items(&orphans)));
+        report::progress(&format!("Removing {} that no declared package needs: {}", count(orphans.len(), "package"), report::items(&orphans)));
         transaction(&[&["-Rns", "--noconfirm"][..], &orphans].concat())?;
     }
     save_made(plan)
@@ -1234,7 +1234,7 @@ pub fn upgrade_builds(g: &Generation) -> Result<Builds> {
     if !ignore.is_empty() {
         c.args(["--ignore", &ignore.join(",")]);
     }
-    report::progress("download the changes of the AUR packages");
+    report::progress("Downloading AUR package updates");
     let dirs = fetch(c.args(AUR_ARGS))?;
     Builds::of(dirs.into_iter().map(|d| (d, false)).collect(), &[])
 }
@@ -1255,14 +1255,14 @@ pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
     recover_lock()?;
     let pins = pinned(g);
     let pins: Vec<&str> = pins.iter().map(String::as_str).collect();
-    let stage = report::stage("system upgrade: refresh the sync databases");
+    let stage = report::stage("Refreshing package databases");
     run_cmd(pacman(&["-Sy", "--config", CONF]))?;
     drop(stage);
     let newer = newer()?;
     if newer.is_empty() && pins.is_empty() {
-        say!("pacnix: system upgrade: the packages are up to date");
+        say!("• system upgrade: the packages are up to date");
     } else {
-        report::progress(&format!("system upgrade: {}", crate::named("package", "to upgrade", &newer)));
+        report::progress(&format!("Upgrading the system: {}", crate::named("package", "to upgrade", &newer)));
         download(&[&["-u"][..], &pins].concat())?;
         report::step("system upgrade");
         transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
@@ -1302,6 +1302,6 @@ pub fn uninstall(remove: &[String]) -> Result<()> {
     if !units.is_empty() {
         run_cmd(cmd("systemctl", &["--quiet", "disable", "--now"]).args(&units))?;
     }
-    report::progress(&format!("remove {}", count(remove.len(), "package")));
+    report::progress(&format!("Removing {}", count(remove.len(), "package")));
     transaction(&[&["-Rns", "--noconfirm"][..], &remove.iter().map(String::as_str).collect::<Vec<_>>()].concat())
 }

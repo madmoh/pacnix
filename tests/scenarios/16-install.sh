@@ -57,7 +57,7 @@ sudo ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf" || fail 
 step "pacnix apply in arch-chroot refuses"
 before=$(on live 'sudo find /mnt -xdev -newer /mnt/etc/hostname 2>/dev/null | grep -v "^/mnt/\(var/log\|proc\|sys\|dev\|run\|tmp\)" | sort')
 out=$(on live 'sudo arch-chroot /mnt pacnix apply --yes 2>&1') && fail "pacnix apply ran in arch-chroot"
-has "$out" 'pacnix: error: pacnix runs only on the booted system. Boot the installed system, then run pacnix again' || { echo "$out"; fail "the refusal does not tell to boot"; }
+has "$out" '• error: pacnix runs only on the booted system. Boot the installed system, then run pacnix again' || { echo "$out"; fail "the refusal does not tell to boot"; }
 [[ $before == "$(on live 'sudo find /mnt -xdev -newer /mnt/etc/hostname 2>/dev/null | grep -v "^/mnt/\(var/log\|proc\|sys\|dev\|run\|tmp\)" | sort')" ]] || fail "the refused apply changed the system"
 # pacstrap -K starts a gpg-agent for the new keyring, which keeps /mnt busy.
 on live 'sudo gpgconf --homedir /mnt/etc/pacman.d/gnupg --kill gpg-agent && sudo umount -R /mnt && sudo systemctl poweroff' || true
@@ -71,7 +71,7 @@ started+=(newbox)
 on newbox 'sudo install -d -o arch -g arch /etc/pacnix && git clone -q /srv/config.git /etc/pacnix && echo fail >/etc/pacnix/packages/slow/mode' || fail "git clone failed"
 out=$(plan newbox) || { echo "$out"; fail "plan failed"; }
 for p in /etc/fstab /boot/loader/loader.conf /etc/localtime; do
-	matches "$out" "change file $p \(pacnix keeps the original" || { echo "$out"; fail "the plan does not keep the original of $p"; }
+	matches "$out" "Changing file $p \(pacnix keeps the original" || { echo "$out"; fail "the plan does not keep the original of $p"; }
 done
 has "$out" 'change user arch: shell /usr/bin/zsh' || { echo "$out"; fail "the plan does not change the shell"; }
 step "a build failure with \"timed out\" in its output does not stop the apply"
@@ -79,23 +79,23 @@ rc=0
 out=$(pacnix newbox apply 2>&1) || rc=$?
 echo "$out" | tail -8
 ((rc == 4)) || fail "the exit status of the apply with the failing build is $rc, not 4"
-matches "$out" 'pacnix: error: build local package slow: aur chroot .* failed with exit status: 255' || fail "the error does not name the build and its status"
-once "$out" 'pacnix: error: build local package slow:' || fail "the output does not show the failed build one time"
-has "$out" 'pacnix: apply done, but 1 step failed.' || fail "the summary does not count the failed step"
+matches "$out" '• error: build local package slow: aur chroot .* failed with exit status: 255' || fail "the error does not name the build and its status"
+once "$out" '• error: build local package slow:' || fail "the output does not show the failed build one time"
+has "$out" '• apply done, but 1 step failed.' || fail "the summary does not count the failed step"
 check newbox 'test "$(readlink /etc/localtime)" = /usr/share/zoneinfo/Europe/Berlin' "the apply with the failing build did not apply the rest of the configuration"
-grep -q '^ *error: the test build timed out while the file mode has the word fail' <<<"$out" || fail "the error does not show the reason of the failure"
+grep -q '^  | error: the test build timed out while the file mode has the word fail' <<<"$out" || fail "the error does not show the reason of the failure"
 grep -q 'attempt 1 of' <<<"$out" && fail "pacnix tried a build failure again"
 grep -q 'aurutils' <<<"$out" && fail "the apply builds aurutils"
 check newbox 'sudo test -s /var/lib/pacnix/build/sources/slow/lastupdate' "the download of the failed build does not stay for the next attempt"
 step "the next apply builds the package and asks no question"
 on newbox 'echo ok >/etc/pacnix/packages/slow/mode'
 out=$(pacnix newbox apply 2>&1) || { echo "$out" | tail -30; fail "the apply after the correction failed"; }
-for l in 'pacnix: build local package 1/1: slow' 'pacnix: the step continues after 1 min without output: build local package 1/1: slow'; do
+for l in '• Building local package 1/1: slow' '• the step continues after 1 min without output: Building local package 1/1: slow'; do
 	has "$out" "$l" || fail "the output does not show: $l"
 done
 grep -q '==> colored line\|progress done' <<<"$out" && fail "the output shows the output of a build that succeeded"
 refute newbox 'sudo test -e /var/lib/pacnix/build/sources/slow' "the download stays after the build succeeded"
-matches "$out" 'pacnix: the step continues after 2 min: build local package 1/1: slow: downloaded [0-9]+ MB' || fail "the output does not show the progress meter after 60 s of redraws"
+matches "$out" '• the step continues after 2 min: Building local package 1/1: slow: downloaded [0-9]+ MB' || fail "the output does not show the progress meter after 60 s of redraws"
 grep -q 'progress 10%\|not writing modified lock file\|Added input' <<<"$out" && fail "the output shows progress meter redraws or Nix notes"
 grep -q $'\e\|\r' <<<"$out" && fail "the output has escape sequences or carriage returns"
 check newbox 'sudo grep -q "^UUID=" /var/lib/pacnix/originals/etc/fstab && sudo grep -q "timeout 3" /var/lib/pacnix/originals/boot/loader/loader.conf' "the originals are not kept"

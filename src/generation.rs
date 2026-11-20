@@ -195,7 +195,7 @@ impl Generation {
 /// evaluates with direct access to the store, without the nix-daemon. The
 /// output of Nix shows only at an error: pacnix never writes the lock file.
 pub fn build(ctx: &Ctx) -> Result<Generation> {
-    let _stage = report::stage("evaluate the configuration");
+    let _stage = report::stage("Evaluating the configuration");
     let attr = format!("{}#pacnixConfigurations.\"{}\".generation", ctx.flake, ctx.host);
     let dir = format!("/run/pacnix/eval-{}", std::process::id());
     let result = format!("{dir}/generation");
@@ -321,7 +321,7 @@ pub struct Plan {
 
 impl Plan {
     fn compute(ctx: &Ctx, target: Generation) -> Result<Plan> {
-        let _stage = report::stage("compute the changes");
+        let _stage = report::stage("Computing the changes");
         let old = active()?.unwrap_or_default();
         let ledger: Vec<Generation> = std::iter::once(old.clone()).chain(pending()).collect();
         // Before any change, also before the upgrade: Secure Boot must keep the system bootable.
@@ -376,22 +376,22 @@ impl Plan {
         // The local sync databases tell what is newer since their last refresh. Apply refreshes them.
         match newer.len() {
             0 => {}
-            1 => say!("pacnix: system upgrade: {} is newer", newer[0]),
-            2 | 3 => say!("pacnix: system upgrade: {} are newer", newer.join(", ")),
-            n => say!("pacnix: system upgrade: {n} packages are newer"),
+            1 => say!("• system upgrade: {} is newer", newer[0]),
+            2 | 3 => say!("• system upgrade: {} are newer", newer.join(", ")),
+            n => say!("• system upgrade: {n} packages are newer"),
         }
         let sections = self.sections();
         let lines: Vec<&(String, String)> = sections.iter().flat_map(|s| &s.1).collect();
         if !lines.is_empty() {
-            say!("pacnix: changes ({}):", lines.len());
+            say!("• Planned changes ({}):", lines.len());
         }
         lines.iter().for_each(|l| say!("{}", report::plan_line(l)));
-        self.secure.notes().iter().for_each(|n| say!("pacnix: note: {n}"));
+        self.secure.notes().iter().for_each(|n| say!("• note: {n}"));
         self.same();
         let upgrade = "Apply refreshes the sync databases first, thus it can also upgrade packages that this plan does not show.";
         match lines.len() {
-            0 => say!("pacnix: plan done: no change. {upgrade}"),
-            n => say!("pacnix: plan done: {}. The system is unchanged. {upgrade}", crate::count(n, "change")),
+            0 => say!("• plan done: no change. {upgrade}"),
+            n => say!("• plan done: {}. The system is unchanged. {upgrade}", crate::count(n, "change")),
         }
         Ok(())
     }
@@ -421,7 +421,7 @@ impl Plan {
             .map(|(noun, items)| if items.len() > 3 { crate::count(items.len(), noun) } else { items.join(", ") })
             .collect();
         if !same.is_empty() {
-            say!("pacnix: already as declared: {}", same.join(", "));
+            say!("• already as declared: {}", same.join(", "));
         }
     }
 }
@@ -471,7 +471,7 @@ pub fn apply(ctx: &Ctx, offline: bool) -> Result<()> {
         plan = (built && packages::databases() == state).then_some((before, fetched));
     }
     if offline {
-        say!("pacnix: system upgrade: skipped, because of --offline");
+        say!("• system upgrade: skipped, because of --offline");
     }
     activate(ctx, target.clone(), plan)?;
     commit(&target)?;
@@ -558,7 +558,7 @@ fn keep_or_delete(target: &Generation, data: &[(String, Vec<String>)], delete: b
         return audit::delete(target, data);
     }
     if !data.is_empty() {
-        report::last("pacnix: the data of the removed features stays. pacnix audit shows it.".to_string());
+        report::last("• the data of the removed features stays. pacnix audit shows it.".to_string());
     }
     Ok(())
 }

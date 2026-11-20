@@ -23,18 +23,19 @@ impl Plan {
     /// The plan lines: activations, and created, changed, deleted and restored home files.
     pub fn print(&self, l: [&mut Lines; 5]) {
         let [activate, created, changed, deleted, restored] = l;
-        activate.extend(self.activate.iter().map(|(u, _)| (u.clone(), self.step(u))));
+        activate.extend(self.activate.iter().map(|(u, _)| (u.clone(), self.step(u, "activate"))));
         created.extend(self.lines[0].iter().cloned());
         changed.extend(self.lines[1].iter().cloned());
         deleted.extend(self.lines[2].iter().cloned());
-        restored.extend(self.originals.iter().map(|p| (p.clone(), format!("restore the original of home file {p}"))));
+        restored.extend(self.originals.iter().map(|p| (p.clone(), format!("Restoring the original of home file {p}"))));
     }
 
     /// The activation step, with the number of Home Manager support files that it creates or changes.
-    fn step(&self, user: &str) -> String {
+    fn step(&self, user: &str, verb: &str) -> String {
+        let step = format!("{verb} the home configuration of {user}");
         match self.support.get(user) {
-            Some(n) => format!("{}, with {}", step(user), crate::count(*n, "Home Manager support file")),
-            None => step(user),
+            Some(n) => format!("{step}, with {}", crate::count(*n, "Home Manager support file")),
+            None => step,
         }
     }
 }
@@ -73,7 +74,7 @@ pub fn plan(g: &Generation) -> Result<Plan> {
         if old.as_deref() == Some(out.as_str()) && !crate::report::retry(&step(user)) {
             continue;
         }
-        let _stage = crate::report::stage(&format!("build the home configuration of {user}"));
+        let _stage = crate::report::stage(&format!("Building the home configuration of {user}"));
         run_cmd(cmd("nix-store", &["--realise", &h.drv, &h.path]))?;
         let new = home_files(&out);
         let home = Path::new(&h.directory);
@@ -90,13 +91,13 @@ pub fn plan(g: &Generation) -> Result<Plan> {
                     *plan.support.entry(user.clone()).or_default() += 1;
                 }
             } else if path.symlink_metadata().is_err() {
-                plan.lines[0].push((p.clone(), format!("create home file {p}")));
+                plan.lines[0].push((p.clone(), format!("Creating home file {p}")));
             } else if !linked {
                 let why = if kept { "it differs from the declaration".to_string() } else { format!("pacnix keeps the original as {}", backup(Path::new(rel)).display()) };
-                plan.lines[1].push((p.clone(), format!("change home file {p} ({why})")));
+                plan.lines[1].push((p.clone(), format!("Changing home file {p} ({why})")));
                 plan.replace.push((p, kept));
             } else if changed {
-                plan.lines[1].push((p.clone(), format!("change home file {p}")));
+                plan.lines[1].push((p.clone(), format!("Changing home file {p}")));
             }
         }
         for rel in old.map(|o| home_files(&o)).unwrap_or_default() {
@@ -107,7 +108,7 @@ pub fn plan(g: &Generation) -> Result<Plan> {
             if backup(&path).symlink_metadata().is_ok() {
                 plan.originals.push(path.display().to_string());
             } else if path.symlink_metadata().is_ok() {
-                plan.lines[2].push((path.display().to_string(), format!("delete home file {} (the home configuration created it)", path.display())));
+                plan.lines[2].push((path.display().to_string(), format!("Deleting home file {} (the home configuration created it)", path.display())));
             }
         }
         plan.activate.push((user.clone(), out));
@@ -129,14 +130,14 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
     // An activation is an isolated step: a failure does not stop the other users and the apply.
     for (user, out) in &plan.activate {
         let h = &g.m.home[user];
-        crate::report::progress(&plan.step(user));
+        crate::report::progress(&plan.step(user, "Activating"));
         for l in plan.lines.iter().flatten().filter(|l| Path::new(&l.0).starts_with(&h.directory)) {
             say!("{}", crate::report::plan_line(l));
         }
         crate::isolated(&step(user), || activate(user, &h.directory, out, &out_path(&h.path)?))?;
     }
     if !plan.activate.is_empty() {
-        crate::report::last("pacnix: log in again to use the new home configuration".to_string());
+        crate::report::last("• log in again to use the new home configuration".to_string());
     }
     for path in &plan.originals {
         let path = Path::new(path);

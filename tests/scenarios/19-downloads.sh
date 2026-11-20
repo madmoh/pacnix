@@ -20,7 +20,7 @@ on $h 'sudo cp /etc/pacman.d/mirrorlist /var/tmp/mirrorlist && echo "Server = ht
 after_failure 'cp /var/tmp/mirrorlist /etc/pacman.d/mirrorlist'
 scenario $h '{ packages.repo = [ "cowsay" ]; }'
 out=$(apply $h) || { echo "$out" | tail -20; fail "apply failed while the mirror refused connections"; }
-matches "$out" "pacnix: attempt 1 of 4 failed in the network: error: failed retrieving file '.*127.0.0.1.*Next attempt in 10 s, with one download at a time" || { echo "$out"; fail "apply does not try the download again"; }
+matches "$out" "• attempt 1 of 4 failed in the network: error: failed retrieving file '.*127.0.0.1.*Next attempt in 10 s, with one download at a time" || { echo "$out"; fail "apply does not try the download again"; }
 check $h 'pacman -Q cowsay' "cowsay is not installed"
 check $h 'grep -qx "ParallelDownloads = 1" /run/pacnix/pacman.conf' "the next attempt does not download one file at a time"
 [[ $(on $h 'md5sum /etc/pacman.conf') == "$conf" ]] || fail "pacnix changed /etc/pacman.conf"
@@ -30,7 +30,7 @@ on $h 'echo "127.0.0.1 fastly.mirror.pkgbuild.com" | sudo tee -a /etc/hosts >/de
 after_failure 'sed -i "/fastly.mirror.pkgbuild.com/d" /etc/hosts'
 scenario $h '{ packages.repo = [ "cowsay" ]; packages.local.remote = ./packages/remote; }'
 out=$(apply $h) || { echo "$out" | tail -20; fail "apply failed while the source host did not resolve"; }
-has "$out" 'pacnix: attempt 1 of 4 failed in the network: curl: (7) Failed to connect to fastly.mirror.pkgbuild.com' || { echo "$out"; fail "apply does not try the source download again"; }
+has "$out" '• attempt 1 of 4 failed in the network: curl: (7) Failed to connect to fastly.mirror.pkgbuild.com' || { echo "$out"; fail "apply does not try the source download again"; }
 check $h 'test -s /usr/share/remote/lastupdate' "the package with the remote source is not installed"
 
 step "a mirror that stays down stops pacnix after four attempts"
@@ -39,13 +39,13 @@ scenario $h '{ packages.repo = [ "cowsay" "sl" ]; packages.local.remote = ./pack
 s=$(date +%s)
 out=$(apply $h) && fail "apply succeeded without a mirror"
 echo "stopped after $(($(date +%s) - s)) s"
-has "$out" 'pacnix: attempt 3 of 4 failed in the network' || { echo "$out" | tail; fail "apply does not try three times again"; }
-matches "$out" 'pacnix: error: pacman -S.*failed with exit status: 1. Its last output:' || fail "the error does not show the reason"
+has "$out" '• attempt 3 of 4 failed in the network' || { echo "$out" | tail; fail "apply does not try three times again"; }
+matches "$out" '• error: pacman -S.*failed with exit status: 1. Its last output:' || fail "the error does not show the reason"
 
 step "a mirror without the package of the sync databases: run pacnix apply without --offline"
 on $h 'echo "Server = https://fastly.mirror.pkgbuild.com/\$repo/os/\$arch/pacnix-missing" | sudo tee /etc/pacman.d/mirrorlist >/dev/null'
 out=$(apply $h --offline) && fail "apply succeeded without the package files"
-has "$out" 'pacnix: error: the mirror does not have a package of the sync databases, thus the databases or the mirror are old. Run pacnix apply without --offline, or use a different mirror: ' || { echo "$out" | tail; fail "the error does not tell to run pacnix apply without --offline"; }
+has "$out" '• error: the mirror does not have a package of the sync databases, thus the databases or the mirror are old. Run pacnix apply without --offline, or use a different mirror: ' || { echo "$out" | tail; fail "the error does not tell to run pacnix apply without --offline"; }
 grep -q 'attempt 1 of' <<<"$out" && fail "pacnix tried a missing file again"
 on $h 'sudo cp /var/tmp/mirrorlist /etc/pacman.d/mirrorlist'
 
@@ -53,6 +53,6 @@ step "a no-op apply downloads nothing"
 scenario $h '{ packages.repo = [ "cowsay" ]; packages.local.remote = ./packages/remote; }'
 apply $h >/dev/null || fail "apply failed"
 out=$(apply $h) || fail "no-op apply failed"
-grep -q '^pacnix: apply done. No changes.' <<<"$out" || { echo "$out"; fail "the second apply has changes"; }
-grep -q '^pacnix: download [0-9]' <<<"$out" && { echo "$out"; fail "the no-op apply downloads packages"; }
+grep -q '^• apply done. No changes.' <<<"$out" || { echo "$out"; fail "the second apply has changes"; }
+grep -q '^• Downloading [0-9]' <<<"$out" && { echo "$out"; fail "the no-op apply downloads packages"; }
 pass

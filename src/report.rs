@@ -67,8 +67,8 @@ extern "C" fn interrupt(_: libc::c_int) {
         }
     }
     let text: &[u8] = match CHANGING.load(Relaxed) {
-        false => b"\npacnix: interrupted before any change. Nothing changed. Exit status 130.\n",
-        true => b"\npacnix: stopped at once by a second interrupt. The step that ran can be incomplete. Run pacnix again to complete it. Exit status 130.\n",
+        false => "\n• interrupted before any change. Nothing changed. Exit status 130.\n".as_bytes(),
+        true => "\n• stopped at once by a second interrupt. The step that ran can be incomplete. Run pacnix again to complete it. Exit status 130.\n".as_bytes(),
     };
     unsafe {
         if TERMINAL_SAVED.load(Relaxed) {
@@ -164,7 +164,7 @@ pub fn begin() {
 
 /// Writes the step that starts to the output.
 pub fn progress(step: &str) {
-    say!("pacnix: {step}");
+    say!("• {step}");
     if let Some((s, start, _, _)) = RUN.lock().unwrap().as_mut() {
         *s = step.to_string();
         *start = Instant::now();
@@ -212,7 +212,7 @@ static BAR: Mutex<Option<indicatif::ProgressBar>> = Mutex::new(None);
 /// errors are red and the live progress line stays below the line.
 pub fn emit(text: &str, err: bool) {
     let mut prev = PREV.lock().unwrap();
-    let top = text.starts_with("pacnix: ");
+    let top = text.starts_with("• ");
     let gap = top && (*prev == 2 || (*prev == 1 && text.split('\n').next().is_some_and(|l| l.ends_with(':'))));
     *prev = if !top || text.contains('\n') { 2 } else { 1 };
     drop(prev);
@@ -246,10 +246,10 @@ fn paint(text: &str) -> String {
     let prefix = Style::new().bold().fg_color(Some(AnsiColor::Blue.into()));
     let red = Style::new().bold().fg_color(Some(AnsiColor::Red.into()));
     let text = text.replace('\u{2}', &bold.render().to_string()).replace('\u{3}', &bold.render_reset().to_string());
-    let red_from = text.starts_with("pacnix: error: ");
-    match text.strip_prefix("pacnix: ") {
-        Some(rest) if red_from => format!("{prefix}pacnix:{prefix:#} {red}{}{red:#}", rest.replace(&bold.render_reset().to_string(), &format!("{bold:#}{red}"))),
-        Some(rest) => format!("{prefix}pacnix:{prefix:#} {rest}"),
+    let red_from = text.starts_with("• error: ");
+    match text.strip_prefix("• ") {
+        Some(rest) if red_from => format!("{prefix}•{prefix:#} {red}{}{red:#}", rest.replace(&bold.render_reset().to_string(), &format!("{bold:#}{red}"))),
+        Some(rest) => format!("{prefix}•{prefix:#} {rest}"),
         None => text,
     }
 }
@@ -287,9 +287,9 @@ fn wrapped(text: &str) -> String {
         if width(line) <= 80 {
             return line.to_string();
         }
-        // A top-level line continues under the text after "pacnix: ", deeper than the items under it.
+        // Keep a continuation deeper than the items under a heading.
         let indent = line.len() - line.trim_start().len();
-        let next = if line.starts_with("pacnix: ") { 8 } else { indent + 2 };
+        let next = if line.starts_with("• ") { 4 } else { indent + 2 };
         let (mut out, mut col) = (" ".repeat(indent), indent);
         for (i, word) in line.split_whitespace().enumerate() {
             let len = width(word);
@@ -343,7 +343,7 @@ pub fn stage(step: &str) -> Stage {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(2));
         if *STAGE.lock().unwrap() == id {
-            say!("pacnix: {step}");
+            say!("• {step}");
         }
     });
     Stage(id)
@@ -396,7 +396,7 @@ pub fn close(verb: &str, ok: bool) -> i32 {
     let code = if interrupted() { 130 } else if !ok { 1 } else if failed > 0 { 4 } else { 0 };
     if !CHANGING.load(Relaxed) {
         if code != 0 {
-            say!("pacnix: {verb} stopped before any change. Exit status {code}.");
+            say!("• {verb} stopped before any change. Exit status {code}.");
         }
         return code;
     }
@@ -428,10 +428,10 @@ pub fn close(verb: &str, ok: bool) -> i32 {
     let step = RUN.lock().unwrap().as_ref().map(|r| r.0.clone()).unwrap_or_default();
     gap();
     match code {
-        0 => say!("pacnix: {verb} done. {changes} Exit status 0."),
-        4 => say!("pacnix: {verb} done, but {} failed. {changes} The next apply does the failed steps again. Exit status 4.", crate::count(failed, "step")),
+        0 => say!("• {verb} done. {changes} Exit status 0."),
+        4 => say!("• {verb} done, but {} failed. {changes} The next apply does the failed steps again. Exit status 4.", crate::count(failed, "step")),
         _ => say!(
-            "pacnix: {verb} {} at the step: {step}. The steps before it are done.{}{changes} Run pacnix {verb} again to complete it. Exit status {code}.",
+            "• {verb} {} at the step: {step}. The steps before it are done.{}{changes} Run pacnix {verb} again to complete it. Exit status {code}.",
             if code == 130 { "interrupted" } else { "stopped" },
             if changes.is_empty() { "" } else { " " }
         ),
@@ -501,9 +501,9 @@ pub fn meter() -> bool {
         bar.set_message(format!("{complete}/{}", crate::count(d.files.len(), "package")));
     } else if done != d.done {
         (d.done, d.changed) = (done, Instant::now());
-        say!("pacnix: {}: {state}", d.label);
+        say!("• {}: {state}", d.label);
     } else if d.changed.elapsed() >= Duration::from_secs(60) {
-        say!("pacnix: {}: no data arrived for {} min: {state}", d.label, d.changed.elapsed().as_secs() / 60);
+        say!("• {}: no data arrived for {} min: {state}", d.label, d.changed.elapsed().as_secs() / 60);
     }
     true
 }
@@ -541,8 +541,8 @@ pub fn passed(step: &str) -> bool {
 /// Records and shows a step that failed, so that the next apply does it again,
 /// also when this run stops later. Returns false.
 pub fn failure(step: &str, reason: &str) -> bool {
-    say!("pacnix: error: {step}: {reason}");
-    say!("pacnix: the apply continues without this step");
+    say!("• error: {step}: {reason}");
+    say!("• the apply continues without this step");
     FAILED.lock().unwrap().push(step.to_string());
     let mut steps = retries();
     if steps.insert(step.to_string()) {
@@ -596,8 +596,8 @@ pub fn heartbeat(command: &str, minutes: u64, meter: &str) {
         _ => (command.to_string(), minutes),
     };
     match meter.trim() {
-        "" => say!("pacnix: the step continues after {minutes} min without output: {step}"),
-        meter => say!("pacnix: the step continues after {minutes} min: {step}: {meter}"),
+        "" => say!("• the step continues after {minutes} min without output: {step}"),
+        meter => say!("• the step continues after {minutes} min: {step}: {meter}"),
     }
 }
 
@@ -642,9 +642,9 @@ pub fn summary() {
     let fresh: BTreeMap<String, String> = notes.into_iter().filter(|(p, n)| saved.scriptlets.get(p) != Some(n)).collect();
     let reboot: Vec<String> = reboot_reasons().into_iter().filter(|r| !before.contains(r)).collect();
     if !reboot.is_empty() {
-        say!("pacnix: reboot to use the changes: {}", reboot.join("; "));
+        say!("• reboot to use the changes: {}", reboot.join("; "));
     } else if reboot_reasons().is_empty() && !reasons(STARTED.load(Relaxed)).is_empty() {
-        say!("pacnix: no reboot is necessary");
+        say!("• no reboot is necessary");
     }
     // The messages of the declared packages and the install notes of the configuration show; of the other packages, only the names.
     let (mine, other): (Vec<_>, Vec<_>) = fresh.iter().partition(|(p, _)| DECLARED.lock().unwrap().contains(p));
@@ -654,16 +654,16 @@ pub fn summary() {
     let lines = |text: &str| text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n    ");
     if manual.is_empty() {
         if !mine.is_empty() {
-            say!("pacnix: new messages of the install scripts of declared packages (pacnix audit shows them again):");
+            say!("• new messages of the install scripts of declared packages (pacnix audit shows them again):");
         }
         for (pkg, note) in &mine {
             say!("  {}: {}", item(pkg), lines(note));
         }
         if !names.is_empty() {
-            say!("pacnix: new messages of the install scripts of {}: run pacnix audit to read them", items(&names));
+            say!("• new messages of the install scripts of {}: run pacnix audit to read them", items(&names));
         }
     } else {
-        say!("pacnix: notes{}:", if fresh.is_empty() { "" } else { " (pacnix audit shows the messages of the install scripts)" });
+        say!("• notes{}:", if fresh.is_empty() { "" } else { " (pacnix audit shows the messages of the install scripts)" });
         for (pkg, note) in &mine {
             say!("  package {}: {}", item(pkg), lines(note));
         }
@@ -686,7 +686,7 @@ pub fn summary() {
         }
     }
     for f in &pacnew {
-        say!("pacnix: new file {f}: merge it with {}", f.trim_end_matches(".pacnew"));
+        say!("• new file {f}: merge it with {}", f.trim_end_matches(".pacnew"));
     }
     for l in LAST.lock().unwrap().iter() {
         say!("{l}");

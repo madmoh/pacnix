@@ -30,10 +30,10 @@ scenario $h '{
 out=$(plan $h)
 for l in '/etc/fstab| of package filesystem' /efi/loader/loader.conf /etc/sudoers.d/10-hand /etc/systemd/system/hand.service; do
 	p=${l%%|*} of=${l#*|}; [[ $l == *'|'* ]] || of=''
-	has "$out" "change file $p (pacnix keeps the original$of" || { echo "$out"; fail "the plan does not keep the original of $p"; }
+	has "$out" "Changing file $p (pacnix keeps the original$of" || { echo "$out"; fail "the plan does not keep the original of $p"; }
 done
 out=$(apply $h) || { echo "$out" | tail -20; fail "the adoption failed"; }
-grep -qx 'pacnix: the new user alice has no password. Set it with: passwd alice' <<<"$out" || fail "the summary does not tell to set the password"
+grep -qx '• the new user alice has no password. Set it with: passwd alice' <<<"$out" || fail "the summary does not tell to set the password"
 check $h 'test "$(id -nG alice | tr " " "\n" | sort | xargs)" = "alice team wheel" && test "$(getent passwd alice | cut -d: -f5)" = Alice' "the new user is wrong"
 check $h 'grep -qx "tmpfs /mnt/hand tmpfs defaults 0 0" /etc/fstab && systemctl cat mnt-hand.mount >/dev/null' "the declared mount is not in /etc/fstab"
 check $h 'test -f /swapfile && systemctl cat swapfile.swap >/dev/null' "the swap file is not made"
@@ -44,7 +44,7 @@ step "remove the declarations"
 scenario $h ''
 out=$(plan $h)
 for p in $paths; do
-	has "$out" "restore file $p (the original from before pacnix)" || { echo "$out"; fail "the plan does not restore the original of $p"; }
+	has "$out" "Restoring file $p (the original from before pacnix)" || { echo "$out"; fail "the plan does not restore the original of $p"; }
 done
 apply $h >/dev/null || fail "the restore failed"
 after=$(on $h "$sum")

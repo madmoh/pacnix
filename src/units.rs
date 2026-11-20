@@ -233,7 +233,7 @@ fn systemctl(step: &str, args: &[&str]) -> Result<bool> {
 /// the units of the earlier generation, then starts the declared units that it
 /// enabled and stops the units that it disabled.
 pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
-    for (verb, units) in [("enable", &plan.enable), ("disable", &plan.disable), ("mask", &plan.mask), ("unmask", &plan.unmask)] {
+    for (verb, units) in [("Enabling", &plan.enable), ("Disabling", &plan.disable), ("Masking", &plan.mask), ("Unmasking", &plan.unmask)] {
         if !units.is_empty() {
             report::progress(&format!("{verb} {}: {}", crate::count(units.len(), "unit"), report::items(&units)));
         }
@@ -290,10 +290,10 @@ pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
         }
         // systemd refuses to start a socket while its service runs, for example systemd-journald-audit.socket.
         if u.ends_with(".socket") && output(cmd("systemctl", &["show", "-P", "Triggers", u]))?.split_whitespace().any(|s| cmd("systemctl", &["is-active", "--quiet", s]).status().is_ok_and(|x| x.success())) {
-            say!("pacnix: unit {u} starts at the next boot, because its service runs");
+            say!("• unit {u} starts at the next boot, because its service runs");
             continue;
         }
-        report::progress(&format!("start unit {u}"));
+        report::progress(&format!("Starting unit {u}"));
         systemctl(&format!("systemctl start {u}"), &["start", u])?;
         done.push(format!("systemctl start {u}"));
     }
@@ -303,14 +303,14 @@ pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
     }
     for u in changed_units(changed) {
         if !started.contains(&u) {
-            report::progress(&format!("restart unit {u} if it runs"));
+            report::progress(&format!("Checking whether to restart unit {u}"));
             // A unit that fails at the restart does not run, thus the next apply restarts it without the condition.
             systemctl(&format!("systemctl restart {u}"), &["try-restart", &u])?;
         }
         report::passed(&format!("systemctl try-restart {u}"));
     }
     for c in &plan.retry {
-        report::progress(&format!("run {c}"));
+        report::progress(&format!("Retrying {c}"));
         let args: Vec<&str> = c.split(' ').skip(1).collect();
         systemctl(c, &args)?;
     }

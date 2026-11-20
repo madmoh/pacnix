@@ -135,7 +135,7 @@ pub fn ask_passwords(plan: &Plan, opts: &Opts) -> Result<()> {
             if first == again && !first.is_empty() {
                 passwords.insert(name.clone(), first);
             } else {
-                say!("pacnix: The passwords are empty or not equal. Type them again.");
+                say!("• The passwords are empty or not equal. Type them again.");
             }
         }
     }
@@ -158,7 +158,7 @@ pub fn apply(plan: &Plan) -> Result<()> {
                     bail!("chpasswd failed for the user {name}");
                 }
             }
-            None => report::last(format!("pacnix: the new user {name} has no password. Set it with: passwd {name}")),
+            None => report::last(format!("• the new user {name} has no password. Set it with: passwd {name}")),
         }
     }
     for (name, args, _) in &plan.usermod {

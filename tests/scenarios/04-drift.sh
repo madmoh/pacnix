@@ -13,7 +13,7 @@ on $h 'sudo pacman -S --noconfirm tree >/dev/null && echo "net.core.somaxconn = 
 	sudo systemctl enable --now systemd-time-wait-sync.service 2>/dev/null; sudo touch /etc/stray.conf'
 out=$(plan $h)
 echo "$out"
-for l in 'change file /etc/sysctl.d/90-demo.conf (it differs from the declaration)' 'run trigger sysctl: sysctl --system >/dev/null'; do
+for l in 'Changing file /etc/sysctl.d/90-demo.conf (it differs from the declaration)' 'run trigger sysctl: sysctl --system >/dev/null'; do
 	changes "$out" | grep -qxF "$l" || fail "the plan does not show: $l"
 done
 grep -e tree -e systemd-time-wait-sync <<<"$out" && fail "the plan changes a package or a unit that the configuration does not declare"
@@ -39,7 +39,7 @@ esp() { scenario $h "{ features.demo.enable = true; packages.repo = [ \"dosfstoo
 esp 0600
 out=$(apply $h) && { echo "$out"; fail "apply wrote a file that the file system cannot keep"; }
 echo "$out" | tail -1
-has "$out" 'pacnix: error: the vfat file system on /mnt/esp cannot keep the mode 0600 and the owner root:root of /mnt/esp/loader/loader.conf: a new file gets the mode 0700' || fail "the error does not name the file system and the mode"
+has "$out" '• error: the vfat file system on /mnt/esp cannot keep the mode 0600 and the owner root:root of /mnt/esp/loader/loader.conf: a new file gets the mode 0700' || fail "the error does not name the file system and the mode"
 grep -q 'fmask=0077' <<<"$out" || fail "the error does not show the mount options"
 refute $h 'test -e /mnt/esp/loader' "apply changed the file system before the refusal"
 esp 0700

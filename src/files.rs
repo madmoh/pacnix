@@ -30,14 +30,14 @@ impl Plan {
         let [created, changed, deleted, restored] = l;
         for (p, why) in &self.write {
             match why.strip_prefix("create") {
-                Some(value) => created.push((p.clone(), format!("create file {p}{value}"))),
-                None => changed.push((p.clone(), format!("change file {p}{why}"))),
+                Some(value) => created.push((p.clone(), format!("Creating file {p}{value}"))),
+                None => changed.push((p.clone(), format!("Changing file {p}{why}"))),
             }
         }
-        deleted.extend(self.delete.iter().map(|p| (p.clone(), format!("delete file {p} (pacnix created it, no original to restore)"))));
-        deleted.extend(self.pacnew.iter().map(|p| (format!("{p}.pacnew"), format!("delete file {p}.pacnew (the declared content replaces it)"))));
-        restored.extend(self.originals.iter().map(|p| (p.clone(), format!("restore file {p} (the original from before pacnix)"))));
-        restored.extend(self.restore.iter().map(|(p, pkg)| (p.clone(), format!("restore file {p} (the file of package {pkg})"))));
+        deleted.extend(self.delete.iter().map(|p| (p.clone(), format!("Deleting file {p} (pacnix created it, no original to restore)"))));
+        deleted.extend(self.pacnew.iter().map(|p| (format!("{p}.pacnew"), format!("Deleting file {p}.pacnew (the declared content replaces it)"))));
+        restored.extend(self.originals.iter().map(|p| (p.clone(), format!("Restoring file {p} (the original from before pacnix)"))));
+        restored.extend(self.restore.iter().map(|(p, pkg)| (p.clone(), format!("Restoring file {p} (the file of package {pkg})"))));
     }
 }
 
@@ -332,7 +332,7 @@ pub fn apply(_ctx: &Ctx, g: &Generation, plan: &Plan) -> Result<Vec<String>> {
     plan.print([a, b, c, d]);
     let lines = lines.concat();
     if !lines.is_empty() {
-        report::progress(&format!("change {}:", crate::count(lines.len(), "file")));
+        report::progress(&format!("Changing {}:", crate::count(lines.len(), "file")));
     }
     lines.iter().for_each(|l| say!("{}", crate::report::plan_line(l)));
     // The triggers and unit restarts that follow the changes are recorded
@@ -417,7 +417,7 @@ pub fn run_triggers(plan: &Plan, changed: &[String]) -> Result<()> {
             crate::report::failure(&step, &format!("it runs after trigger {f}, which failed"));
             continue;
         }
-        crate::report::progress(&format!("run trigger {name}: {command}"));
+        crate::report::progress(&format!("Running trigger {name}: {command}"));
         if !crate::isolated(&step, || run_cmd(cmd("sh", &["-ec", command])))? {
             failed = Some(name);
         }

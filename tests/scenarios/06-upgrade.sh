@@ -24,8 +24,8 @@ new=$(on old 'pacman -Q linux | cut -d" " -f2')
 [[ $new != "$kernel" ]] || fail "the kernel did not change ($kernel)"
 echo "kernel $kernel -> $new"
 running=$(on old uname -r)
-has "$out" "the running kernel $running is not installed" || { grep '^pacnix: reboot' <<<"$out"; fail "the summary does not tell to reboot for the kernel"; }
-matches "$out" 'pacnix: reboot to use the changes: .*the module v4l2loopback was built for the kernel [^ ]*, which does not run' || fail "the summary does not name the DKMS module for the new kernel"
+has "$out" "the running kernel $running is not installed" || { grep '^• reboot' <<<"$out"; fail "the summary does not tell to reboot for the kernel"; }
+matches "$out" '• reboot to use the changes: .*the module v4l2loopback was built for the kernel [^ ]*, which does not run' || fail "the summary does not name the DKMS module for the new kernel"
 check old "dkms status | grep -q 'v4l2loopback.*${new%.arch*}.*installed' || dkms status | grep v4l2loopback | grep -q '$(echo $new | sed 's/\.arch/-arch/')'" "the DKMS module is not built for the new kernel"
 # The backup files did not change upstream in this period. A changed backup
 # checksum in the local database makes the reinstall of pacman act as if they did.

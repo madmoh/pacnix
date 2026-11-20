@@ -348,7 +348,7 @@ pub fn ask_secrets(g: &Generation, plan: &Plan) -> Result<()> {
             if c.wait()?.success() {
                 break p;
             }
-            say!("pacnix: The passphrase is wrong. Type it again.");
+            say!("• The passphrase is wrong. Type it again.");
         };
         let mut pin = String::new();
         while g.m.boot.luks[name].tpm2.pin && plan.tpm.iter().any(|(n, _, a)| n == name && matches!(a, Action::Enroll(_))) && pin.is_empty() {
@@ -356,7 +356,7 @@ pub fn ask_secrets(g: &Generation, plan: &Plan) -> Result<()> {
             if first == rpassword::prompt_password(format!("New TPM2 PIN of the LUKS device {name} again: "))? && !first.is_empty() {
                 pin = first;
             } else {
-                say!("pacnix: The PINs are empty or not equal. Type them again.");
+                say!("• The PINs are empty or not equal. Type them again.");
             }
         }
         secrets.insert(id, (passphrase, pin));
@@ -376,11 +376,11 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
     let sb = &g.m.boot.secure_boot;
     if sb.enable {
         if !Path::new(KEYS).join("db/db.key").exists() {
-            report::progress("create the Secure Boot keys of this host");
+            report::progress("Creating Secure Boot keys for this host");
             run_cmd(sbctl(&["create-keys"]))?;
         }
         for (path, out) in unsigned(g) {
-            report::progress(&format!("sign boot file {path}"));
+            report::progress(&format!("Signing boot file {path}"));
             let mut c = sbctl(&["sign", "--save"]);
             if path != out {
                 c.args(["--output", &out]);
@@ -391,7 +391,7 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
             save_saved(&ours)?;
         }
         for path in forgotten(g) {
-            report::progress(&format!("stop signing file {path}"));
+            report::progress(&format!("Removing {path} from the list of files to sign"));
             run_cmd(sbctl(&["remove-file", &path]))?;
             let mut ours = saved_by_pacnix();
             ours.remove(&path);
@@ -403,15 +403,15 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
         }
         let fw = firmware();
         if fw.setup && report::failed() {
-            report::last("pacnix: the Secure Boot keys wait, because a step failed. Run pacnix apply again after the correction".to_string());
+            report::last("• the Secure Boot keys wait, because a step failed. Run pacnix apply again after the correction".to_string());
         } else if fw.setup {
             let step = "enroll the Secure Boot keys of this host in the firmware";
-            report::progress(step);
+            report::progress("Enrolling Secure Boot keys in the firmware");
             let flags: Vec<String> = sb.db_additions.iter().map(|a| format!("--{a}")).collect();
             // sbctl refuses keys without the hashes of the option ROMs that the firmware loads, before it changes the firmware.
             let mut message = String::new();
             if isolated(step, || run_cmd(sbctl(&["enroll-keys"]).args(&flags)).inspect_err(|e| message = format!("{e:#}")))? {
-                report::last("pacnix: the firmware has the Secure Boot keys of this host. Reboot. If sbctl status then shows that Secure Boot is disabled, turn on Secure Boot in the firmware".to_string());
+                report::last("• the firmware has the Secure Boot keys of this host. Reboot. If sbctl status then shows that Secure Boot is disabled, turn on Secure Boot in the firmware".to_string());
             } else {
                 let option = "boot.loader.systemd-boot.secureBoot.dbAdditions";
                 let next = if message.contains("could not find any OpROM entries in the TPM eventlog") && sb.db_additions.iter().any(|a| a == "tpm-eventlog") {
@@ -421,12 +421,12 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
                 } else {
                     "Correct the cause that sbctl tells, then run pacnix apply".to_string()
                 };
-                report::last(format!("pacnix: the firmware stays in Setup Mode. {next}"));
+                report::last(format!("• the firmware stays in Setup Mode. {next}"));
             }
         } else if !fw.ours {
-            report::last("pacnix: Secure Boot: reset Secure Boot to Setup Mode in the firmware, then run pacnix apply. The firmware then gets the keys of this host".to_string());
+            report::last("• Secure Boot: reset Secure Boot to Setup Mode in the firmware, then run pacnix apply. The firmware then gets the keys of this host".to_string());
         } else if !fw.enforced {
-            report::last("pacnix: Secure Boot: turn on Secure Boot in the firmware, then reboot".to_string());
+            report::last("• Secure Boot: turn on Secure Boot in the firmware, then reboot".to_string());
         }
     }
     for (name, dev, action) in &plan.tpm {
@@ -435,19 +435,19 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
             _ => None,
         };
         let needs = || match identity(dev) {
-            Some(_) => format!("pacnix: the TPM2 key of LUKS device {name} waits for the passphrase. Run pacnix apply in a terminal"),
-            None => format!("pacnix: the TPM2 key of LUKS device {name} waits: pacnix cannot read the UUID of {dev}"),
+            Some(_) => format!("• the TPM2 key of LUKS device {name} waits for the passphrase. Run pacnix apply in a terminal"),
+            None => format!("• the TPM2 key of LUKS device {name} waits: pacnix cannot read the UUID of {dev}"),
         };
         match (action, secret) {
             // A recovery key shows only at the start of the run, see `recover`.
             (Action::Recovery, _) => report::last(match identity(dev) {
-                Some(_) => format!("pacnix: a recovery key for LUKS device {name} waits. Run pacnix apply in a terminal to get it"),
-                None => format!("pacnix: a recovery key for LUKS device {name} waits: pacnix cannot read the UUID of {dev}"),
+                Some(_) => format!("• a recovery key for LUKS device {name} waits. Run pacnix apply in a terminal to get it"),
+                None => format!("• a recovery key for LUKS device {name} waits: pacnix cannot read the UUID of {dev}"),
             }),
-            (Action::Wait(why), _) => report::last(format!("pacnix: the TPM2 key of LUKS device {name} waits: {why}")),
+            (Action::Wait(why), _) => report::last(format!("• the TPM2 key of LUKS device {name} waits: {why}")),
             (Action::Wipe, _) => {
                 let step = format!("remove the TPM2 key of LUKS device {name}");
-                report::progress(&step);
+                report::progress(&format!("Removing the TPM2 key of LUKS device {name}"));
                 isolated(&step, || run_cmd(cmd("systemd-cryptenroll", &["--wipe-slot=tpm2", dev])))?;
             }
             (_, None) => report::last(needs()),
@@ -455,19 +455,19 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
                 let l = &g.m.boot.luks[name];
                 // The PIN is asked only at the start of the run, for a key that can be enrolled then.
                 if l.tpm2.pin && pin.is_empty() {
-                    report::last(format!("pacnix: the TPM2 key of LUKS device {name} waits for its PIN. Run pacnix apply in a terminal"));
+                    report::last(format!("• the TPM2 key of LUKS device {name} waits for its PIN. Run pacnix apply in a terminal"));
                     continue;
                 }
                 // The values that the key seals to are the values of the SHA-256 bank that pacnix checks now.
                 let snap = match snapshot(&l.tpm2.pcrs) {
                     Ok(snap) => snap,
                     Err(why) => {
-                        report::last(format!("pacnix: the TPM2 key of LUKS device {name} waits: {why}"));
+                        report::last(format!("• the TPM2 key of LUKS device {name} waits: {why}"));
                         continue;
                     }
                 };
                 let step = format!("enroll the TPM2 key of LUKS device {name}");
-                report::progress(&step);
+                report::progress(&format!("Enrolling the TPM2 key of LUKS device {name}"));
                 let hex = |v: &[u8; 32]| v.iter().map(|b| format!("{b:02x}")).collect::<String>();
                 let pcrs: Vec<String> = snap.iter().map(|(p, v)| format!("{p}:sha256={}", hex(v))).collect();
                 let mut c = cmd("systemd-cryptenroll", &["--wipe-slot=tpm2", &format!("--tpm2-device={TPM_DEVICE}"), &format!("--tpm2-pcrs={}", pcrs.join("+"))]);
@@ -487,7 +487,7 @@ pub fn recover(plan: &mut Plan) -> Result<()> {
     for (i, (name, dev, action)) in plan.tpm.iter().enumerate() {
         let secret = identity(dev).and_then(|id| SECRETS.lock().unwrap().get(&id).cloned());
         let (Action::Recovery, Some((passphrase, _))) = (action, secret) else { continue };
-        report::progress(&format!("enroll a recovery key for LUKS device {name}"));
+        report::progress(&format!("Enrolling a recovery key for LUKS device {name}"));
         report::changing();
         let key = output(cmd("systemd-cryptenroll", &["--recovery-key", dev]).env("PASSWORD", passphrase))?.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_string();
         RECOVERED.lock().unwrap().push(name.clone());
@@ -506,7 +506,7 @@ pub fn recover(plan: &mut Plan) -> Result<()> {
 /// Shows a recovery key in a separate block, and continues only after the user
 /// types "written". The enrollment needs the passphrase, thus stdin is a terminal.
 fn show_key(name: &str, dev: &str, key: &str) -> Result<()> {
-    say!("pacnix: the recovery key of LUKS device {name}:");
+    say!("• the recovery key of LUKS device {name}:");
     say!("\n    {}\n", report::item(key));
     say!("  Write down this key now and keep it away from this computer. Use it to\n  unlock the device when the TPM2 key fails. pacnix does not show it again.");
     let mut answer = String::new();

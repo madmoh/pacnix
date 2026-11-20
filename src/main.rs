@@ -101,7 +101,7 @@ fn main() {
     let result = run(cli);
     if let Err(e) = &result {
         if !report::interrupted() {
-            esay!("pacnix: error: {e:#}");
+            esay!("• error: {e:#}");
         }
     }
     std::process::exit(report::close(verb, result.is_ok()));
@@ -142,7 +142,7 @@ fn run(cli: Cli) -> Result<()> {
     }
     // The host and the flake show only when they are not the defaults.
     if name.ok().as_ref() != Some(&host) || cli.flake != "/etc/pacnix" {
-        say!("pacnix: host {host} of the flake {flake}");
+        say!("• host {host} of the flake {flake}");
     }
     let ctx = |opts| Ctx { flake: flake.clone(), host: host.clone(), opts };
     match cli.verb {
@@ -295,7 +295,7 @@ pub fn ask(items: &[String], data: &[String], opts: &Opts) -> Result<bool> {
         return Ok(DELETE.load(Relaxed));
     }
     let data_new = data.iter().any(|d| new.contains(&d));
-    say!("pacnix: these items need a confirmation:");
+    say!("• these items need a confirmation:");
     for i in &new {
         say!("  {i}");
     }
@@ -370,7 +370,7 @@ pub fn failed(cmd: &Command, status: ExitStatus, lines: &[String]) -> anyhow::Er
     let tail: Vec<&str> = lines.iter().rev().take(10).rev().map(|l| l.as_str()).collect();
     let message = match tail.is_empty() {
         true => format!("{} failed with {status}", describe(cmd)),
-        false => format!("{} failed with {status}. Its last output:\n  {}", describe(cmd), tail.join("\n  ")),
+        false => format!("{} failed with {status}. Its last output:\n  | {}", describe(cmd), tail.join("\n  | ")),
     };
     Failed { message, lines: lines.to_vec() }.into()
 }
@@ -417,7 +417,7 @@ pub fn forward(cmd: &mut Command, keep: usize, stdout: bool, mut show: impl FnMu
         }
         let shown = show(&text);
         if shown {
-            report::emit(&text, false);
+            report::emit(&format!("  | {text}"), false);
         }
         if lines.len() == keep {
             lines.pop_front();
