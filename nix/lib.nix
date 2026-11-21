@@ -30,6 +30,29 @@ let
         submoduleSupport.externalPackageInstall = true;
         home.activationGenerateGcRoot = false;
       }
+      # Home Manager resets the dconf keys that leave a database only when the new
+      # generation still has that database. This resets, in the same way, the keys
+      # of each database that the old generation has and the new one does not. It
+      # runs before dconfSettings, thus a database that stays loads its keys after
+      # the reset also when two databases use the same file.
+      ({ lib, pkgs, ... }: {
+        home.activation.pacnixDconfCleanup = lib.hm.dag.entryBetween [ "dconfSettings" ] [ "installPackages" ] ''
+          for old in "''${oldGenPath:-/nonexistent}"/state/dconf-keys*.json; do
+            [[ -f $old && ! -e $newGenPath/state/''${old##*/} ]] || continue
+            name=''${old##*/dconf-keys}; name=''${name%.json}; name=''${name#-}
+            bus=() profile=()
+            [[ -v DBUS_SESSION_BUS_ADDRESS ]] || bus=(${pkgs.dbus}/bin/dbus-run-session --dbus-daemon=${pkgs.dbus}/bin/dbus-daemon)
+            if [[ -n $name ]]; then
+              file=$(mktemp) && printf 'user-db:%s\n' "$name" >"$file" && profile=("DCONF_PROFILE=$file")
+            fi
+            ${pkgs.jq}/bin/jq -r '.[]' "$old" | while read -r key; do
+              verboseEcho "Resetting dconf key \"$key\""
+              run "''${bus[@]}" env "''${profile[@]}" ${pkgs.dconf}/bin/dconf reset "$key"
+            done
+            [[ -z $name ]] || rm -f "$file"
+          done
+        '';
+      })
       # pacman installs the software. An enabled program or service gets no
       # package from Nix: null when its package option permits it, else a
       # package that only links to the program of pacman in /usr/bin.

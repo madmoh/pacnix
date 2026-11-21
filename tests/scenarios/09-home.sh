@@ -3,7 +3,12 @@
 # keeps as the original, also when the first activation stops before it links
 # the files. A changed link target gets the declared file again, and the
 # removal of the declaration gives the original back. Removal of a dconf key
-# and a user unit, and editor settings that the editor rewrites.
+# and a user unit, and editor settings that the editor rewrites. The keys of a
+# named dconf database and of the default database go back to their defaults
+# also when the last declaration of the database goes, and the keys that the
+# user wrote stay. An activation that stops before the reset keeps the keys,
+# and the next apply resets them. A key that two databases on the same file
+# declare stays when one of them goes.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 on $h 'mkdir -p ~/.config/demo && echo mine >~/.config/demo/settings.conf && touch ~/.fail-activation'
@@ -41,6 +46,48 @@ check $h 'test -z "$(dconf read /org/gnome/desktop/interface/clock-format)"' "th
 check $h 'test "$(dconf read /org/gnome/desktop/interface/color-scheme)" = "'"'prefer-dark'"'"' "the kept dconf key is lost"
 refute $h 'systemctl --user is-active hello.service' "the removed user unit still runs"
 refute $h 'test -e ~/.config/systemd/user/hello.service' "the removed user unit file remains"
+empty_plan $h
+
+step "the keys of a dconf database go when its last declaration goes"
+# ~/.fail-dconf stops the activation before the reset of the keys of a removed database.
+user() { echo "home.users.arch = { lib, ... }: { home.activation.failDconf = lib.hm.dag.entryBefore [ \"pacnixDconfCleanup\" ] ''[ ! -e \"\$HOME/.fail-dconf\" ] || exit 1''; $1 };"; }
+base='features.home.enable = true; features.home.extra = false;'
+work='dconf.databases.work."org/demo".a = "1";'
+shared='dconf.databases.user."org/gnome/desktop/interface".color-scheme = "prefer-dark";'
+on $h 'printf "user-db:work\n" >/tmp/work.profile'
+wread() { on $h "DCONF_PROFILE=/tmp/work.profile dconf read /org/demo/$1"; }
+scheme() { on $h 'dconf read /org/gnome/desktop/interface/color-scheme'; }
+scenario $h "{ $base $(user "$work dconf.databases.work.\"org/demo\".b = \"2\";") }"
+apply $h >/dev/null || fail "apply failed"
+on $h 'DCONF_PROFILE=/tmp/work.profile dconf write /org/demo/mine "'"'m'"'" && dconf write /org/gnome/desktop/interface/font-name "'"'Mine 10'"'"'
+[[ $(wread a) == "'1'" && $(wread b) == "'2'" ]] || fail "the keys of the work database are not set"
+scenario $h "{ $base $(user "$work") }"
+apply $h >/dev/null || fail "apply failed"
+[[ $(wread a) == "'1'" && -z $(wread b) ]] || fail "a removed key of the work database stays, or a kept key goes"
+on $h 'touch ~/.fail-dconf'
+scenario $h "{ $base $(user "") }"
+apply $h >/dev/null && fail "the activation did not stop"
+[[ $(wread a) == "'1'" ]] || fail "the activation that stopped before the reset changed the work database"
+on $h 'rm ~/.fail-dconf'
+apply $h >/dev/null || fail "apply failed"
+[[ -z $(wread a) ]] || fail "a key of the work database stays after its last declaration goes"
+[[ $(wread mine) == "'m'" && $(scheme) == "'prefer-dark'" ]] || fail "the key that the user wrote in the work database or a key of the default database is lost"
+step "a shared key stays when one of the two databases that declare it goes"
+scenario $h "{ $base $(user "$shared") }"
+apply $h >/dev/null || fail "apply failed"
+scenario $h "{ $base $(user "") }"
+apply $h >/dev/null || fail "apply failed"
+[[ $(scheme) == "'prefer-dark'" ]] || fail "the key of the default database is lost after the user database goes"
+scenario $h "{ $base $(user "$shared") }"
+apply $h >/dev/null || fail "apply failed"
+scenario $h "{ $base $(user "$shared dconf.settings = lib.mkForce { };") }"
+apply $h >/dev/null || fail "apply failed"
+[[ $(scheme) == "'prefer-dark'" ]] || fail "the key of the user database is lost after the default settings go"
+step "the keys of the default database go when its last declaration goes"
+scenario $h "{ $base $(user "dconf.settings = lib.mkForce { };") }"
+apply $h >/dev/null || fail "apply failed"
+[[ -z $(scheme) ]] || fail "a key of the default database stays after its last declaration goes"
+check $h 'test "$(dconf read /org/gnome/desktop/interface/font-name)" = "'"'Mine 10'"'"' "the key that the user wrote in the default database is lost"
 empty_plan $h
 
 step "home.packages must stay empty"
