@@ -15,7 +15,7 @@
 # the correction, the build is silent for 65 s, then redraws a progress meter
 # for 65 s: the output shows each step, a line for the silence and a line with
 # the last state of the meter, without the output of the build, Nix notes or
-# escape sequences. The download goes after the build succeeds. After a reboot, the system
+# escape sequences. The download and the build directory go after the install. After a reboot, the system
 # boots the declared loader entry, and has the declared swap, locale, user and
 # home configuration and an empty plan.
 size=(6 4096 1)
@@ -95,6 +95,7 @@ for l in '• Building local package 1/1: slow' '• the step continues after 1 
 done
 grep -q '==> colored line\|progress done' <<<"$out" && fail "the output shows the output of a build that succeeded"
 refute newbox 'sudo test -e /var/lib/pacnix/build/sources/slow' "the download stays after the build succeeded"
+refute newbox 'sudo test -e /var/lib/pacnix/build/local/slow' "the build directory stays after the install"
 matches "$out" '• the step continues after 2 min: Building local package 1/1: slow: downloaded [0-9]+ MB' || fail "the output does not show the progress meter after 60 s of redraws"
 grep -q 'progress 10%\|not writing modified lock file\|Added input' <<<"$out" && fail "the output shows progress meter redraws or Nix notes"
 grep -q $'\e\|\r' <<<"$out" && fail "the output has escape sequences or carriage returns"

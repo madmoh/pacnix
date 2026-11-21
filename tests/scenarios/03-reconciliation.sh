@@ -3,7 +3,11 @@
 # feature, and restore the original files after an override is dropped. A new AUR
 # dependency of a built AUR package and package removals are in the one
 # question of a run, which needs --yes without a terminal. The output of aur sync
-# does not show when the build succeeds.
+# does not show when the build succeeds. After the install, the AUR checkouts
+# keep only their git history, PKGBUILD and .SRCINFO, and no copy of the build
+# chroot stays. A package base in packages.keepBuildCache keeps its sources until
+# it leaves the list. The apply removes the sources that an earlier version of
+# pacnix kept, and removes a link in the build directory, not its target.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 apply $h >/dev/null || fail "first apply failed"
@@ -16,14 +20,38 @@ grep -q 'packages ignored' <<<"$out" && fail "apply shows the list of aur sync"
 check $h "pacman -Q htop downgrade perl-email-outlook-message" "declared packages are missing"
 check $h "pacman -Qqd perl-ole-storage-lite" "the AUR dependency is not installed as a dependency"
 check $h "$repo | grep -qx perl-ole-storage-lite" "the AUR dependency is not in the local repository"
+ckout="sudo ls -A /var/lib/pacnix/build/.cache/aurutils/sync"
+# A checkout without files that git does not track: the sources and logs went.
+clean() { check $h "test -z \"\$(sudo -u pacnix git -C /var/lib/pacnix/build/.cache/aurutils/sync/$1 status --porcelain --ignored)\" && $ckout/$1 | grep -qx PKGBUILD" "$2"; }
+for b in downgrade perl-email-outlook-message perl-ole-storage-lite; do
+	clean $b "the checkout of $b keeps its sources or logs"
+done
+check $h 'test "$(sudo ls /var/lib/aurbuild/x86_64 | tr "\n" " ")" = "root root.lock "' "a copy of the build chroot stays"
 packages_match $h
 
 step "a new AUR dependency of a built AUR package needs a confirmation"
+scenario $h '{ packages.repo = [ "htop" ]; packages.aur = [ "downgrade" "perl-email-outlook-message" ]; packages.keepBuildCache = [ "perl-email-outlook-message" ]; }'
 on $h "sudo jq '.\"perl-email-outlook-message\".depends = []' /var/lib/pacnix/aur.json | sudo tee /var/lib/pacnix/aur.json.new >/dev/null && sudo mv /var/lib/pacnix/aur.json.new /var/lib/pacnix/aur.json && sudo GNUPGHOME=/var/lib/pacnix/gnupg repo-remove -s -q /var/lib/pacnix/repo/pacnix-local.db.tar.gz perl-email-outlook-message"
 out=$(pacnix $h apply 2>&1) && fail "apply built a package with a new AUR dependency without a confirmation"
 has "$out" 'The AUR package perl-email-outlook-message has new AUR dependencies: perl-ole-storage-lite.' || { echo "$out" | tail -5; fail "apply does not show the new AUR dependency"; }
 out=$(apply $h) || { echo "$out"; fail "apply --yes failed"; }
 grep -q 'packages ignored' <<<"$out" && fail "apply shows the list of aur sync"
+check $h "$ckout/perl-email-outlook-message | grep -q '^Email-Outlook-Message-.*tar.gz$'" "the sources of a package in keepBuildCache do not stay"
+
+step "the sources go when the package base leaves keepBuildCache, and old sources go"
+on $h 'sudo -u pacnix sh -c "cd /var/lib/pacnix/build && touch .cache/aurutils/sync/downgrade/old.tar.gz && mkdir -p local/old sources/old && touch sources/old/big" &&
+	sudo mkdir -p /srv/target && sudo touch /srv/target/file && sudo ln -s /srv/target /var/lib/pacnix/build/sources/link && sudo rm /var/lib/pacnix/build-cache.json'
+scenario $h '{ packages.repo = [ "htop" ]; packages.aur = [ "downgrade" "perl-email-outlook-message" ]; }'
+apply $h >/dev/null || fail "apply failed"
+for b in downgrade perl-email-outlook-message; do
+	clean $b "the sources of $b stay"
+done
+check $h 'test -z "$(sudo ls -A /var/lib/pacnix/build/local /var/lib/pacnix/build/sources | grep -v "^/\|^$")"' "old sources or a link stay"
+check $h 'test -f /srv/target/file' "the apply removed the target of a link"
+before=$(on $h 'stat -c %Y /var/lib/pacnix/build-cache.json')
+empty_plan $h
+apply $h >/dev/null || fail "the no-op apply failed"
+[[ $before == $(on $h 'stat -c %Y /var/lib/pacnix/build-cache.json') ]] || fail "the no-op apply wrote the record of the sources"
 
 step "remove them"
 scenario $h ''

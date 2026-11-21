@@ -70,6 +70,7 @@ let
       local = lib.mapAttrs (name: dir: "${builtins.path { path = dir; name = storeName name; }}") cfg.packages.local;
       server = cfg.packages.server;
       serverKey = cfg.packages.serverKey;
+      keepBuildCache = lib.unique cfg.packages.keepBuildCache;
       providers = cfg.packages.providers;
       versions = cfg.packages.versions;
       serve = {

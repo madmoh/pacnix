@@ -14,6 +14,12 @@ const LOCAL_CONF: &str = "/run/pacnix/pacman-local.conf";
 const SOURCES: &str = "/var/lib/pacnix/local-sources.json";
 /// The packages that pacnix installed or marked explicit for a declaration.
 /// Only these become dependencies again when their declaration goes.
+/// The build directories that can have sources: see `build_cache`.
+const CACHE: &str = "/var/lib/pacnix/build-cache.json";
+/// The AUR checkouts of aur sync, in the home directory of the builder user.
+const AURDEST: &str = "/var/lib/pacnix/build/.cache/aurutils/sync";
+/// The package bases that did not build in this run.
+static FAILED_BASES: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
 const MADE: &str = "/var/lib/pacnix/packages.json";
 /// The signing key of the local repository, which only root reads. Hosts that
 /// install from this repository check the fingerprint of its public key.
@@ -948,7 +954,7 @@ pub fn fetch_builds(g: &Generation, plan: &Plan) -> Result<Builds> {
 /// Builds AUR and local packages into the local repository and drops packages
 /// that no declaration needs. Returns the packages that did not build. A local
 /// package that did not build keeps its old record, thus it builds again at
-/// the next apply. The kept sources of local packages that are not declared go.
+/// the next apply.
 fn build(g: &Generation, plan: &Plan, builds: Builds) -> Result<BTreeSet<String>> {
     let failed = build_dirs(g, builds)?;
     let dirs_of = local_dirs(g);
@@ -958,11 +964,6 @@ fn build(g: &Generation, plan: &Plan, builds: Builds) -> Result<BTreeSet<String>
             sources.insert(name.clone(), dirs_of[name].clone());
         }
         std::fs::write(SOURCES, serde_json::to_string_pretty(&sources)?)?;
-    }
-    for e in std::fs::read_dir(format!("{BUILD}/sources")).into_iter().flatten().flatten() {
-        if !dirs_of.contains_key(&*e.file_name().to_string_lossy()) {
-            let _ = std::fs::remove_dir_all(e.path());
-        }
     }
     if !plan.drop.is_empty() {
         let files: Vec<String> = repo_db(g)?.into_iter().filter(|i| plan.drop.contains(&i.name)).map(|i| i.filename).collect();
@@ -1009,7 +1010,12 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<BTreeSet<String>> {
         if let Some(d) = deps.iter().find(|d| failed.contains(*d)) {
             report::failure(&step, &format!("it needs {d}, which did not build"));
             failed.extend(names);
+            FAILED_BASES.lock().unwrap().insert(name);
             continue;
+        }
+        let mut cache = build_cache();
+        if cache.insert(name.clone()) {
+            save_build_cache(&cache)?;
         }
         let record = builds.records.remove(&name);
         let head = match local {
@@ -1019,10 +1025,10 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<BTreeSet<String>> {
         if *local || !names.iter().all(|n| built.get(n) == Some(&version)) {
             let _ = std::fs::remove_dir_all(&out);
             run_cmd(as_builder(&["mkdir", &out]))?;
-            let mut c = chroot(&["--build"]);
+            // makechrootpkg builds in a copy of the chroot that it removes after the build.
+            let mut c = chroot(&["--build", "--temp"]);
             c.current_dir(dir).env("PKGDEST", &out);
-            // The sources of a local package stay until its build succeeds, thus a
-            // new attempt continues a large download.
+            // The sources stay until the install, thus a new attempt continues a large download.
             let sources = format!("{BUILD}/sources/{name}");
             if *local {
                 run_cmd(as_builder(&["mkdir", "-p", &sources]))?;
@@ -1036,9 +1042,9 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<BTreeSet<String>> {
             let _ = cmd("pkill", &["-KILL", "-u", "pacnix"]).status();
             if !ok? {
                 failed.extend(names);
+                FAILED_BASES.lock().unwrap().insert(name);
                 continue;
             }
-            let _ = std::fs::remove_dir_all(&sources);
             let mut files = Vec::new();
             for e in std::fs::read_dir(&out)? {
                 let path = e?.path();
@@ -1057,6 +1063,58 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<BTreeSet<String>> {
         }
     }
     Ok(failed)
+}
+
+/// The build directories that can have downloaded sources and build files, by
+/// package base or local package name. Without a record, the directories of an
+/// earlier pacnix version.
+fn build_cache() -> BTreeSet<String> {
+    match std::fs::read(CACHE) {
+        Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
+        Err(_) => [AURDEST.to_string(), format!("{BUILD}/local"), format!("{BUILD}/sources")]
+            .iter()
+            .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect(),
+    }
+}
+
+fn save_build_cache(names: &BTreeSet<String>) -> Result<()> {
+    let tmp = format!("{CACHE}.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(names)?)?;
+    Ok(std::fs::rename(tmp, CACHE)?)
+}
+
+/// Removes the downloaded sources and the build files of the builds that are in
+/// the local repository and installed, except of the names in
+/// packages.keepBuildCache. The sources of a build that failed in this run stay
+/// for the next attempt. The git checkout of an AUR package stays for the review
+/// of its next changes. Each name is one directory entry: no path goes outside
+/// the build directory, and links are removed, not followed.
+pub fn discard(g: &Generation) -> Result<()> {
+    let before = build_cache();
+    let (failed, keep) = (FAILED_BASES.lock().unwrap(), &g.m.packages.keep_build_cache);
+    let mut after = before.clone();
+    for name in before.iter().filter(|n| !failed.contains(*n) && !keep.contains(n)) {
+        after.remove(name);
+        if name.is_empty() || name.starts_with('.') || name.contains('/') {
+            continue;
+        }
+        let checkout = format!("{AURDEST}/{name}");
+        if std::fs::symlink_metadata(&checkout).is_ok_and(|m| m.is_dir()) && Path::new(&checkout).join(".git").is_dir() {
+            run_cmd(as_builder(&["git", "-C", &checkout, "clean", "-ffdxq"]))?;
+        }
+        for dir in [format!("{BUILD}/local/{name}"), format!("{BUILD}/sources/{name}")] {
+            match std::fs::remove_dir_all(&dir) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).context(dir),
+                _ => {}
+            }
+        }
+    }
+    if after != before || (!after.is_empty() && !Path::new(CACHE).exists()) {
+        save_build_cache(&after)?;
+    }
+    Ok(())
 }
 
 /// The package names, the version and the dependencies, also of the build, in

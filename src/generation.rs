@@ -121,6 +121,8 @@ pub struct Packages {
     #[serde(rename = "serverKey")]
     pub server_key: Option<String>,
     pub serve: Serve,
+    #[serde(rename = "keepBuildCache")]
+    pub keep_build_cache: Vec<String>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -542,6 +544,7 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<(Plan, packages::Builds)
     let skip = packages::prepare(&plan.target, &plan.packages, builds)?;
     units::stop(&leaving)?;
     packages::apply(&plan.packages, &skip)?;
+    packages::discard(&plan.target)?;
     users::apply(&plan.users)?;
     let changed = files::apply(ctx, &plan.target, &plan.files)?;
     files::run_triggers(&plan.files, &changed)?;
