@@ -7,7 +7,8 @@
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 now=$(on $h "pacman -Si tree | awk '/^Version/ { print \$3 }'")
-old=$(curl -fsS https://archive.archlinux.org/packages/t/tree/ | grep -o 'tree-[0-9][^"]*-x86_64\.pkg\.tar\.zst"' | sed 's/^tree-//; s/-x86_64.*//' | grep -vx "$now" | sort -V | tail -1)
+listing=$(curl -fsS --connect-timeout 10 --max-time 30 https://archive.archlinux.org/packages/t/tree/) || fail "blocked: the host cannot read https://archive.archlinux.org/packages/t/tree/ (curl exit status $?)"
+old=$(grep -o 'tree-[0-9][^"]*-x86_64\.pkg\.tar\.zst"' <<<"$listing" | sed 's/^tree-//; s/-x86_64.*//' | grep -vx "$now" | sort -V | tail -1)
 [[ -n $old ]] || fail "the archive has no older version of tree"
 step "pin tree to $old (the repository has $now)"
 scenario $h "{ packages.repo = [ \"tree\" ]; packages.versions.tree = \"$old\"; }"

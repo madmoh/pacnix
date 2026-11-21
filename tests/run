@@ -58,16 +58,22 @@ cost() {
 }
 declare -A running=()
 finish() {
-	local pid rc s c m
+	local pid rc s c m result
 	wait -n -p pid "${!running[@]}"
 	rc=$?
 	read -r s c m t <<<"${running[$pid]}"
 	unset "running[$pid]"
 	cpus=$((cpus + c)) mem=$((mem + m))
-	echo "$(grep -E "^(PASS|FAIL) " "$logs/$(basename "$s" .sh).log" | tail -1) ($((SECONDS - t)) s)"
+	# A scenario that exits without a result line fails with its exit status.
+	result=$(grep -E "^(PASS|FAIL) " "$logs/$(basename "$s" .sh).log" | tail -1)
+	case $rc in
+	0) ;;
+	124) result="FAIL $(basename "$s" .sh): no result after $limit s" ;;
+	*) [[ $result == FAIL* ]] || result="FAIL $(basename "$s" .sh): exit status $rc without a result" ;;
+	esac
+	echo "${result:-FAIL $(basename "$s" .sh): exit status 0 without a result} ($((SECONDS - t)) s)"
 	{ grep -v "^$(basename "$s" .sh) " "$times" 2>/dev/null; echo "$(basename "$s" .sh) $((SECONDS - t))"; } >"$times.new" && mv "$times.new" "$times"
-	((rc != 124)) || echo "FAIL $(basename "$s" .sh): no result after $limit s"
-	((rc == 0)) || status=1
+	[[ $rc == 0 && $result == PASS* ]] || status=1
 }
 start() {
 	local c m
