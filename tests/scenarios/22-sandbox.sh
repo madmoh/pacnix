@@ -3,11 +3,12 @@
 # local package tries to write to /var/tmp, /tmp, /dev/shm and /etc, and to
 # read a file that all users can read in a home directory. The build
 # succeeds, the files outside the build directory do not occur on the host,
-# and the content of the home file is not in the build directory.
+# and the content of the home file is not in the build directory, which stays
+# for the check with packages.keepBuildCache.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 on $h 'chmod 755 ~ && echo pacnix-secret >~/secret && chmod 644 ~/secret'
-scenario $h '{ packages.local.escape = ./packages/escape; }'
+scenario $h '{ packages.local.escape = ./packages/escape; packages.keepBuildCache = [ "escape" ]; }'
 out=$(apply $h) || { echo "$out" | tail -30; fail "the build of the package failed"; }
 check $h 'pacman -Q escape' "the package is not installed"
 for f in /var/tmp /tmp /dev/shm /etc; do
