@@ -37,20 +37,25 @@ let
       # the reset also when two databases use the same file.
       ({ lib, pkgs, ... }: {
         home.activation.pacnixDconfCleanup = lib.hm.dag.entryBetween [ "dconfSettings" ] [ "installPackages" ] ''
-          for old in "''${oldGenPath:-/nonexistent}"/state/dconf-keys*.json; do
-            [[ -f $old && ! -e $newGenPath/state/''${old##*/} ]] || continue
-            name=''${old##*/dconf-keys}; name=''${name%.json}; name=''${name#-}
-            bus=() profile=()
-            [[ -v DBUS_SESSION_BUS_ADDRESS ]] || bus=(${pkgs.dbus}/bin/dbus-run-session --dbus-daemon=${pkgs.dbus}/bin/dbus-daemon)
-            if [[ -n $name ]]; then
-              file=$(mktemp) && printf 'user-db:%s\n' "$name" >"$file" && profile=("DCONF_PROFILE=$file")
-            fi
-            ${pkgs.jq}/bin/jq -r '.[]' "$old" | while read -r key; do
-              verboseEcho "Resetting dconf key \"$key\""
-              run "''${bus[@]}" env "''${profile[@]}" ${pkgs.dconf}/bin/dconf reset "$key"
+          if [[ -v oldGenPath ]]; then
+            for old in "$oldGenPath"/state/dconf-keys*.json; do
+              [[ -f $old && ! -e $newGenPath/state/''${old##*/} ]] || continue
+              name=''${old##*/dconf-keys}; name=''${name%.json}; name=''${name#-}
+              bus=() profile=()
+              [[ -v DBUS_SESSION_BUS_ADDRESS ]] || bus=(${pkgs.dbus}/bin/dbus-run-session --dbus-daemon=${pkgs.dbus}/bin/dbus-daemon)
+              # An error here stops the activation, thus a named database never resets keys of the default one.
+              if [[ -n $name ]]; then
+                file=$(mktemp)
+                printf 'user-db:%s\n' "$name" >"$file"
+                profile=("DCONF_PROFILE=$file")
+              fi
+              ${pkgs.jq}/bin/jq -r '.[]' "$old" | while read -r key; do
+                verboseEcho "Resetting dconf key \"$key\""
+                run "''${bus[@]}" env "''${profile[@]}" ${pkgs.dconf}/bin/dconf reset "$key"
+              done
+              [[ -z $name ]] || rm -f "$file"
             done
-            [[ -z $name ]] || rm -f "$file"
-          done
+          fi
         '';
       })
       # pacman installs the software. An enabled program or service gets no
