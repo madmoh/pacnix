@@ -84,7 +84,7 @@ once "$out" '• Error: build local package slow:' || fail "the output does not 
 has "$out" '• Apply done, but 1 step failed.' || fail "the summary does not count the failed step"
 check newbox 'test "$(readlink /etc/localtime)" = /usr/share/zoneinfo/Europe/Berlin' "the apply with the failing build did not apply the rest of the configuration"
 grep -q '^  | error: the test build timed out while the file mode has the word fail' <<<"$out" || fail "the error does not show the reason of the failure"
-grep -q 'attempt 1 of' <<<"$out" && fail "pacnix tried a build failure again"
+grep -q 'Attempt 1 of' <<<"$out" && fail "pacnix tried a build failure again"
 grep -q 'aurutils' <<<"$out" && fail "the apply builds aurutils"
 check newbox 'sudo test -s /var/lib/pacnix/build/sources/slow/lastupdate' "the download of the failed build does not stay for the next attempt"
 step "the next apply builds the package and asks no question"

@@ -13,7 +13,7 @@ apply $h >/dev/null || fail "first apply failed"
 conf=$(on $h 'md5sum /etc/pacman.conf')
 # Runs a command in the VM when pacnix shows its next failed first attempt, so
 # that the next attempt, after 10 s, succeeds.
-after_failure() { on $h "sudo systemd-run --quiet sh -c 'n=\$(grep -c \"attempt 1 of\" /var/log/pacnix-test.log); until [ \$(grep -c \"attempt 1 of\" /var/log/pacnix-test.log) -gt \$n ]; do sleep 0.2; done; $1'"; }
+after_failure() { on $h "sudo systemd-run --quiet sh -c 'n=\$(grep -c \"Attempt 1 of\" /var/log/pacnix-test.log); until [ \$(grep -c \"Attempt 1 of\" /var/log/pacnix-test.log) -gt \$n ]; do sleep 0.2; done; $1'"; }
 
 step "the mirror refuses connections until the first attempt fails"
 on $h 'sudo cp /etc/pacman.d/mirrorlist /var/tmp/mirrorlist && echo "Server = http://127.0.0.1:9/\$repo/os/\$arch" | sudo tee /etc/pacman.d/mirrorlist >/dev/null'
@@ -46,7 +46,7 @@ step "a mirror without the package of the sync databases: run pacnix apply witho
 on $h 'echo "Server = https://fastly.mirror.pkgbuild.com/\$repo/os/\$arch/pacnix-missing" | sudo tee /etc/pacman.d/mirrorlist >/dev/null'
 out=$(apply $h --offline) && fail "apply succeeded without the package files"
 has "$out" '• Error: the mirror does not have a package of the sync databases, thus the databases or the mirror are old. Run pacnix apply without --offline, or use a different mirror: ' || { echo "$out" | tail; fail "the error does not tell to run pacnix apply without --offline"; }
-grep -q 'attempt 1 of' <<<"$out" && fail "pacnix tried a missing file again"
+grep -q 'Attempt 1 of' <<<"$out" && fail "pacnix tried a missing file again"
 on $h 'sudo cp /var/tmp/mirrorlist /etc/pacman.d/mirrorlist'
 
 step "a no-op apply downloads nothing"

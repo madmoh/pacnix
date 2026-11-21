@@ -84,8 +84,8 @@ tty_apply() { printf '%s\n' "$@" | "$vm" ssh sbbox -tt 'NO_COLOR=1 pacnix apply 
 order() {
 	once "$1" '• The recovery key of LUKS device root:' || { echo "$1"; fail "the apply does not show the recovery key one time"; }
 	at() { grep -n -m1 -- "$1" <<<"$2" | cut -d: -f1; }
-	(($(at 'Passphrase of the LUKS device root' "$1") < $(at '• The recovery key of LUKS device root:' "$1") && $(at '• The recovery key of LUKS device root:' "$1") < $(at '^• \(Refreshing package databases\|Upgrading the system\|system upgrade\)' "$1"))) || { echo "$1"; fail "the questions and the recovery key do not come before the system upgrade"; }
-	sed -n '/^• \(Refreshing package databases\|Upgrading the system\|system upgrade\)/,$p' <<<"$1" | grep -q 'Passphrase\|PIN\|Type written' && { echo "$1"; fail "the apply asks after the system upgrade"; }
+	(($(at 'Passphrase of the LUKS device root' "$1") < $(at '• The recovery key of LUKS device root:' "$1") && $(at '• The recovery key of LUKS device root:' "$1") < $(at '^• \(Refreshing package databases\|Upgrading the system\|System upgrade\)' "$1"))) || { echo "$1"; fail "the questions and the recovery key do not come before the system upgrade"; }
+	sed -n '/^• \(Refreshing package databases\|Upgrading the system\|System upgrade\)/,$p' <<<"$1" | grep -q 'Passphrase\|PIN\|Type written' && { echo "$1"; fail "the apply asks after the system upgrade"; }
 	return 0
 }
 # Fails unless sbctl has the given number of files and each is signed.
@@ -143,7 +143,7 @@ out=$(on sbbox "printf 'pass1\n' | script -qec 'NO_COLOR=1 pacnix apply' /dev/nu
 echo "$out" | tail -8
 matches "$out" '• The recovery key of LUKS device root: [a-z]{8}-' || fail "the apply does not show the recovery key"
 has "$out" '• Error: the input ended before you typed written. The recovery key above is enrolled.' || fail "the apply does not stop at the end of the input"
-grep -q 'apply done\|^• \(Refreshing package databases\|Upgrading the system\|system upgrade\)' <<<"$out" && fail "the apply continued without the confirmation"
+grep -q 'Apply done\|^• \(Refreshing package databases\|Upgrading the system\|System upgrade\)' <<<"$out" && fail "the apply continued without the confirmation"
 check sbbox 'sudo systemd-cryptenroll /dev/vda2 | grep -q recovery' "the end of the input removed the recovery key"
 
 step "a new plan after the upgrade does not ask again or show a second recovery key"
@@ -155,7 +155,7 @@ out=$(tty_apply pass1 written)
 order "$out"
 check sbbox 'test "$(stat -c %Y /var/lib/pacman/sync/core.db)" -gt 946771200' "the upgrade did not download the sync database again"
 check sbbox 'test "$(sudo systemd-cryptenroll /dev/vda2 | grep -c recovery)" = 1' "the device does not have one recovery key"
-has "$out" 'apply done.' || { echo "$out" | tail; fail "the apply after the new plan failed"; }
+has "$out" 'Apply done.' || { echo "$out" | tail; fail "the apply after the new plan failed"; }
 
 step "without a terminal, the recovery key waits with a note"
 on sbbox "$wipe_recovery" || fail "the removal of the recovery key by hand failed"
@@ -221,7 +221,7 @@ before=$(on sbbox "$state")
 scenario sbbox "{ boot.loader.systemd-boot.secureBoot = { enable = true; extraFiles = [ \"/boot/EFI/tools/tool.efi\" \"/boot/not-efi.txt\" ]; }; $luks }"
 out=$(apply sbbox) && fail "the apply signed a file that is not an EFI binary"
 has "$out" '• Error: /boot/not-efi.txt is not an EFI binary, thus sbctl cannot sign it. Remove it from boot.loader.systemd-boot.secureBoot.extraFiles' || { echo "$out"; fail "the refusal does not name the file"; }
-grep -q 'system upgrade' <<<"$out" && fail "the refusal came after the upgrade"
+grep -q 'System upgrade' <<<"$out" && fail "the refusal came after the upgrade"
 scenario sbbox "{ $luks }"
 out=$(apply sbbox) && fail "the apply removed Secure Boot while the firmware checks the signatures"
 has "$out" '• Error: the firmware checks Secure Boot signatures, and without boot.loader.systemd-boot.secureBoot' || { echo "$out"; fail "the refusal does not tell to turn off Secure Boot"; }
