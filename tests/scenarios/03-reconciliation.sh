@@ -63,6 +63,7 @@ apply $h || fail "apply failed"
 for p in htop downgrade perl-email-outlook-message perl-ole-storage-lite; do
 	refute $h "pacman -Q $p" "$p is still installed"
 	refute $h "$repo | grep -qx $p" "$p is still in the local repository"
+	refute $h "ls /var/lib/pacnix/repo/$p-[0-9]*" "the file of $p stays in the local repository"
 done
 packages_match $h
 

@@ -46,6 +46,8 @@ pub struct Plan {
     orphans: BTreeSet<String>,
     /// The dependencies of the packages that are not installed.
     depends: HashMap<String, Vec<String>>,
+    /// The local repository has package files that its database does not name.
+    stale: bool,
 }
 
 impl Plan {
@@ -394,6 +396,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
     let missing_aur: Vec<String> = built_aur.iter().filter(|n| !repo_names.contains(*n)).cloned().collect();
     let mut table = Vec::new();
     if is_builder(g) {
+        plan.stale = !stale(&repo).is_empty();
         table = aur_table(&missing_aur)?;
         let found: BTreeSet<&String> = table.iter().map(|t| &t.0).collect();
         plan.unknown.extend(missing_aur.iter().filter(|n| !found.contains(n)).map(|n| format!("packages.aur: {n} (not in the AUR; search at https://aur.archlinux.org/packages)")));
@@ -829,6 +832,14 @@ fn signing_key() -> Result<String> {
     Ok(key)
 }
 
+/// The package files and signatures in the local repository that its signed
+/// database does not name. The other files of the repository are not packages.
+fn stale(db: &[Info]) -> Vec<String> {
+    let named: BTreeSet<&str> = db.iter().map(|i| i.filename.as_str()).collect();
+    let files = std::fs::read_dir(REPO).into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned());
+    files.filter(|f| f.contains(".pkg.tar") && !named.contains(f.strip_suffix(".sig").unwrap_or(f))).collect()
+}
+
 /// Signs packages and adds them to the local repository, which then has the
 /// new versions only.
 fn repo_add(files: &[std::path::PathBuf]) -> Result<()> {
@@ -954,7 +965,9 @@ pub fn fetch_builds(g: &Generation, plan: &Plan) -> Result<Builds> {
 /// Builds AUR and local packages into the local repository and drops packages
 /// that no declaration needs. Returns the packages that did not build. A local
 /// package that did not build keeps its old record, thus it builds again at
-/// the next apply.
+/// the next apply. Then the package files and signatures that the signed
+/// database does not name go: the database names the current version of each
+/// built and served package.
 fn build(g: &Generation, plan: &Plan, builds: Builds) -> Result<BTreeSet<String>> {
     let failed = build_dirs(g, builds)?;
     let dirs_of = local_dirs(g);
@@ -966,12 +979,12 @@ fn build(g: &Generation, plan: &Plan, builds: Builds) -> Result<BTreeSet<String>
         std::fs::write(SOURCES, serde_json::to_string_pretty(&sources)?)?;
     }
     if !plan.drop.is_empty() {
-        let files: Vec<String> = repo_db(g)?.into_iter().filter(|i| plan.drop.contains(&i.name)).map(|i| i.filename).collect();
         let key = signing_key()?;
         run_cmd(cmd("repo-remove", &["-q", "-s", "-k", &key, &format!("{REPO}/pacnix-local.db.tar.gz")]).args(&plan.drop).env("GNUPGHOME", GNUPG))?;
-        for f in files {
-            let _ = std::fs::remove_file(format!("{REPO}/{f}"));
-            let _ = std::fs::remove_file(format!("{REPO}/{f}.sig"));
+    }
+    if plan.stale || !plan.drop.is_empty() {
+        for f in stale(&repo_db(g)?) {
+            std::fs::remove_file(format!("{REPO}/{f}"))?;
         }
     }
     Ok(failed)

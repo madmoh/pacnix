@@ -2,7 +2,10 @@
 # Scenario 8: one config repository with shared and host-specific features.
 # desktop builds the AUR repository, signs it and serves it, laptop installs
 # from it after a check of the declared key, then newpc joins as a new
-# machine. A wrong key and a changed package stop newpc before any change.
+# machine. A wrong key and a changed package stop newpc before any change. The
+# apply of desktop removes the package files and signatures that the signed
+# database does not name, keeps the served packages and the other files, and
+# does not change the database.
 size=(4 4096 3)
 source "$(dirname "$0")/../lib.sh"
 plain=$cache/base-20261101.620452.qcow2
@@ -17,6 +20,12 @@ for p in downgrade perl-email-outlook-message perl-ole-storage-lite; do
 	check desktop "$served | grep -qx $p" "the repository of desktop does not serve $p"
 done
 refute desktop 'pacman -Q downgrade' "desktop installs the AUR package of laptop"
+on desktop 'cd /var/lib/pacnix/repo && f=$(ls downgrade-[0-9]*.pkg.tar.zst) && sudo cp $f downgrade-0.1-1-any.pkg.tar.zst && sudo cp $f.sig downgrade-0.1-1-any.pkg.tar.zst.sig && sudo touch other.txt'
+db=$(on desktop 'md5sum /var/lib/pacnix/repo/pacnix-local.db.tar.gz*')
+apply desktop >/dev/null || fail "apply on desktop failed"
+refute desktop 'ls /var/lib/pacnix/repo/downgrade-0.1-1-any.pkg.tar.zst*' "an old package file stays in the repository"
+check desktop 'cd /var/lib/pacnix/repo && ls downgrade-[0-9]*.pkg.tar.zst.sig perl-ole-storage-lite-*.pkg.tar.zst.sig other.txt' "the apply removed a served package or a file that is not a package"
+[[ $db == $(on desktop 'md5sum /var/lib/pacnix/repo/pacnix-local.db.tar.gz*') ]] || fail "the apply changed the database of the repository"
 check desktop 'grep -qx HandleLidSwitch=ignore /etc/systemd/logind.conf.d/50-lid.conf' "the host value of desktop is wrong"
 step "laptop installs from the repository of desktop"
 scenario laptop "{ packages.serverKey = \"$key\"; }"
