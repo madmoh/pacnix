@@ -32,13 +32,13 @@ rc=0
 out=$(apply $h) || rc=$?
 echo "$out" | tail -30
 ((rc == 4)) || fail "the exit status is $rc, not 4"
-matches "$out" '• error: build local package kg-a: aur chroot .* failed' || fail "the output does not show the failed build"
+matches "$out" '• Error: build local package kg-a: aur chroot .* failed' || fail "the output does not show the failed build"
 grep -q '^  | error: the test build fails while the file mode has the word fail' <<<"$out" || fail "the output does not show the reason of the failed build"
-has "$out" '• error: build local package kg-b: it needs kg-a, which did not build' || fail "the output does not show that kg-b needs kg-a"
-has "$out" '• error: trigger kgnext: it runs after trigger kgfail, which failed' || fail "the trigger after the failed trigger did not wait"
-has "$out" '• apply done, but 7 steps failed.' || fail "the summary does not count the failed steps"
+has "$out" '• Error: build local package kg-b: it needs kg-a, which did not build' || fail "the output does not show that kg-b needs kg-a"
+has "$out" '• Error: trigger kgnext: it runs after trigger kgfail, which failed' || fail "the trigger after the failed trigger did not wait"
+has "$out" '• Apply done, but 7 steps failed.' || fail "the summary does not count the failed steps"
 for s in 'build local package kg-a' 'build local package kg-b' 'remove the packages that the configuration does not declare' 'trigger kgfail' 'trigger kgnext' 'systemctl start kg-fail.service' 'activate the home configuration of arch'; do
-	once "$out" "• error: $s:" || fail "the output does not show the failure of $s one time"
+	once "$out" "• Error: $s:" || fail "the output does not show the failure of $s one time"
 done
 grep -q '^• failed step' <<<"$out" && fail "the summary lists the failed steps again"
 check $h 'pacman -Q kg-c dconf' "the independent packages are not installed"
@@ -48,8 +48,8 @@ check $h 'test "$(cat /etc/kg.conf)" = 1' "the file is not written"
 check $h 'systemctl is-enabled kg-fail.service' "the unit is not enabled"
 refute $h 'test -e /var/tmp/kgnext' "the trigger after the failed trigger ran"
 out=$(plan $h)
-for l in 'build local package kg-a' 'build local package kg-b' 'install package kg-a' 'remove package cowsay' 'run trigger kgfail: test -e /etc/kg-ok' 'run trigger kgnext: touch /var/tmp/kgnext' \
-	'run systemctl start kg-fail.service (the last apply did not complete it)' 'activate the home configuration of arch'; do
+for l in 'Build local package kg-a' 'Build local package kg-b' 'Install package kg-a' 'Remove package cowsay' 'Run trigger kgfail: test -e /etc/kg-ok' 'Run trigger kgnext: touch /var/tmp/kgnext' \
+	'Run systemctl start kg-fail.service (the last apply did not complete it)' 'Activate the home configuration of arch'; do
 	has "$out" "$l" || { echo "$out"; fail "the plan does not show: $l"; }
 done
 
@@ -83,10 +83,10 @@ out=$(apply $h) || rc=$?
 echo "$out" | tail -12
 ((rc == 4)) || fail "the exit status is $rc, not 4"
 for n in 1 2 3; do
-	has "$out" "• attempt $n of 4 failed in the network: curl: (6) Could not resolve host: kg.invalid" || fail "the output does not show attempt $n"
+	has "$out" "• Attempt $n of 4 failed in the network: curl: (6) Could not resolve host: kg.invalid" || fail "the output does not show attempt $n"
 done
-once "$out" '• error: build local package kg-d:' || fail "the output does not show the build that failed in the network one time"
-has "$out" '• apply done, but 2 steps failed.' || fail "the summary does not count the failed build and the removal that waits for it"
+once "$out" '• Error: build local package kg-d:' || fail "the output does not show the build that failed in the network one time"
+has "$out" '• Apply done, but 2 steps failed.' || fail "the summary does not count the failed build and the removal that waits for it"
 check $h 'pacman -Q cowsay' "the other package is not installed"
 check $h 'sudo test -d /var/lib/pacnix/build/sources/kg-d' "the sources of the failed build do not stay"
 step "the sources go with the declaration"

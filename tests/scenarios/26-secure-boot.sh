@@ -82,9 +82,9 @@ tty_apply() { printf '%s\n' "$@" | "$vm" ssh sbbox -tt 'NO_COLOR=1 pacnix apply 
 # Fails unless an apply asked for the passphrase and showed the recovery key one
 # time, before the system upgrade, and asked nothing after it.
 order() {
-	once "$1" '• the recovery key of LUKS device root:' || { echo "$1"; fail "the apply does not show the recovery key one time"; }
+	once "$1" '• The recovery key of LUKS device root:' || { echo "$1"; fail "the apply does not show the recovery key one time"; }
 	at() { grep -n -m1 -- "$1" <<<"$2" | cut -d: -f1; }
-	(($(at 'Passphrase of the LUKS device root' "$1") < $(at '• the recovery key of LUKS device root:' "$1") && $(at '• the recovery key of LUKS device root:' "$1") < $(at '^• \(Refreshing package databases\|Upgrading the system\|system upgrade\)' "$1"))) || { echo "$1"; fail "the questions and the recovery key do not come before the system upgrade"; }
+	(($(at 'Passphrase of the LUKS device root' "$1") < $(at '• The recovery key of LUKS device root:' "$1") && $(at '• The recovery key of LUKS device root:' "$1") < $(at '^• \(Refreshing package databases\|Upgrading the system\|system upgrade\)' "$1"))) || { echo "$1"; fail "the questions and the recovery key do not come before the system upgrade"; }
 	sed -n '/^• \(Refreshing package databases\|Upgrading the system\|system upgrade\)/,$p' <<<"$1" | grep -q 'Passphrase\|PIN\|Type written' && { echo "$1"; fail "the apply asks after the system upgrade"; }
 	return 0
 }
@@ -102,8 +102,8 @@ uuid=$(on sbbox 'sudo cryptsetup luksUUID /dev/vda2')
 luks="boot.initrd.luks.devices.root = { device = \"UUID=$uuid\"; tpm2 = { enable = true; pin = true; }; recoveryKey = true; };"
 scenario sbbox "{ boot.loader.systemd-boot.secureBoot = { enable = true; extraFiles = [ \"/boot/EFI/tools/tool.efi\" ]; }; $luks }"
 out=$(plan sbbox) || { echo "$out"; fail "plan failed"; }
-for l in 'create the Secure Boot keys of this host with sbctl' 'sign boot file /boot/EFI/Linux/arch-linux.efi' 'sign boot file /boot/vmlinuz-old' 'sign boot file /boot/EFI/tools/tool.efi' \
-	'sign boot file /usr/lib/systemd/boot/efi/systemd-bootx64.efi as /usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed' 'enroll the Secure Boot keys of this host in the firmware, with microsoft'; do
+for l in 'Create the Secure Boot keys of this host with sbctl' 'Sign boot file /boot/EFI/Linux/arch-linux.efi' 'Sign boot file /boot/vmlinuz-old' 'Sign boot file /boot/EFI/tools/tool.efi' \
+	'Sign boot file /usr/lib/systemd/boot/efi/systemd-bootx64.efi as /usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed' 'Enroll the Secure Boot keys of this host in the firmware, with microsoft'; do
 	has "$out" "$l" || { echo "$out"; fail "the plan does not show: $l"; }
 done
 scenario sbbox "{ boot.loader.systemd-boot.secureBoot = { enable = true; dbAdditions = [ ]; extraFiles = [ \"/boot/EFI/tools/tool.efi\" ]; }; $luks }"
@@ -111,27 +111,27 @@ rc=0
 out=$(apply sbbox) || rc=$?
 echo "$out" | tail -12
 ((rc == 4)) || fail "the exit status is $rc, not 4"
-once "$out" '• error: enroll the Secure Boot keys of this host in the firmware:' || fail "the output does not show the failed enrollment one time"
+once "$out" '• Error: enroll the Secure Boot keys of this host in the firmware:' || fail "the output does not show the failed enrollment one time"
 once "$out" 'Found OptionROM in the bootchain' || fail "the output does not show the message of sbctl one time"
-has "$out" '• the firmware stays in Setup Mode. The firmware loads option ROMs. Add "tpm-eventlog" or "microsoft" to boot.loader.systemd-boot.secureBoot.dbAdditions, then run pacnix apply' || fail "the summary does not tell the next step"
-has "$out" '• apply done, but 1 step failed.' || fail "the summary does not count the failed step"
+has "$out" '• The firmware stays in Setup Mode. The firmware loads option ROMs. Add "tpm-eventlog" or "microsoft" to boot.loader.systemd-boot.secureBoot.dbAdditions, then run pacnix apply' || fail "the summary does not tell the next step"
+has "$out" '• Apply done, but 1 step failed.' || fail "the summary does not count the failed step"
 grep -q '^• failed step' <<<"$out" && fail "the summary lists the failed step again"
 [[ $(secure_boot) == "disabled (setup)" ]] || fail "the firmware is not in Setup Mode after the refusal: $(secure_boot)"
 sb='boot.loader.systemd-boot.secureBoot = { enable = true; dbAdditions = [ "tpm-eventlog" ]; extraFiles = [ "/boot/EFI/tools/tool.efi" ]; };'
 scenario sbbox "{ $sb $luks }"
 out=$(plan sbbox) || { echo "$out"; fail "plan failed"; }
 signed 6 "the boot files are not signed"
-for l in 'enroll the Secure Boot keys of this host in the firmware, with tpm-eventlog' 'note: the TPM2 key of LUKS device root waits: the firmware does not check Secure Boot signatures with the keys of this host yet'; do
+for l in 'Enroll the Secure Boot keys of this host in the firmware, with tpm-eventlog' 'Note: the TPM2 key of LUKS device root waits: the firmware does not check Secure Boot signatures with the keys of this host yet'; do
 	has "$out" "$l" || { echo "$out"; fail "the plan does not show: $l"; }
 done
 # As on a real machine, the user runs the apply in a terminal: it asks for the passphrase for the
 # recovery key, and continues after the user types written.
 out=$(tty_apply pass1 written)
 echo "$out" | tail -8
-matches "$out" '• the recovery key of LUKS device root: [a-z]{8}-' || fail "the apply does not show the recovery key"
+matches "$out" '• The recovery key of LUKS device root: [a-z]{8}-' || fail "the apply does not show the recovery key"
 order "$out"
 has "$out" 'recovery key enrolled: root' || fail "the last line does not show the recovery key"
-has "$out" '• the firmware has the Secure Boot keys of this host. Reboot. If sbctl status then shows that Secure Boot is disabled, turn on Secure Boot in the firmware' || { echo "$out" | tail; fail "the summary does not tell to reboot"; }
+has "$out" '• The firmware has the Secure Boot keys of this host. Reboot. If sbctl status then shows that Secure Boot is disabled, turn on Secure Boot in the firmware' || { echo "$out" | tail; fail "the summary does not tell to reboot"; }
 signed 6 "the boot files are not signed"
 check sbbox 'grep -qx "root UUID=.* none tpm2-device=auto" /etc/crypttab.initramfs' "crypttab.initramfs does not have the TPM2 option"
 check sbbox 'sudo systemd-cryptenroll /dev/vda2 | grep -q recovery' "the recovery key is not enrolled"
@@ -141,8 +141,8 @@ on sbbox 'sudo env PASSWORD=pass1 systemd-cryptenroll --wipe-slot=recovery /dev/
 rc=0
 out=$(on sbbox "printf 'pass1\n' | script -qec 'NO_COLOR=1 pacnix apply' /dev/null" 2>&1 | tr -d '\r') || rc=$?
 echo "$out" | tail -8
-matches "$out" '• the recovery key of LUKS device root: [a-z]{8}-' || fail "the apply does not show the recovery key"
-has "$out" '• error: the input ended before you typed written. The recovery key above is enrolled.' || fail "the apply does not stop at the end of the input"
+matches "$out" '• The recovery key of LUKS device root: [a-z]{8}-' || fail "the apply does not show the recovery key"
+has "$out" '• Error: the input ended before you typed written. The recovery key above is enrolled.' || fail "the apply does not stop at the end of the input"
 grep -q 'apply done\|^• \(Refreshing package databases\|Upgrading the system\|system upgrade\)' <<<"$out" && fail "the apply continued without the confirmation"
 check sbbox 'sudo systemd-cryptenroll /dev/vda2 | grep -q recovery' "the end of the input removed the recovery key"
 
@@ -160,7 +160,7 @@ has "$out" 'apply done.' || { echo "$out" | tail; fail "the apply after the new 
 step "without a terminal, the recovery key waits with a note"
 on sbbox "$wipe_recovery" || fail "the removal of the recovery key by hand failed"
 out=$(apply sbbox) || { echo "$out" | tail; fail "the apply without a terminal failed"; }
-has "$out" '• a recovery key for LUKS device root waits. Run pacnix apply in a terminal to get it' || { echo "$out" | tail; fail "the apply does not tell how to get the recovery key"; }
+has "$out" '• A recovery key for LUKS device root waits. Run pacnix apply in a terminal to get it' || { echo "$out" | tail; fail "the apply does not tell how to get the recovery key"; }
 grep -q 'recovery key of LUKS device root:' <<<"$out" && fail "the apply without a terminal shows a recovery key"
 refute sbbox 'sudo systemd-cryptenroll /dev/vda2 | grep -q recovery' "the apply without a terminal enrolled a recovery key"
 tty_apply pass1 written >/dev/null
@@ -173,7 +173,7 @@ out=$(pacnix sbbox audit) || true
 grep -qx '• Secure Boot: on, with the keys of this host' <<<"$out" || { echo "$out"; fail "the audit does not show the Secure Boot state"; }
 grep -e sbctl -e 'without a signature' <<<"$out" && fail "the audit shows a file of sbctl or a boot file without a signature"
 out=$(plan sbbox)
-has "$out" 'enroll the TPM2 key of LUKS device root: the device has none' || { echo "$out"; fail "the plan does not enroll the TPM2 key"; }
+has "$out" 'Enroll the TPM2 key of LUKS device root: the device has none' || { echo "$out"; fail "the plan does not enroll the TPM2 key"; }
 grep -q 'recovery' <<<"$out" && { echo "$out"; fail "the plan enrolls a second recovery key"; }
 tty_apply pass1 4321 4321 | tail -4
 check sbbox 'sudo systemd-cryptenroll /dev/vda2 | grep -q "tpm2" && sudo systemd-cryptenroll /dev/vda2 | grep -q recovery && sudo cryptsetup luksDump --dump-json-metadata /dev/vda2 | grep -q "\"tpm2-pin\":true"' "the TPM2 key with the PIN or the recovery key is not enrolled"
@@ -208,7 +208,7 @@ on sbbox 'sudo sbctl rotate-keys >/dev/null' || fail "sbctl rotate-keys failed"
 # After a wrong PIN, systemd-cryptsetup asks for the PIN again, then for the passphrase.
 reboot_with "PIN" 4321 "passphrase or recovery key" pass1
 out=$(plan sbbox)
-has "$out" 'enroll the TPM2 key of LUKS device root: the values of the PCRs changed' || { echo "$out"; fail "the plan does not enroll the TPM2 key again"; }
+has "$out" 'Enroll the TPM2 key of LUKS device root: the values of the PCRs changed' || { echo "$out"; fail "the plan does not enroll the TPM2 key again"; }
 tty_apply pass1 4321 4321 >/dev/null
 check sbbox 'test "$(sudo systemd-cryptenroll /dev/vda2 | grep -c tpm2)" = 1' "the device does not have one TPM2 key"
 reboot_with "LUKS2 token PIN" 4321
@@ -220,11 +220,11 @@ on sbbox 'echo text | sudo tee /boot/not-efi.txt >/dev/null && sudo touch /var/t
 before=$(on sbbox "$state")
 scenario sbbox "{ boot.loader.systemd-boot.secureBoot = { enable = true; extraFiles = [ \"/boot/EFI/tools/tool.efi\" \"/boot/not-efi.txt\" ]; }; $luks }"
 out=$(apply sbbox) && fail "the apply signed a file that is not an EFI binary"
-has "$out" '• error: /boot/not-efi.txt is not an EFI binary, thus sbctl cannot sign it. Remove it from boot.loader.systemd-boot.secureBoot.extraFiles' || { echo "$out"; fail "the refusal does not name the file"; }
+has "$out" '• Error: /boot/not-efi.txt is not an EFI binary, thus sbctl cannot sign it. Remove it from boot.loader.systemd-boot.secureBoot.extraFiles' || { echo "$out"; fail "the refusal does not name the file"; }
 grep -q 'system upgrade' <<<"$out" && fail "the refusal came after the upgrade"
 scenario sbbox "{ $luks }"
 out=$(apply sbbox) && fail "the apply removed Secure Boot while the firmware checks the signatures"
-has "$out" '• error: the firmware checks Secure Boot signatures, and without boot.loader.systemd-boot.secureBoot' || { echo "$out"; fail "the refusal does not tell to turn off Secure Boot"; }
+has "$out" '• Error: the firmware checks Secure Boot signatures, and without boot.loader.systemd-boot.secureBoot' || { echo "$out"; fail "the refusal does not tell to turn off Secure Boot"; }
 [[ $before == "$(on sbbox "$state")" ]] || fail "a refused apply changed the system"
 
 step "a declared PCR without a value or a measurement keeps the TPM2 key, and the key waits"
@@ -232,17 +232,17 @@ tokens='sudo cryptsetup luksDump --dump-json-metadata /dev/vda2 | jq -c .tokens'
 pcrs() { scenario sbbox "{ $sb boot.initrd.luks.devices.root = { device = \"UUID=$uuid\"; tpm2.enable = true; tpm2.pcrs = [ $1 ]; recoveryKey = true; }; }"; }
 pcrs '7 24'
 out=$(plan sbbox)
-has "$out" '• note: the TPM2 key of LUKS device root waits: pacnix cannot read PCR 24 of the SHA-256 bank of the TPM2 chip' || { echo "$out"; fail "the plan does not wait for a PCR that cannot be read"; }
+has "$out" '• Note: the TPM2 key of LUKS device root waits: pacnix cannot read PCR 24 of the SHA-256 bank of the TPM2 chip' || { echo "$out"; fail "the plan does not wait for a PCR that cannot be read"; }
 check sbbox 'test "$(cat /sys/class/tpm/tpm0/pcr-sha256/23)" = 0000000000000000000000000000000000000000000000000000000000000000' "PCR 23 is not zero"
 pcrs '7 23 7'
 before=$(on sbbox "$tokens")
 out=$(plan sbbox)
-has "$out" '• note: the TPM2 key of LUKS device root waits: PCR 23 of the SHA-256 bank has no measurement for this boot' || { echo "$out"; fail "the plan does not wait for a PCR without a measurement"; }
-grep -q '^• plan done: no change' <<<"$out" || { echo "$out"; fail "the plan counts the TPM2 key that waits as a change"; }
+has "$out" '• Note: the TPM2 key of LUKS device root waits: PCR 23 of the SHA-256 bank has no measurement for this boot' || { echo "$out"; fail "the plan does not wait for a PCR without a measurement"; }
+grep -q '^• Plan done: no changes' <<<"$out" || { echo "$out"; fail "the plan counts the TPM2 key that waits as a change"; }
 out=$(tty_apply)
 echo "$out" | tail -4
-has "$out" '• the TPM2 key of LUKS device root waits: PCR 23 of the SHA-256 bank has no measurement for this boot' || fail "the apply does not show that the TPM2 key waits"
-has "$out" '• apply done. No changes. Exit status 0.' || fail "the apply counts the TPM2 key that waits as a change"
+has "$out" '• The TPM2 key of LUKS device root waits: PCR 23 of the SHA-256 bank has no measurement for this boot' || fail "the apply does not show that the TPM2 key waits"
+has "$out" '• Apply done. No changes. Exit status 0.' || fail "the apply counts the TPM2 key that waits as a change"
 grep -q 'Passphrase' <<<"$out" && fail "the apply asks for the passphrase for a TPM2 key that waits"
 [[ $(on sbbox "$tokens") == "$before" ]] || fail "the apply changed the TPM2 key while a PCR has no measurement"
 on sbbox 'sudo env PASSWORD=pass1 systemd-cryptenroll --wipe-slot=tpm2 /dev/vda2 >/dev/null 2>&1' || fail "the removal of the TPM2 key by hand failed"
@@ -251,7 +251,7 @@ check sbbox "$tokens | jq -e 'all(.[]; .type != \"systemd-tpm2\")'" "the apply e
 # systemd-pcrextend measures into PCR 23 and writes the event to the log of systemd.
 on sbbox 'sudo /usr/lib/systemd/systemd-pcrextend --pcr=23 pacnix-test' || fail "systemd-pcrextend failed"
 out=$(plan sbbox)
-has "$out" 'enroll the TPM2 key of LUKS device root: the device has none' || { echo "$out"; fail "the plan does not enroll the TPM2 key after the measurement"; }
+has "$out" 'Enroll the TPM2 key of LUKS device root: the device has none' || { echo "$out"; fail "the plan does not enroll the TPM2 key after the measurement"; }
 tty_apply pass1 >/dev/null
 check sbbox "$tokens | jq -e '[.[] | select(.type == \"systemd-tpm2\")] | length == 1 and .[0][\"tpm2-pcrs\"] == [7, 23] and .[0][\"tpm2-pcr-bank\"] == \"sha256\"'" "the TPM2 key is not sealed to PCRs 7 and 23 of the SHA-256 bank"
 check sbbox 'sudo cryptsetup open --test-passphrase --token-only /dev/vda2' "the new TPM2 key does not unseal"
@@ -259,12 +259,12 @@ empty_plan sbbox
 # Without the event in the log, the value of PCR 23 has no measurement event, also for a key that is current.
 on sbbox 'sudo rm /run/log/systemd/tpm2-measure.log'
 out=$(plan sbbox)
-has "$out" '• note: the TPM2 key of LUKS device root waits: PCR 23 of the SHA-256 bank has no measurement event in the event log of this boot' || { echo "$out"; fail "the plan does not wait for a PCR without a measurement event"; }
+has "$out" '• Note: the TPM2 key of LUKS device root waits: PCR 23 of the SHA-256 bank has no measurement event in the event log of this boot' || { echo "$out"; fail "the plan does not wait for a PCR without a measurement event"; }
 
 step "a TPM2 key without a PIN on PCRs 0 and 7 unlocks with no prompt"
 scenario sbbox "{ $sb boot.initrd.luks.devices.root = { device = \"UUID=$uuid\"; tpm2 = { enable = true; pcrs = [ 0 7 ]; }; recoveryKey = true; }; }"
 out=$(plan sbbox)
-has "$out" 'enroll the TPM2 key of LUKS device root: the PCRs or the PIN changed' || { echo "$out"; fail "the plan does not enroll the TPM2 key again"; }
+has "$out" 'Enroll the TPM2 key of LUKS device root: the PCRs or the PIN changed' || { echo "$out"; fail "the plan does not enroll the TPM2 key again"; }
 tty_apply pass1 >/dev/null
 check sbbox 'sudo cryptsetup luksDump --dump-json-metadata /dev/vda2 | jq -e "[.tokens[] | select(.type == \"systemd-tpm2\")] | length == 1 and .[0][\"tpm2-pcrs\"] == [0, 7] and .[0][\"tpm2-pin\"] != true"' "the TPM2 key without a PIN on PCRs 0 and 7 is not enrolled"
 "$vm" reboot sbbox || fail "the system does not unlock with no prompt"
@@ -274,7 +274,7 @@ step "without the TPM2 declaration, the TPM2 key goes, and sbctl stops signing t
 on sbbox 'sudo rm /boot/loader/entries/old.conf /boot/vmlinuz-old'
 scenario sbbox "{ boot.loader.systemd-boot.secureBoot.enable = true; boot.initrd.luks.devices.root = { device = \"UUID=$uuid\"; recoveryKey = true; }; }"
 out=$(plan sbbox)
-for l in 'remove the TPM2 key of LUKS device root' 'stop signing file /boot/vmlinuz-old, which is not a boot file of the configuration' 'stop signing file /boot/EFI/tools/tool.efi, which is not a boot file of the configuration'; do
+for l in 'Remove the TPM2 key of LUKS device root' 'Stop signing file /boot/vmlinuz-old, which is not a boot file of the configuration' 'Stop signing file /boot/EFI/tools/tool.efi, which is not a boot file of the configuration'; do
 	has "$out" "$l" || { echo "$out"; fail "the plan does not show: $l"; }
 done
 out=$(apply sbbox) || { echo "$out" | tail -20; fail "the apply without TPM2 failed"; }

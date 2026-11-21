@@ -67,8 +67,8 @@ extern "C" fn interrupt(_: libc::c_int) {
         }
     }
     let text: &[u8] = match CHANGING.load(Relaxed) {
-        false => "\n• interrupted before any change. Nothing changed. Exit status 130.\n".as_bytes(),
-        true => "\n• stopped at once by a second interrupt. The step that ran can be incomplete. Run pacnix again to complete it. Exit status 130.\n".as_bytes(),
+        false => "\n• Interrupted before any change. Nothing changed. Exit status 130.\n".as_bytes(),
+        true => "\n• Stopped at once by a second interrupt. The step that ran can be incomplete. Run pacnix again to complete it. Exit status 130.\n".as_bytes(),
     };
     unsafe {
         if TERMINAL_SAVED.load(Relaxed) {
@@ -195,20 +195,14 @@ pub fn plan_line(l: &(String, String)) -> String {
     format!("  {}", l.1.replacen(&l.0, &item(&l.0), 1).replace('\n', "\n  "))
 }
 
-/// The width of a line without the marks of names.
-fn width(text: &str) -> usize {
-    text.chars().filter(|c| *c >= ' ' || *c == crate::BIND).count()
-}
-
 /// The kind of the last line: 0 for none, 1 for a line of pacnix, 2 for an
 /// indented line or a line of a command.
 static PREV: Mutex<u8> = Mutex::new(0);
 /// The live progress line.
 static BAR: Mutex<Option<indicatif::ProgressBar>> = Mutex::new(None);
 
-/// Writes a line. Lines break between words before column 80; the next parts of a
-/// broken line have two more spaces of indent. An empty line goes before a heading
-/// and after a block of indented lines. With a terminal, the names are bold,
+/// Writes a line. The terminal wraps a long line at its own width. An empty line
+/// goes before a heading and after a block of indented lines. With a terminal, the names are bold,
 /// errors are red and the live progress line stays below the line.
 pub fn emit(text: &str, err: bool) {
     let mut prev = PREV.lock().unwrap();
@@ -216,7 +210,7 @@ pub fn emit(text: &str, err: bool) {
     let gap = top && (*prev == 2 || (*prev == 1 && text.split('\n').next().is_some_and(|l| l.ends_with(':'))));
     *prev = if !top || text.contains('\n') { 2 } else { 1 };
     drop(prev);
-    let text = format!("{}{}", if gap { "\n" } else { "" }, paint(&wrapped(text)));
+    let text = format!("{}{}", if gap { "\n" } else { "" }, paint(text));
     let write = || match err {
         true => eprintln!("{text}"),
         false => println!("{text}"),
@@ -238,7 +232,6 @@ pub fn gap() {
 /// The text with styles on a terminal, or plain.
 fn paint(text: &str) -> String {
     use anstyle::{AnsiColor, Style};
-    let text = text.replace(crate::BIND, " ");
     if !live() {
         return text.replace(['\u{2}', '\u{3}'], "");
     }
@@ -246,7 +239,7 @@ fn paint(text: &str) -> String {
     let prefix = Style::new().bold().fg_color(Some(AnsiColor::Blue.into()));
     let red = Style::new().bold().fg_color(Some(AnsiColor::Red.into()));
     let text = text.replace('\u{2}', &bold.render().to_string()).replace('\u{3}', &bold.render_reset().to_string());
-    let red_from = text.starts_with("• error: ");
+    let red_from = text.starts_with("• Error: ");
     match text.strip_prefix("• ") {
         Some(rest) if red_from => format!("{prefix}•{prefix:#} {red}{}{red:#}", rest.replace(&bold.render_reset().to_string(), &format!("{bold:#}{red}"))),
         Some(rest) => format!("{prefix}•{prefix:#} {rest}"),
@@ -282,38 +275,15 @@ pub fn end_spinner() {
     end_bar();
 }
 
-fn wrapped(text: &str) -> String {
-    let lines = text.split('\n').map(|line| {
-        if width(line) <= 80 {
-            return line.to_string();
-        }
-        // Keep a continuation deeper than the items under a heading.
-        let indent = line.len() - line.trim_start().len();
-        let next = if line.starts_with("• ") { 4 } else { indent + 2 };
-        let (mut out, mut col) = (" ".repeat(indent), indent);
-        for (i, word) in line.split_whitespace().enumerate() {
-            let len = width(word);
-            if i > 0 && col + 1 + len > 80 {
-                // A short word, for example "in", moves to the next line with the word after it.
-                let last = out.rsplit_once(' ').filter(|(head, w)| width(w) <= 3 && !head.rsplit('\n').next().unwrap_or_default().trim().is_empty()).map(|(head, w)| (head.len(), w.to_string()));
-                let carry = last.map(|(at, w)| {
-                    out.truncate(at);
-                    format!("{w} ")
-                });
-                out.push('\n');
-                out.push_str(&" ".repeat(next));
-                out.push_str(carry.as_deref().unwrap_or_default());
-                col = next + carry.map_or(0, |c| width(&c));
-            } else if i > 0 {
-                out.push(' ');
-                col += 1;
-            }
-            out.push_str(word);
-            col += len;
-        }
-        out
-    });
-    lines.collect::<Vec<_>>().join("\n")
+/// The name of a verb at the start of a sentence.
+fn title(verb: &str) -> &str {
+    match verb {
+        "plan" => "Plan",
+        "apply" => "Apply",
+        "audit" => "Audit",
+        "uninstall" => "Uninstall",
+        _ => verb,
+    }
 }
 
 /// Ends the stage when it goes out of scope.
@@ -396,7 +366,7 @@ pub fn close(verb: &str, ok: bool) -> i32 {
     let code = if interrupted() { 130 } else if !ok { 1 } else if failed > 0 { 4 } else { 0 };
     if !CHANGING.load(Relaxed) {
         if code != 0 {
-            say!("• {verb} stopped before any change. Exit status {code}.");
+            say!("• {} stopped before any change. Exit status {code}.", title(verb));
         }
         return code;
     }
@@ -409,10 +379,10 @@ pub fn close(verb: &str, ok: bool) -> i32 {
         .iter()
         .map(|((noun, verb), items)| match items.len() <= 3 {
             true => crate::named(noun, verb, items),
-            // A count does not break between lines, and names the declared packages that it has.
+            // A count names the declared packages that it has.
             false => {
                 let declared: Vec<&String> = items.iter().filter(|i| *noun == "package" && DECLARED.lock().unwrap().contains(*i)).collect();
-                let text = format!("{} {verb}", crate::count(items.len(), noun)).trim_end().replace(' ', &crate::BIND.to_string());
+                let text = format!("{} {verb}", crate::count(items.len(), noun)).trim_end().to_string();
                 match declared.len() {
                     1..=3 if declared.len() < items.len() => format!("{text}: {} and {} {}", self::items(&declared), items.len() - declared.len(), if items.len() - declared.len() == 1 { "dependency" } else { "dependencies" }),
                     _ => text,
@@ -428,10 +398,11 @@ pub fn close(verb: &str, ok: bool) -> i32 {
     let step = RUN.lock().unwrap().as_ref().map(|r| r.0.clone()).unwrap_or_default();
     gap();
     match code {
-        0 => say!("• {verb} done. {changes} Exit status 0."),
-        4 => say!("• {verb} done, but {} failed. {changes} The next apply does the failed steps again. Exit status 4.", crate::count(failed, "step")),
+        0 => say!("• {} done. {changes} Exit status 0.", title(verb)),
+        4 => say!("• {} done, but {} failed. {changes} The next apply does the failed steps again. Exit status 4.", title(verb), crate::count(failed, "step")),
         _ => say!(
-            "• {verb} {} at the step: {step}. The steps before it are done.{}{changes} Run pacnix {verb} again to complete it. Exit status {code}.",
+            "• {} {} at the step: {step}. The steps before it are done.{}{changes} Run pacnix {verb} again to complete it. Exit status {code}.",
+            title(verb),
             if code == 130 { "interrupted" } else { "stopped" },
             if changes.is_empty() { "" } else { " " }
         ),
@@ -541,8 +512,8 @@ pub fn passed(step: &str) -> bool {
 /// Records and shows a step that failed, so that the next apply does it again,
 /// also when this run stops later. Returns false.
 pub fn failure(step: &str, reason: &str) -> bool {
-    say!("• error: {step}: {reason}");
-    say!("• the apply continues without this step");
+    say!("• Error: {step}: {reason}");
+    say!("• The apply continues without this step.");
     FAILED.lock().unwrap().push(step.to_string());
     let mut steps = retries();
     if steps.insert(step.to_string()) {
@@ -596,8 +567,8 @@ pub fn heartbeat(command: &str, minutes: u64, meter: &str) {
         _ => (command.to_string(), minutes),
     };
     match meter.trim() {
-        "" => say!("• the step continues after {minutes} min without output: {step}"),
-        meter => say!("• the step continues after {minutes} min: {step}: {meter}"),
+        "" => say!("• The step continues after {minutes} min without output: {step}"),
+        meter => say!("• The step continues after {minutes} min: {step}: {meter}"),
     }
 }
 
@@ -642,9 +613,9 @@ pub fn summary() {
     let fresh: BTreeMap<String, String> = notes.into_iter().filter(|(p, n)| saved.scriptlets.get(p) != Some(n)).collect();
     let reboot: Vec<String> = reboot_reasons().into_iter().filter(|r| !before.contains(r)).collect();
     if !reboot.is_empty() {
-        say!("• reboot to use the changes: {}", reboot.join("; "));
+        say!("• Reboot to use the changes: {}.", reboot.join("; "));
     } else if reboot_reasons().is_empty() && !reasons(STARTED.load(Relaxed)).is_empty() {
-        say!("• no reboot is necessary");
+        say!("• No reboot is necessary.");
     }
     // The messages of the declared packages and the install notes of the configuration show; of the other packages, only the names.
     let (mine, other): (Vec<_>, Vec<_>) = fresh.iter().partition(|(p, _)| DECLARED.lock().unwrap().contains(p));
@@ -654,24 +625,24 @@ pub fn summary() {
     let lines = |text: &str| text.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n    ");
     if manual.is_empty() {
         if !mine.is_empty() {
-            say!("• new messages of the install scripts of declared packages (pacnix audit shows them again):");
+            say!("• New messages of the install scripts of declared packages (pacnix audit shows them again):");
         }
         for (pkg, note) in &mine {
             say!("  {}: {}", item(pkg), lines(note));
         }
         if !names.is_empty() {
-            say!("• new messages of the install scripts of {}: run pacnix audit to read them", items(&names));
+            say!("• New messages of the install scripts of {}: run pacnix audit to read them.", items(&names));
         }
     } else {
-        say!("• notes{}:", if fresh.is_empty() { "" } else { " (pacnix audit shows the messages of the install scripts)" });
+        say!("• Notes{}:", if fresh.is_empty() { "" } else { " (pacnix audit shows the messages of the install scripts)" });
         for (pkg, note) in &mine {
-            say!("  package {}: {}", item(pkg), lines(note));
+            say!("  Package {}: {}", item(pkg), lines(note));
         }
         for (name, text) in &manual {
             say!("  {}: {}", item(name), lines(text));
         }
         if !names.is_empty() {
-            say!("  new messages of the install scripts of {}", items(&names));
+            say!("  New messages of the install scripts of {}.", items(&names));
         }
     }
     // After the notes show, so that a run that stops before them shows them again.
@@ -686,7 +657,7 @@ pub fn summary() {
         }
     }
     for f in &pacnew {
-        say!("• new file {f}: merge it with {}", f.trim_end_matches(".pacnew"));
+        say!("• New file {f}: merge it with {}.", f.trim_end_matches(".pacnew"));
     }
     for l in LAST.lock().unwrap().iter() {
         say!("{l}");
@@ -695,9 +666,9 @@ pub fn summary() {
 
 /// The items of the summary that stay true after the run, for the audit.
 pub fn audit(report: &mut Vec<String>) {
-    report.extend(reboot_reasons().into_iter().map(|r| format!("reboot necessary: {r}")));
+    report.extend(reboot_reasons().into_iter().map(|r| format!("Reboot necessary: {r}")));
     let saved: Notes = std::fs::read(NOTES).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    report.extend(saved.last.iter().map(|(p, n)| format!("install note of the last change: {p}\n  {}", n.trim_end().replace('\n', "\n  "))));
+    report.extend(saved.last.iter().map(|(p, n)| format!("Install note of the last change: {p}\n  {}", n.trim_end().replace('\n', "\n  "))));
 }
 
 fn boot_time() -> i64 {

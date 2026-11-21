@@ -24,11 +24,11 @@ pub struct Plan {
 
 impl Plan {
     pub fn print(&self, l: &mut crate::generation::Lines) {
-        l.extend(self.groupadd.iter().map(|(g, _)| (g.clone(), format!("create group {g}"))));
-        l.extend(self.useradd.iter().map(|(u, _)| (u.clone(), format!("create user {u}"))));
-        l.extend(self.usermod.iter().map(|(u, _, what)| (u.clone(), format!("change user {u}: {}", what.join(", ")))));
-        l.extend(self.userdel.iter().map(|u| (u.clone(), format!("delete user {u} (the home directory stays)"))));
-        l.extend(self.groupdel.iter().map(|g| (g.clone(), format!("delete group {g}"))));
+        l.extend(self.groupadd.iter().map(|(g, _)| (g.clone(), format!("Create group {g}"))));
+        l.extend(self.useradd.iter().map(|(u, _)| (u.clone(), format!("Create user {u}"))));
+        l.extend(self.usermod.iter().map(|(u, _, what)| (u.clone(), format!("Change user {u}: {}", what.join(", ")))));
+        l.extend(self.userdel.iter().map(|u| (u.clone(), format!("Delete user {u} (the home directory stays)"))));
+        l.extend(self.groupdel.iter().map(|g| (g.clone(), format!("Delete group {g}"))));
     }
 }
 
@@ -89,7 +89,7 @@ pub fn plan(g: &Generation, old: &Generation) -> Result<Plan> {
             continue;
         };
         if let Some(uid) = u.uid.filter(|uid| f.get(2) != Some(&uid.to_string())) {
-            bail!("users.users.{name}.uid is {uid}, and the existing account has the ID {}. pacnix does not change the ID of an account", f[2]);
+            bail!("users.users.{name}.uid is {uid}, and the existing account has the ID {}. pacnix does not change the ID of an account.", f[2]);
         }
         let (mut args, mut what) = (Vec::new(), Vec::new());
         if let Some(shell) = u.shell.as_ref().filter(|s| f.get(6) != Some(s)) {
@@ -158,7 +158,7 @@ pub fn apply(plan: &Plan) -> Result<()> {
                     bail!("chpasswd failed for the user {name}");
                 }
             }
-            None => report::last(format!("• the new user {name} has no password. Set it with: passwd {name}")),
+            None => report::last(format!("• The new user {name} has no password. Set it with: passwd {name}")),
         }
     }
     for (name, args, _) in &plan.usermod {

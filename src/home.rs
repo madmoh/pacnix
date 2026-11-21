@@ -23,7 +23,7 @@ impl Plan {
     /// The plan lines: activations, and created, changed, deleted and restored home files.
     pub fn print(&self, l: [&mut Lines; 5]) {
         let [activate, created, changed, deleted, restored] = l;
-        activate.extend(self.activate.iter().map(|(u, _)| (u.clone(), self.step(u, "activate"))));
+        activate.extend(self.activate.iter().map(|(u, _)| (u.clone(), self.step(u, "Activate"))));
         created.extend(self.lines[0].iter().cloned());
         changed.extend(self.lines[1].iter().cloned());
         deleted.extend(self.lines[2].iter().cloned());
@@ -137,7 +137,7 @@ pub fn apply(g: &Generation, plan: &Plan) -> Result<()> {
         crate::isolated(&step(user), || activate(user, &h.directory, out, &out_path(&h.path)?))?;
     }
     if !plan.activate.is_empty() {
-        crate::report::last("• log in again to use the new home configuration".to_string());
+        crate::report::last("• Log in again to use the new home configuration.".to_string());
     }
     for path in &plan.originals {
         let path = Path::new(path);

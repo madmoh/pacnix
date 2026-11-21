@@ -70,11 +70,11 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
             continue;
         }
         if path.ends_with(".pacnew") || path.ends_with(".pacsave") {
-            report.push(format!("{} file: {path}", &path[path.rfind('.').unwrap() + 1..]));
+            report.push(format!("File {}: {path}", &path[path.rfind('.').unwrap()..]));
             continue;
         }
         let kind = if e.file_type().is_dir() { "directory" } else { "file" };
-        report.push(format!("unowned {kind}: {path}{}", origins.of(&path, false)));
+        report.push(format!("Unowned {kind}: {path}{}", origins.of(&path, false)));
         if e.file_type().is_dir() {
             walk.skip_current_dir();
         }
@@ -86,26 +86,26 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
         let Some((path, why)) = rest.rsplit_once(" (") else { continue };
         let content = why.contains("checksum") || why.contains("Size");
         if content && !g.m.files.contains_key(path) && !claimed.is_match(path) {
-            report.push(format!("modified package file: {path} ({pkg})"));
+            report.push(format!("Modified package file: {path} ({pkg})"));
         }
     }
 
     for (path, spec) in &g.m.files {
         if !files::matches(path, spec) {
-            report.push(format!("managed file differs from the generation: {path}"));
+            report.push(format!("Managed file differs from the generation: {path}"));
         }
     }
 
     let (declared, _) = crate::packages::declared(&g, &crate::packages::sync_names()?)?;
     for p in output(cmd("pacman", &["-Qqe"]))?.lines() {
         if !declared.contains(p) {
-            report.push(format!("explicit package not declared: {p}"));
+            report.push(format!("Explicit package not declared: {p}"));
         }
     }
 
     let units = crate::units::plan(&g, &g, true)?;
-    report.extend(units.disable.iter().map(|u| format!("enabled unit not declared and not enabled by a vendor preset: {u}")));
-    report.extend(units.enable.iter().filter(|u| g.m.units.enable.contains(*u)).map(|u| format!("declared unit not enabled: {u}")));
+    report.extend(units.disable.iter().map(|u| format!("Enabled unit not declared and not enabled by a vendor preset: {u}")));
+    report.extend(units.enable.iter().filter(|u| g.m.units.enable.contains(*u)).map(|u| format!("Declared unit not enabled: {u}")));
 
     home(&g, &origins, &mut report)?;
     if let Some(state) = crate::secure::audit(&g, &mut report)? {
@@ -123,7 +123,7 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
 /// each kind, and at the end one line that tells what to do.
 fn print(report: &[String]) {
     if report.is_empty() {
-        say!("• the system agrees with the configuration.");
+        say!("• The system agrees with the configuration.");
         return;
     }
     let mut kinds: Vec<(&str, Vec<&str>)> = Vec::new();
@@ -135,17 +135,16 @@ fn print(report: &[String]) {
         }
     }
     match report.len() {
-        1 => say!("• 1 item that is not declared or that differs from the configuration"),
-        n => say!("• {n} items that are not declared or that differ from the configuration"),
+        1 => say!("• 1 item that is not declared or that differs from the configuration:"),
+        n => say!("• {n} items that are not declared or that differ from the configuration:"),
     }
     for (kind, items) in &kinds {
         say!("  {kind} ({}):", items.len());
         items.iter().for_each(|i| say!("    {}", i.replace('\n', "\n    ")));
     }
-    say!("• apply corrects the managed files, the declared units, the boot files and the TPM2 keys. It never removes a package that it did not install. Declare each other item, add it to claims or audit.ignore, or remove it.");
+    say!("• Apply corrects the managed files, the declared units, the boot files and the TPM2 keys. It never removes a package that it did not install. Declare each other item, add it to claims or audit.ignore, or remove it.");
     crate::report::gap();
-    let kinds: Vec<String> = kinds.iter().map(|(kind, items)| format!("{} {kind}", items.len())).collect();
-    say!("• audit done: {}: {}.", crate::count(report.len(), "item"), kinds.join(", "));
+    say!("• Audit done: {}.", crate::count(report.len(), "item"));
 }
 
 /// Lists entries of ~/.config, ~/.local/share, ~/.cache and dot entries of
@@ -170,7 +169,7 @@ fn home(g: &Generation, origins: &Origins, report: &mut Vec<String>) -> Result<(
             let explained = claims.is_match(&rel)
                 || managed.iter().any(|m| m == &rel || m.starts_with(&format!("{rel}/")));
             if !explained {
-                report.push(format!("unclaimed home path: {dir}/{rel}{}", origins.of(&rel, true)));
+                report.push(format!("Unclaimed home path: {dir}/{rel}{}", origins.of(&rel, true)));
             }
         }
     }

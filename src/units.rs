@@ -63,15 +63,15 @@ impl Plan {
         let mut add = |u: &String, line: String| l.push((u.clone(), line));
         for u in &self.enable {
             add(u, match self.declared.contains(u) {
-                true => format!("enable and start unit {u}"),
-                false => format!("enable unit {u} (a vendor preset, it starts at the next boot)"),
+                true => format!("Enable and start unit {u}"),
+                false => format!("Enable unit {u} (a vendor preset, it starts at the next boot)"),
             });
         }
-        self.disable.iter().for_each(|u| add(u, format!("disable and stop unit {u}")));
-        self.mask.iter().for_each(|u| add(u, format!("mask unit {u}")));
-        self.unmask.iter().for_each(|u| add(u, format!("unmask unit {u}")));
+        self.disable.iter().for_each(|u| add(u, format!("Disable and stop unit {u}")));
+        self.mask.iter().for_each(|u| add(u, format!("Mask unit {u}")));
+        self.unmask.iter().for_each(|u| add(u, format!("Unmask unit {u}")));
         let retry = self.retry.iter().filter(|c| !c.starts_with("systemctl try-restart "));
-        retry.for_each(|c| add(&c.rsplit(' ').next().unwrap_or(c).to_string(), format!("run {c} (the last apply did not complete it)")));
+        retry.for_each(|c| add(&c.rsplit(' ').next().unwrap_or(c).to_string(), format!("Run {c} (the last apply did not complete it)")));
     }
 }
 
@@ -290,7 +290,7 @@ pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
         }
         // systemd refuses to start a socket while its service runs, for example systemd-journald-audit.socket.
         if u.ends_with(".socket") && output(cmd("systemctl", &["show", "-P", "Triggers", u]))?.split_whitespace().any(|s| cmd("systemctl", &["is-active", "--quiet", s]).status().is_ok_and(|x| x.success())) {
-            say!("• unit {u} starts at the next boot, because its service runs");
+            say!("• Unit {u} starts at the next boot, because its service runs.");
             continue;
         }
         report::progress(&format!("Starting unit {u}"));

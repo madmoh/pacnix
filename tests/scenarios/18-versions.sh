@@ -12,7 +12,7 @@ old=$(curl -fsS https://archive.archlinux.org/packages/t/tree/ | grep -o 'tree-[
 step "pin tree to $old (the repository has $now)"
 scenario $h "{ packages.repo = [ \"tree\" ]; packages.versions.tree = \"$old\"; }"
 out=$(plan $h)
-has "$out" 'install package from the Arch Linux Archive https://archive.archlinux.org/packages/t/tree/tree-' || { echo "$out"; fail "the plan does not use the archive"; }
+has "$out" 'Install package from the Arch Linux Archive https://archive.archlinux.org/packages/t/tree/tree-' || { echo "$out"; fail "the plan does not use the archive"; }
 apply $h >/dev/null || fail "apply failed"
 check $h "test \"\$(pacman -Q tree)\" = 'tree $old'" "tree is not at the pinned version"
 empty_plan $h
@@ -45,7 +45,7 @@ step "a new maintainer of a built AUR package needs a confirmation"
 on $h "sudo jq '.downgrade.maintainer = \"someone-else\"' /var/lib/pacnix/aur.json | sudo tee /var/lib/pacnix/aur.json.new >/dev/null && sudo mv /var/lib/pacnix/aur.json.new /var/lib/pacnix/aur.json && sudo GNUPGHOME=/var/lib/pacnix/gnupg repo-remove -s -q /var/lib/pacnix/repo/pacnix-local.db.tar.gz downgrade"
 out=$(pacnix $h apply 2>&1) && fail "apply built a package with a new maintainer without a confirmation"
 matches "$out" 'The AUR package downgrade has new maintainers: .*, before: someone-else \(co-maintainers: .*\)\.' || { echo "$out" | tail -5; fail "apply does not show the new maintainer"; }
-has "$out" '• error: these items need a confirmation. Give --yes to continue without a terminal' || fail "apply without a terminal does not ask for --yes"
+has "$out" '• Error: these items need a confirmation. Give --yes to continue without a terminal' || fail "apply without a terminal does not ask for --yes"
 apply $h >/dev/null || fail "apply --yes failed"
 out=$(pacnix $h apply 2>&1) || { echo "$out" | tail -5; fail "apply asks again after the confirmation"; }
 pass

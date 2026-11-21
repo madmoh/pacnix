@@ -57,7 +57,7 @@ step "remove them"
 scenario $h ''
 out=$(pacnix $h apply 2>&1) && fail "apply removed packages without a confirmation"
 matches "$out" 'Remove [0-9]+ packages that are no longer declared and that pacnix installed, with the dependencies that only they need: .*downgrade.*htop' || { echo "$out" | tail -5; fail "apply does not list the removals in the question"; }
-has "$out" '• error: these items need a confirmation. Give --yes to continue without a terminal' || fail "apply without a terminal does not ask for --yes"
+has "$out" '• Error: these items need a confirmation. Give --yes to continue without a terminal' || fail "apply without a terminal does not ask for --yes"
 check $h "pacman -Q htop" "apply changed the system before the confirmation"
 apply $h || fail "apply failed"
 for p in htop downgrade perl-email-outlook-message perl-ole-storage-lite; do

@@ -24,8 +24,8 @@ new=$(on old 'pacman -Q linux | cut -d" " -f2')
 [[ $new != "$kernel" ]] || fail "the kernel did not change ($kernel)"
 echo "kernel $kernel -> $new"
 running=$(on old uname -r)
-has "$out" "the running kernel $running is not installed" || { grep '^• reboot' <<<"$out"; fail "the summary does not tell to reboot for the kernel"; }
-matches "$out" '• reboot to use the changes: .*the module v4l2loopback was built for the kernel [^ ]*, which does not run' || fail "the summary does not name the DKMS module for the new kernel"
+has "$out" "the running kernel $running is not installed" || { grep '^• Reboot' <<<"$out"; fail "the summary does not tell to reboot for the kernel"; }
+matches "$out" '• Reboot to use the changes: .*the module v4l2loopback was built for the kernel [^ ]*, which does not run' || fail "the summary does not name the DKMS module for the new kernel"
 check old "dkms status | grep -q 'v4l2loopback.*${new%.arch*}.*installed' || dkms status | grep v4l2loopback | grep -q '$(echo $new | sed 's/\.arch/-arch/')'" "the DKMS module is not built for the new kernel"
 # The backup files did not change upstream in this period. A changed backup
 # checksum in the local database makes the reinstall of pacman act as if they did.
@@ -33,7 +33,7 @@ on old 'sudo sed -i -E "/^etc\/(pacman|makepkg)\.conf\t/s/\t.*/\t000000000000000
 check old 'test -e /etc/pacman.conf.pacnew && test -e /etc/makepkg.conf.pacnew' "the reinstall made no .pacnew files"
 apply old >/dev/null || fail "apply after the .pacnew files failed"
 refute old 'test -e /etc/pacman.conf.pacnew' "the .pacnew of a managed file remains"
-audit_has "$(pacnix old audit)" 'pacnew file' /etc/makepkg.conf.pacnew || fail "the audit does not list the .pacnew of an unmanaged file"
+audit_has "$(pacnix old audit)" 'File .pacnew' /etc/makepkg.conf.pacnew || fail "the audit does not list the .pacnew of an unmanaged file"
 empty_plan old
 step "reboot into the new kernel"
 "$vm" reboot old

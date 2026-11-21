@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 /// Make an Arch Linux system agree with its configuration in a Nix flake.
 #[derive(Parser)]
-#[command(version, after_help = "To start, see \"First configuration\" in /usr/share/doc/pacnix/README.md")]
+#[command(version, after_help = "To start, see \"First configuration\" in /usr/share/doc/pacnix/README.md.")]
 struct Cli {
     /// The flake [default: /etc/pacnix]
     #[arg(long, global = true, default_value = "/etc/pacnix", hide_default_value = true)]
@@ -101,7 +101,7 @@ fn main() {
     let result = run(cli);
     if let Err(e) = &result {
         if !report::interrupted() {
-            esay!("• error: {e:#}");
+            esay!("• Error: {e:#}");
         }
     }
     std::process::exit(report::close(verb, result.is_ok()));
@@ -133,16 +133,16 @@ fn run(cli: Cli) -> Result<()> {
     };
     // pacnix uses systemd to make changes: it does not run in a chroot, for example arch-chroot.
     if !packages::booted() {
-        bail!("pacnix runs only on the booted system. Boot the installed system, then run pacnix again");
+        bail!("pacnix runs only on the booted system. Boot the installed system, then run pacnix again.");
     }
     let _lock = lock()?;
     // A local flake needs flake.nix. Nix tells this without the directory and the option.
     if !flake.contains(':') && !std::path::Path::new(&flake).join("flake.nix").exists() {
-        bail!("{flake} has no flake.nix. Make the configuration as \"First configuration\" of the README tells, or give --flake with the directory of the configuration");
+        bail!("{flake} has no flake.nix. Make the configuration as \"First configuration\" of the README tells, or give --flake with the directory of the configuration.");
     }
     // The host and the flake show only when they are not the defaults.
     if name.ok().as_ref() != Some(&host) || cli.flake != "/etc/pacnix" {
-        say!("• host {host} of the flake {flake}");
+        say!("• Host {host} of the flake {flake}.");
     }
     let ctx = |opts| Ctx { flake: flake.clone(), host: host.clone(), opts };
     match cli.verb {
@@ -232,7 +232,7 @@ fn resilient(f: impl Fn() -> Result<()>) -> Result<()> {
             Err(e) if report::interrupted() => return Err(e),
             Err(e) => match cause(&e) {
                 Cause::Network(line) => {
-                    report::progress(&format!("attempt {} of {} failed in the network: {line}. Next attempt in {pause} s, with one download at a time", attempt + 1, PAUSES.len() + 1));
+                    report::progress(&format!("Attempt {} of {} failed in the network: {line}. Next attempt in {pause} s, with one download at a time.", attempt + 1, PAUSES.len() + 1));
                     packages::SERIAL.store(true, std::sync::atomic::Ordering::Relaxed);
                     std::thread::sleep(Duration::from_secs(*pause));
                 }
@@ -295,15 +295,15 @@ pub fn ask(items: &[String], data: &[String], opts: &Opts) -> Result<bool> {
         return Ok(DELETE.load(Relaxed));
     }
     let data_new = data.iter().any(|d| new.contains(&d));
-    say!("• these items need a confirmation:");
+    say!("• These items need a confirmation:");
     for i in &new {
         say!("  {i}");
     }
     if closed() && !opts.yes {
-        bail!("pacnix asks only at the start of the run, and these items came after it. Run pacnix apply again to confirm them");
+        bail!("pacnix asks only at the start of the run, and these items came after it. Run pacnix apply again to confirm them.");
     }
     if !opts.yes && !std::io::stdin().is_terminal() {
-        bail!("these items need a confirmation. Give --yes to continue without a terminal");
+        bail!("these items need a confirmation. Give --yes to continue without a terminal.");
     }
     let mut answer = String::from("y");
     if !opts.yes {
@@ -324,7 +324,7 @@ pub fn ask(items: &[String], data: &[String], opts: &Opts) -> Result<bool> {
 fn lock() -> Result<std::fs::File> {
     let f = std::fs::File::create("/run/lock/pacnix.lock")?;
     if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&f), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        bail!("a different pacnix process is running");
+        bail!("a different pacnix process is running.");
     }
     Ok(f)
 }
@@ -369,7 +369,7 @@ pub fn failed_with(message: String, lines: &[String]) -> anyhow::Error {
 pub fn failed(cmd: &Command, status: ExitStatus, lines: &[String]) -> anyhow::Error {
     let tail: Vec<&str> = lines.iter().rev().take(10).rev().map(|l| l.as_str()).collect();
     let message = match tail.is_empty() {
-        true => format!("{} failed with {status}", describe(cmd)),
+        true => format!("{} failed with {status}.", describe(cmd)),
         false => format!("{} failed with {status}. Its last output:\n  | {}", describe(cmd), tail.join("\n  | ")),
     };
     Failed { message, lines: lines.to_vec() }.into()
@@ -529,15 +529,12 @@ pub fn count(n: usize, noun: &str) -> String {
 /// More than three items show as their number, for example "4 files created".
 pub fn named(noun: &str, verb: &str, items: &[String]) -> String {
     let text = match items.len() {
-        1 => format!("{noun} {verb}:{BIND}{}", report::item(&items[0])),
-        2 | 3 => format!("{noun}s {verb}:{BIND}{}", report::items(items)),
+        1 => format!("{noun} {verb}: {}", report::item(&items[0])),
+        2 | 3 => format!("{noun}s {verb}: {}", report::items(items)),
         n => format!("{} {verb}", count(n, noun)),
     };
     text.replace("  ", " ").replace(" :", ":").trim_end().to_string()
 }
-
-/// Binds a label to its first item: a line does not break between them.
-pub const BIND: char = '\u{1}';
 
 /// A command without input: the questions of pacnix are the only input of the run.
 pub fn cmd(program: &str, args: &[&str]) -> Command {

@@ -50,8 +50,8 @@ packages_match() {
 	fi
 	if [[ -n $(on "$1" 'pacman -Qqdtt' || true) ]]; then fail "$1 has orphan packages"; fi
 }
-# pacnix breaks its lines before column 80. The output as one line, with each
-# run of spaces and line breaks as one space, so that a broken line matches.
+# The output as one line, with each run of spaces and line breaks as one space,
+# so that a text matches across the line breaks of pacnix.
 flat() { tr -d '\r' <<<"$1" | tr -s ' \n' '  '; }
 has() { flat "$1" | grep -qF -- "$2"; }
 # Whether the output has a text exactly one time.
@@ -65,7 +65,6 @@ audit_has() {
 		function check() { if (kind == k && item == i) found = 1 }
 		/^  [^ ]/ { check(); item = ""; kind = substr($0, 3); sub(/ \([0-9]+\):$/, "", kind); next }
 		/^    [^ ]/ { check(); item = substr($0, 5); next }
-		/^      / { sub(/^ +/, ""); item = item " " $0; next }
 		{ check(); item = "" }
 		END { check(); exit !found }' <<<"$1"
 }
@@ -73,7 +72,7 @@ audit_has() {
 empty_plan() {
 	local out
 	out=$(plan "$1")
-	if ! grep -q '^• plan done: no change' <<<"$out"; then
+	if ! grep -q '^• Plan done: no changes' <<<"$out"; then
 		printf '%s\n' "$out"
 		fail "the plan of $1 is not empty"
 	fi

@@ -26,24 +26,24 @@ log=$(on $h 'tail -60 /var/log/pacman.log')
 echo "$log"
 grep -A1 'installed notes (1-1)' <<<"$log" | grep -q 'ALPM-SCRIPTLET\] notes: first text' || fail "the pacman log does not put the note after its package"
 grep -A1 'installed other (1-1)' <<<"$log" | grep -q 'ALPM-SCRIPTLET\] other: note of other' || fail "the pacman log does not put the note of other after other"
-has "$out" '• notes (pacnix audit shows the messages of the install scripts):' || { echo "$out" | tail; fail "the summary does not show one block of notes"; }
-grep -qx '  package notes: notes: first text' <<<"$out" || { echo "$out" | tail; fail "the summary does not show the note of notes"; }
-grep -qx '  package other: other: note of other' <<<"$out" || fail "the summary does not show the note of other"
+has "$out" '• Notes (pacnix audit shows the messages of the install scripts):' || { echo "$out" | tail; fail "the summary does not show one block of notes"; }
+grep -qx '  Package notes: notes: first text' <<<"$out" || { echo "$out" | tail; fail "the summary does not show the note of notes"; }
+grep -qx '  Package other: other: note of other' <<<"$out" || fail "the summary does not show the note of other"
 grep -qx '  welcome: Read the welcome text.' <<<"$out" || fail "the summary does not show the note of the configuration"
 grep -q 'hook output of notes' <<<"$out" && fail "the summary shows the output of a hook as a note"
-pacnix $h audit | grep -qx '• install note of the last change: notes' || fail "the audit does not show the last notes"
+pacnix $h audit | grep -qx '• Install note of the last change: notes' || fail "the audit does not show the last notes"
 
 step "an upgrade with the same note and a changed backup file"
 on $h 'echo "# local change" | sudo tee -a /etc/notes.conf >/dev/null'
 scenario $h "{ packages.local.notes = ./packages/notes-2; $packages $welcome }"
 out=$(apply $h) || { echo "$out" | tail -20; fail "apply failed"; }
 grep -q 'notes: \|welcome' <<<"$out" && fail "the summary shows a note that did not change"
-grep -qx '• new file /etc/notes.conf.pacnew: merge it with /etc/notes.conf' <<<"$out" || { echo "$out" | tail; fail "the summary does not show the .pacnew file"; }
+grep -qx '• New file /etc/notes.conf.pacnew: merge it with /etc/notes.conf.' <<<"$out" || { echo "$out" | tail; fail "the summary does not show the .pacnew file"; }
 
 step "an upgrade with a changed note shows only the package note"
 scenario $h "{ packages.local.notes = ./packages/notes-3; $packages $welcome }"
 out=$(apply $h) || { echo "$out" | tail -20; fail "apply failed"; }
-has "$out" '• new messages of the install scripts of declared packages (pacnix audit shows them again):' || { echo "$out" | tail; fail "the summary of the package notes changed"; }
+has "$out" '• New messages of the install scripts of declared packages (pacnix audit shows them again):' || { echo "$out" | tail; fail "the summary of the package notes changed"; }
 grep -qx '  notes: notes: second text' <<<"$out" || { echo "$out" | tail; fail "the summary does not show the changed note"; }
 grep -q 'welcome' <<<"$out" && fail "the summary shows the note of the configuration again"
 empty_plan $h
@@ -78,7 +78,7 @@ pacnix $h audit >>/dev/null || true
 refute $h 'test -e /tmp/probe.out' "plan or audit ran the check"
 grep -q 'probe\|welcome' <<<"$out$(pacnix $h audit)" && fail "plan or audit shows a note of the configuration"
 out=$(apply $h) || fail "the no-op apply failed"
-grep -q '^• apply done. No changes.' <<<"$out" && grep -qx '  probe: Enroll the probe.' <<<"$out" || { echo "$out"; fail "the no-op apply does not show the note or counts it as a change"; }
+grep -q '^• Apply done. No changes.' <<<"$out" && grep -qx '  probe: Enroll the probe.' <<<"$out" || { echo "$out"; fail "the no-op apply does not show the note or counts it as a change"; }
 rc 1
 out=$(apply $h --offline) || fail "the offline apply failed"
 grep -qx '  probe: Enroll the probe.' <<<"$out" || { echo "$out"; fail "the offline apply does not show the note"; }
@@ -86,7 +86,7 @@ grep -qx '  probe: Enroll the probe.' <<<"$out" || { echo "$out"; fail "the offl
 step "exit status 0 hides the note, and it comes back when the check exits with status 1 again"
 rc 0
 out=$(apply $h) || fail "apply failed"
-grep -q 'probe\|^• notes' <<<"$out" && { echo "$out"; fail "the note of a done step shows"; }
+grep -q 'probe\|^• Notes' <<<"$out" && { echo "$out"; fail "the note of a done step shows"; }
 check $h 'test -e /tmp/probe.out' "the check did not run"
 rc 1
 out=$(apply $h) || fail "apply failed"

@@ -21,7 +21,7 @@ with() { scenario $h "{ lib, ... }: { networking.hostName = lib.mkForce null; $1
 step "a configuration with one package gives a plan with only that package"
 with 'packages.repo = [ "cowsay" ];'
 out=$(plan $h) || { echo "$out"; fail "plan failed"; }
-[[ $(changes "$out") == "install package cowsay" ]] || { echo "$out"; fail "the plan has more than the declared package"; }
+[[ $(changes "$out") == "Install package cowsay" ]] || { echo "$out"; fail "the plan has more than the declared package"; }
 out=$(apply $h --offline) || { echo "$out" | tail -20; fail "apply failed"; }
 check $h 'pacman -Qqe cowsay' "the declared package is not installed"
 [[ $before == "$(on $h "$state")" ]] || { diff <(echo "$before") <(on $h "$state"); fail "the apply changed what the configuration does not declare"; }
@@ -31,7 +31,7 @@ empty_plan $h
 step "when the declaration goes, only what pacnix installed goes"
 scenario $h "$host"
 out=$(plan $h)
-[[ $(changes "$out") == 'remove package cowsay (apply asks first)' ]] || { echo "$out"; fail "the plan does not remove only the package that pacnix installed"; }
+[[ $(changes "$out") == 'Remove package cowsay (apply asks first)' ]] || { echo "$out"; fail "the plan does not remove only the package that pacnix installed"; }
 apply $h --offline >/dev/null || fail "apply failed"
 refute $h 'pacman -Q cowsay' "the package that pacnix installed stays"
 [[ $before == "$(on $h "$state")" ]] || { diff <(echo "$before") <(on $h "$state"); fail "the removal changed what the configuration did not declare"; }
@@ -49,12 +49,12 @@ check $h 'pacman -Qqe tree' "the package that the user installed is not explicit
 step "a declared unit goes back to its vendor preset when its declaration goes"
 with 'units.enable = [ "fstrim.timer" ];'
 out=$(plan $h)
-[[ $(changes "$out") == "enable and start unit fstrim.timer" ]] || { echo "$out"; fail "the plan has more than the declared unit"; }
+[[ $(changes "$out") == "Enable and start unit fstrim.timer" ]] || { echo "$out"; fail "the plan has more than the declared unit"; }
 apply $h --offline >/dev/null || fail "apply failed"
 check $h 'systemctl is-enabled fstrim.timer' "the declared unit is not enabled"
 scenario $h "$host"
 out=$(plan $h)
-[[ $(changes "$out") == "disable and stop unit fstrim.timer" ]] || { echo "$out"; fail "the plan does not give the unit back to its vendor preset"; }
+[[ $(changes "$out") == "Disable and stop unit fstrim.timer" ]] || { echo "$out"; fail "the plan does not give the unit back to its vendor preset"; }
 apply $h --offline >/dev/null || fail "apply failed"
 [[ $before == "$(on $h "$state")" ]] || { diff <(echo "$before") <(on $h "$state"); fail "the unit changes changed what the configuration did not declare"; }
 empty_plan $h

@@ -232,7 +232,7 @@ fn eval_error(ctx: &Ctx, lines: &[String]) -> String {
     }
     let text = text.join("\n");
     if text.contains("does not provide attribute") && text.contains(&format!("pacnixConfigurations.\"{}\"", ctx.host)) {
-        return format!("the flake {} has no host {} in pacnixConfigurations. Add the host to the flake, or give --host with a host of the flake", ctx.flake, ctx.host);
+        return format!("the flake {} has no host {} in pacnixConfigurations. Add the host to the flake, or give --host with a host of the flake.", ctx.flake, ctx.host);
     }
     let mut out = String::new();
     let mut rest = text.as_str();
@@ -368,7 +368,7 @@ impl Plan {
         self.units.print(&mut units.1);
         self.home.print([&mut activate.1, &mut home_created.1, &mut home_changed.1, &mut home_deleted.1, &mut home_restored.1]);
         self.secure.print(&mut secure.1);
-        data.1.extend(self.data.iter().map(|(f, paths)| (f.clone(), format!("delete the data of removed feature {f} (apply asks first): {}", paths.join(", ")))));
+        data.1.extend(self.data.iter().map(|(f, paths)| (f.clone(), format!("Delete the data of removed feature {f} (apply asks first): {}", paths.join(", ")))));
         s
     }
 
@@ -378,9 +378,9 @@ impl Plan {
         // The local sync databases tell what is newer since their last refresh. Apply refreshes them.
         match newer.len() {
             0 => {}
-            1 => say!("• system upgrade: {} is newer", newer[0]),
-            2 | 3 => say!("• system upgrade: {} are newer", newer.join(", ")),
-            n => say!("• system upgrade: {n} packages are newer"),
+            1 => say!("• System upgrade: {} is newer.", newer[0]),
+            2 | 3 => say!("• System upgrade: {} are newer.", newer.join(", ")),
+            n => say!("• System upgrade: {n} packages are newer."),
         }
         let sections = self.sections();
         let lines: Vec<&(String, String)> = sections.iter().flat_map(|s| &s.1).collect();
@@ -388,12 +388,12 @@ impl Plan {
             say!("• Planned changes ({}):", lines.len());
         }
         lines.iter().for_each(|l| say!("{}", report::plan_line(l)));
-        self.secure.notes().iter().for_each(|n| say!("• note: {n}"));
+        self.secure.notes().iter().for_each(|n| say!("• Note: {n}"));
         self.same();
         let upgrade = "Apply refreshes the sync databases first, thus it can also upgrade packages that this plan does not show.";
         match lines.len() {
-            0 => say!("• plan done: no change. {upgrade}"),
-            n => say!("• plan done: {}. The system is unchanged. {upgrade}", crate::count(n, "change")),
+            0 => say!("• Plan done: no changes. {upgrade}"),
+            n => say!("• Plan done: {}. The system is unchanged. {upgrade}", crate::count(n, "change")),
         }
         Ok(())
     }
@@ -423,7 +423,7 @@ impl Plan {
             .map(|(noun, items)| if items.len() > 3 { crate::count(items.len(), noun) } else { items.join(", ") })
             .collect();
         if !same.is_empty() {
-            say!("• already as declared: {}", same.join(", "));
+            say!("• Already as declared: {}.", same.join(", "));
         }
     }
 }
@@ -473,7 +473,7 @@ pub fn apply(ctx: &Ctx, offline: bool) -> Result<()> {
         plan = (built && packages::databases() == state).then_some((before, fetched));
     }
     if offline {
-        say!("• system upgrade: skipped, because of --offline");
+        say!("• System upgrade: skipped, because of --offline.");
     }
     activate(ctx, target.clone(), plan)?;
     commit(&target)?;
@@ -561,7 +561,7 @@ fn keep_or_delete(target: &Generation, data: &[(String, Vec<String>)], delete: b
         return audit::delete(target, data);
     }
     if !data.is_empty() {
-        report::last("• the data of the removed features stays. pacnix audit shows it.".to_string());
+        report::last("• The data of the removed features stays. pacnix audit shows it.".to_string());
     }
     Ok(())
 }

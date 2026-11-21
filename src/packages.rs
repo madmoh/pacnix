@@ -67,7 +67,7 @@ impl Plan {
         let mut skip = failed;
         let needs = |t: &str, skip: &BTreeSet<String>| self.depends.get(t).and_then(|d| d.iter().find(|d| skip.contains(*d))).cloned();
         while let Some((t, d)) = self.targets(&skip).into_iter().find_map(|t| needs(t, &skip).map(|d| (t.to_string(), d))) {
-            report::failure(&format!("install package {t}"), &format!("it needs {d}, which did not build"));
+            report::failure(&format!("install package {t}"), &format!("it needs {d}, which did not build."));
             skip.insert(t);
         }
         skip
@@ -76,15 +76,15 @@ impl Plan {
     /// The lines of the packages, and the lines of the changes of their install reason.
     pub fn print(&self, l: &mut crate::generation::Lines, marks: &mut crate::generation::Lines) {
         let mut add = |prefix: &str, list: &[String]| l.extend(list.iter().map(|p| (p.clone(), format!("{prefix} {p}"))));
-        add("build AUR package", &self.build);
-        add("build local package", &self.local);
-        add("drop from local repository", &self.drop);
-        add("install package", &self.install);
+        add("Build AUR package", &self.build);
+        add("Build local package", &self.local);
+        add("Drop from local repository", &self.drop);
+        add("Install package", &self.install);
         // An archive package is a URL: its item is the name of the package.
         let name = |url: &String| url.rsplit('/').next().and_then(|f| f.rsplitn(4, '-').nth(3)).unwrap_or(url).to_string();
-        l.extend(self.archive.iter().map(|u| (name(u), format!("install package from the Arch Linux Archive {u}"))));
-        l.extend(self.remove.iter().map(|p| (p.clone(), format!("remove package {p} (apply asks first)"))));
-        marks.extend(self.explicit.iter().map(|p| (p.clone(), format!("set the install reason of {p} to explicit (it is installed as a dependency)"))));
+        l.extend(self.archive.iter().map(|u| (name(u), format!("Install package from the Arch Linux Archive {u}"))));
+        l.extend(self.remove.iter().map(|p| (p.clone(), format!("Remove package {p} (apply asks first)"))));
+        marks.extend(self.explicit.iter().map(|p| (p.clone(), format!("Set the install reason of {p} to explicit (it is installed as a dependency)"))));
         // A package that leaves in the same run gets its reason only as a step of the removal.
         let deps = self.deps.iter().filter(|p| !self.remove.contains(p));
         marks.extend(deps.map(|p| (p.clone(), format!("{p}: set the install reason to installed as a dependency"))));
@@ -679,11 +679,11 @@ pub fn check(ctx: &Ctx, plan: &Plan) -> Result<()> {
         let mut pairs = plan.conflicts.clone();
         pairs.sort();
         pairs.dedup();
-        bail!("declared packages conflict: {}. Declare one package of each pair", pairs.join(", "));
+        bail!("declared packages conflict: {}. Declare one package of each pair.", pairs.join(", "));
     }
     if !plan.protected.is_empty() && !ctx.opts.allow_protected_removal {
         bail!(
-            "the plan removes protected packages: {}. Declare them, or give --allow-protected-removal",
+            "the plan removes protected packages: {}. Declare them, or give --allow-protected-removal.",
             plan.protected.join(", ")
         );
     }
@@ -827,7 +827,7 @@ fn signing_key() -> Result<String> {
     let key = fingerprints(&output(gpg(&["--with-colons", "--list-secret-keys"]))?).into_iter().next().context("the signing key of the local repository has no fingerprint")?;
     if !Path::new(KEY).exists() {
         run_cmd(gpg(&["--armor", "--output", KEY, "--export", &key]))?;
-        report::last(format!("• new key of the local repository, for packages.serverKey of other hosts: {key}"));
+        report::last(format!("• New key of the local repository, for packages.serverKey of other hosts: {key}"));
     }
     Ok(key)
 }
@@ -867,7 +867,7 @@ fn trust_server(g: &Generation) -> Result<()> {
     let found = fingerprints(&output(cmd("gpg", &["--homedir", "/etc/pacman.d/gnupg", "--no-permission-warning", "--batch", "--with-colons", "--show-keys", &file]))?);
     if found.first() != Some(&key) {
         let _ = std::fs::remove_file(&file);
-        bail!("the key in {url} has the fingerprint {}, but packages.serverKey is {key}", found.first().map_or("none", |f| f.as_str()));
+        bail!("the key in {url} has the fingerprint {}, but packages.serverKey is {key}.", found.first().map_or("none", |f| f.as_str()));
     }
     run_cmd(cmd("pacman-key", &["--add", &file]))?;
     let _ = std::fs::remove_file(&file);
@@ -1021,7 +1021,7 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<BTreeSet<String>> {
         report::progress(&format!("Building {} package {}/{count}: {name}", if *local { "local" } else { "AUR" }, i + 1));
         let (names, version, deps) = srcinfo_file(dir);
         if let Some(d) = deps.iter().find(|d| failed.contains(*d)) {
-            report::failure(&step, &format!("it needs {d}, which did not build"));
+            report::failure(&step, &format!("it needs {d}, which did not build."));
             failed.extend(names);
             FAILED_BASES.lock().unwrap().insert(name);
             continue;
@@ -1159,7 +1159,7 @@ pub fn recover_lock() -> Result<()> {
             std::fs::read_to_string(e.path().join("comm")).is_ok_and(|c| c.trim() == "pacman")
         });
         if running {
-            bail!("pacman is running");
+            bail!("pacman is running.");
         }
         esay!("• Removing the stale pacman lock of an interrupted transaction");
         std::fs::remove_file(lock)?;
@@ -1268,7 +1268,7 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
     if !skip.is_empty() {
         if !plan.remove.is_empty() || !plan.deps.is_empty() {
             let step = "remove the packages that the configuration does not declare";
-            report::failure(step, "it waits until each declared package builds, because a package that did not build can replace a package that leaves");
+            report::failure(step, "it waits until each declared package builds, because a package that did not build can replace a package that leaves.");
         }
         return save_made(plan);
     }
@@ -1331,7 +1331,7 @@ pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
     drop(stage);
     let newer = newer()?;
     if newer.is_empty() && pins.is_empty() {
-        say!("• system upgrade: the packages are up to date");
+        say!("• System upgrade: the packages are up to date.");
     } else {
         report::progress(&format!("Upgrading the system: {}", crate::named("package", "to upgrade", &newer)));
         download(&[&["-u"][..], &pins].concat())?;

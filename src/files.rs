@@ -119,8 +119,8 @@ fn check_mounts(g: &Generation) -> Result<()> {
         let found = mounts.lines().map(|l| l.split(' ').collect::<Vec<_>>()).filter(|f| f.len() > 2 && f[1] == point).map(|f| f[2].to_string()).last();
         match found {
             Some(t) if &t == fs => {}
-            Some(t) => bail!("{point} has the file system {t}, and the configuration declares {fs}. Mount the {fs} file system at {point}, then run pacnix again"),
-            None => bail!("{point} is not a mount point, and pacnix writes files below it only on the declared {fs} file system. Mount it, then run pacnix again. A change of /etc/fstab mounts it only at the next boot"),
+            Some(t) => bail!("{point} has the file system {t}, and the configuration declares {fs}. Mount the {fs} file system at {point}, then run pacnix again."),
+            None => bail!("{point} is not a mount point, and pacnix writes files below it only on the declared {fs} file system. Mount it, then run pacnix again. A change of /etc/fstab mounts it only at the next boot."),
         }
     }
     Ok(())
@@ -226,7 +226,7 @@ fn probe(path: &str, spec: &FileSpec) -> Result<()> {
     }
     let (fs, target, options) = mount(dir);
     bail!(
-        "the {fs} file system on {target} cannot keep the mode {want:04o} and the owner {}:{} of {path}: a new file gets the mode {:04o} and the owner {}:{} (mount options {options}). Change the mount options in /etc/fstab, declare the mode and owner that the file system gives, or declare the mode null",
+        "the {fs} file system on {target} cannot keep the mode {want:04o} and the owner {}:{} of {path}: a new file gets the mode {:04o} and the owner {}:{} (mount options {options}). Change the mount options in /etc/fstab, declare the mode and owner that the file system gives, or declare the mode null.",
         spec.user,
         spec.group,
         meta.mode() & 0o7777,
@@ -399,10 +399,10 @@ fn changes(plan: &Plan) -> Vec<String> {
 
 pub fn print_triggers(plan: &Plan, triggers: &mut crate::generation::Lines, units: &mut crate::generation::Lines) {
     let changed = changes(plan);
-    triggers.extend(triggered(plan, &changed).into_iter().map(|(n, c)| (n.clone(), format!("run trigger {n}: {c}"))));
-    units.extend(crate::units::changed_units(&changed).into_iter().map(|u| (u.clone(), format!("restart unit {u} if it runs"))));
+    triggers.extend(triggered(plan, &changed).into_iter().map(|(n, c)| (n.clone(), format!("Run trigger {n}: {c}"))));
+    units.extend(crate::units::changed_units(&changed).into_iter().map(|u| (u.clone(), format!("Restart unit {u} if it runs"))));
     let retries = crate::report::retries().into_iter().filter_map(|s| s.strip_prefix("systemctl try-restart ").map(String::from));
-    units.extend(retries.map(|u| (u.clone(), format!("restart unit {u} if it runs (the last apply did not complete it)"))));
+    units.extend(retries.map(|u| (u.clone(), format!("Restart unit {u} if it runs (the last apply did not complete it)"))));
 }
 
 /// Runs the triggers of the changed files and the triggers that failed at an
@@ -414,7 +414,7 @@ pub fn run_triggers(plan: &Plan, changed: &[String]) -> Result<()> {
     for (name, command) in triggered(plan, changed) {
         let step = format!("trigger {name}");
         if let Some(f) = failed {
-            crate::report::failure(&step, &format!("it runs after trigger {f}, which failed"));
+            crate::report::failure(&step, &format!("it runs after trigger {f}, which failed."));
             continue;
         }
         crate::report::progress(&format!("Running trigger {name}: {command}"));

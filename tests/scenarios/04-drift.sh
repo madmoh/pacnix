@@ -13,12 +13,12 @@ on $h 'sudo pacman -S --noconfirm tree >/dev/null && echo "net.core.somaxconn = 
 	sudo systemctl enable --now systemd-time-wait-sync.service 2>/dev/null; sudo touch /etc/stray.conf'
 out=$(plan $h)
 echo "$out"
-for l in 'Changing file /etc/sysctl.d/90-demo.conf (it differs from the declaration)' 'run trigger sysctl: sysctl --system >/dev/null'; do
+for l in 'Changing file /etc/sysctl.d/90-demo.conf (it differs from the declaration)' 'Run trigger sysctl: sysctl --system >/dev/null'; do
 	changes "$out" | grep -qxF "$l" || fail "the plan does not show: $l"
 done
 grep -e tree -e systemd-time-wait-sync <<<"$out" && fail "the plan changes a package or a unit that the configuration does not declare"
 out=$(pacnix $h audit)
-for l in 'explicit package not declared|tree' 'managed file differs from the generation|/etc/sysctl.d/90-demo.conf' 'enabled unit not declared and not enabled by a vendor preset|systemd-time-wait-sync.service' 'unowned file|/etc/stray.conf'; do
+for l in 'Explicit package not declared|tree' 'Managed file differs from the generation|/etc/sysctl.d/90-demo.conf' 'Enabled unit not declared and not enabled by a vendor preset|systemd-time-wait-sync.service' 'Unowned file|/etc/stray.conf'; do
 	audit_has "$out" "${l%%|*}" "${l#*|}" || { echo "$out"; fail "the audit does not show: $l"; }
 done
 
@@ -29,7 +29,7 @@ refute $h "grep -q 'somaxconn = 1$' /etc/sysctl.d/90-demo.conf" "the managed fil
 check $h "systemctl is-enabled systemd-time-wait-sync.service" "the unit that the user enabled is not enabled"
 check $h "test \$(sysctl -n net.core.somaxconn) = 8192" "the trigger did not reapply sysctl"
 empty_plan $h
-audit_has "$(pacnix $h audit)" 'unowned file' /etc/stray.conf || fail "the audit does not show the stray file after apply"
+audit_has "$(pacnix $h audit)" 'Unowned file' /etc/stray.conf || fail "the audit does not show the stray file after apply"
 
 step "a vfat file system with a umask cannot keep the mode 0600"
 scenario $h '{ features.demo.enable = true; packages.repo = [ "dosfstools" ]; }'
@@ -39,7 +39,7 @@ esp() { scenario $h "{ features.demo.enable = true; packages.repo = [ \"dosfstoo
 esp 0600
 out=$(apply $h) && { echo "$out"; fail "apply wrote a file that the file system cannot keep"; }
 echo "$out" | tail -1
-has "$out" '• error: the vfat file system on /mnt/esp cannot keep the mode 0600 and the owner root:root of /mnt/esp/loader/loader.conf: a new file gets the mode 0700' || fail "the error does not name the file system and the mode"
+has "$out" '• Error: the vfat file system on /mnt/esp cannot keep the mode 0600 and the owner root:root of /mnt/esp/loader/loader.conf: a new file gets the mode 0700' || fail "the error does not name the file system and the mode"
 grep -q 'fmask=0077' <<<"$out" || fail "the error does not show the mount options"
 refute $h 'test -e /mnt/esp/loader' "apply changed the file system before the refusal"
 esp 0700
