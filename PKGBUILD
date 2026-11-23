@@ -1,6 +1,6 @@
 pkgbase=pacnix
 pkgname=(pacnix pacnix-keyring)
-pkgver=0.16.0
+pkgver=0.16.1
 pkgrel=1
 pkgdesc='Declarative, reconciling management of an Arch Linux host from a Nix flake'
 arch=(x86_64)
