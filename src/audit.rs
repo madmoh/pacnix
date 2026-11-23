@@ -2,7 +2,7 @@ use crate::generation::{Generation, build, history};
 use crate::{Ctx, cmd, files, output, output_any};
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const SKIP: &[&str] = &[
@@ -20,45 +20,111 @@ fn globs(patterns: impl IntoIterator<Item = String>) -> GlobSet {
     b.build().unwrap_or_else(|_| GlobSet::empty())
 }
 
-/// Finds the features of earlier generations whose claims match a path.
-struct Origins(Vec<(u64, String, GlobSet, GlobSet)>);
+/// The directories of a home directory whose children are named after an application.
+const NAMESPACES: &[&str] = &[".config", ".cache", ".local/share", ".local/state", ".var/app"];
 
-impl Origins {
-    fn new(current: &Generation) -> Result<Self> {
-        let mut list = Vec::new();
+/// What the audit knows about the origin of a path that nothing explains: the
+/// claims of earlier generations that the current generation does not have,
+/// the names of the installed packages, of their programs in /usr/bin and of
+/// their desktop files, and the literal paths that package tmpfiles rules create.
+struct Evidence {
+    former: Vec<(u64, String, bool, Vec<String>, GlobSet, GlobSet)>,
+    names: BTreeSet<String>,
+    programs: BTreeMap<String, String>,
+    desktop: BTreeSet<String>,
+    rules: BTreeMap<String, String>,
+}
+
+impl Evidence {
+    fn new(current: &Generation, inventory: &str, owned: &BTreeSet<String>) -> Result<Self> {
+        let mut former = Vec::new();
         for (n, g) in history()?.into_iter().rev() {
             for (feature, c) in g.m.claims {
-                if !current.m.claims.contains_key(&feature) {
-                    list.push((n, feature, globs(c.system), globs(c.home)));
+                let now = current.m.claims.get(&feature);
+                let system: Vec<String> = c.system.into_iter().filter(|p| !now.is_some_and(|n| n.system.contains(p))).collect();
+                // Before 0.16, feature arch claimed the bash files for the audit; that is no evidence of data.
+                let builtin = |p: &String| feature == "arch" && SHELL_FILES.contains(&p.as_str());
+                let home: Vec<String> = c.home.into_iter().filter(|p| !now.is_some_and(|n| n.home.contains(p)) && !builtin(p)).collect();
+                if !system.is_empty() || !home.is_empty() {
+                    former.push((n, feature, now.is_some(), home.clone(), globs(system), globs(home)));
                 }
             }
         }
-        Ok(Origins(list))
+        let desktop = owned.iter().filter_map(|p| p.strip_prefix("/usr/share/applications/")?.strip_suffix(".desktop")).filter(|d| !d.contains('/'));
+        // A rule creates a path when its type is one of these letters, with modifiers.
+        let mut rules = BTreeMap::new();
+        let mut file = String::new();
+        // --tldr shows only the file names and the rules, without comments.
+        for l in output(cmd("systemd-tmpfiles", &["--tldr", "--no-pager"])).unwrap_or_default().lines() {
+            if let Some(f) = l.strip_prefix("# ") {
+                file = f.to_string();
+                continue;
+            }
+            let mut w = l.split_whitespace();
+            let (Some(t), Some(p)) = (w.next(), w.next()) else { continue };
+            if owned.contains(&file)
+                && t.starts_with(['f', 'd', 'D', 'v', 'q', 'Q', 'p', 'L', 'c', 'b', 'C'])
+                && t[1..].chars().all(|c| "+!-=~^?$".contains(c))
+                && p.starts_with('/')
+                && !p.contains(['%', '*', '?', '[', '"', '\'', '\\'])
+            {
+                rules.entry(p.trim_end_matches('/').to_string()).or_insert_with(|| file.clone());
+            }
+        }
+        Ok(Evidence {
+            former,
+            names: inventory.lines().filter_map(|l| l.split_once(' ')).map(|(n, _)| n.to_string()).collect(),
+            programs: inventory.lines().filter_map(|l| l.split_once(' ')).filter_map(|(n, p)| Some((p.strip_prefix("/usr/bin/")?.to_string(), n.to_string()))).filter(|(p, _)| !p.is_empty() && !p.contains('/')).collect(),
+            desktop: desktop.map(str::to_string).collect(),
+            rules,
+        })
     }
 
-    fn of(&self, path: &str, home: bool) -> String {
-        self.0
-            .iter()
-            .find(|(_, _, s, h)| if home { h.is_match(path) } else { s.is_match(path) })
-            .map(|(n, f, _, _)| format!(" (claimed by feature {f} in generation {n}; the feature is no longer enabled)"))
-            .unwrap_or_default()
+    /// The rank and the note of a path: 0 for a former claim, 1 for no
+    /// evidence, 2 for a name or a rule that agrees with the path. A system
+    /// path compares its own name. A home path compares the name below a
+    /// directory of NAMESPACES, or the name of a hidden entry of the home
+    /// directory without its dot; rel is the path in the home directory.
+    fn of(&self, path: &str, rel: Option<&str>) -> (u8, String) {
+        let found = self.former.iter().find(|(.., s, h)| match rel {
+            Some(r) => h.is_match(r),
+            None => s.is_match(path),
+        });
+        if let Some((n, f, kept, ..)) = found {
+            let why = if *kept { "the feature no longer claims it" } else { "the feature is no longer enabled" };
+            return (0, format!(" (claimed by feature {f} in generation {n}; {why})"));
+        }
+        let name = match rel {
+            Some(r) => NAMESPACES.iter().find_map(|ns| r.strip_prefix(ns)?.strip_prefix('/')?.split('/').next()).or_else(|| r.split('/').next()?.strip_prefix('.')),
+            None => Path::new(path).file_name().and_then(|n| n.to_str()),
+        };
+        match name {
+            Some(n) if self.names.contains(n) => (2, format!(" (the name is the same as installed package {n})")),
+            Some(n) if self.programs.contains_key(n) => (2, format!(" (the name is the same as program /usr/bin/{n} of installed package {})", self.programs[n])),
+            Some(n) if self.desktop.contains(n) => (2, format!(" (the name is the same as desktop ID {n})")),
+            _ => match rel.is_none().then(|| self.rules.get(path)).flatten() {
+                Some(file) => (2, format!(" (a tmpfiles rule in {file} has this path)")),
+                None => (1, String::new()),
+            },
+        }
     }
 }
 
 pub fn audit(ctx: &Ctx) -> Result<()> {
     let g = build(ctx)?;
     let _stage = crate::report::stage("Checking the system");
-    let origins = Origins::new(&g)?;
     let mut report: Vec<String> = Vec::new();
-
-    let mut owned: BTreeSet<String> = BTreeSet::new();
-    for l in output(cmd("pacman", &["-Qlq"]))?.lines() {
-        owned.insert(l.trim_end_matches('/').to_string());
-    }
+    // Paths with the rank of their evidence: Evidence::of.
+    let mut paths: Vec<(u8, String)> = Vec::new();
+    let inventory = output(cmd("pacman", &["-Ql"]))?;
+    let owned: BTreeSet<String> = inventory.lines().filter_map(|l| l.split_once(' ')).map(|(_, p)| p.trim_end_matches('/').to_string()).collect();
+    let evidence = Evidence::new(&g, &inventory, &owned)?;
     let parents: BTreeSet<&str> = g.m.files.keys().flat_map(|p| Path::new(p).ancestors().skip(1).filter_map(|a| a.to_str())).collect();
     let claimed = globs(g.m.claims.values().flat_map(|c| c.system.clone()).chain(g.m.audit.ignore.clone()));
     let mut walk = walkdir::WalkDir::new("/").into_iter();
-    while let Some(Ok(e)) = walk.next() {
+    while let Some(entry) = walk.next() {
+        // An entry that cannot be read or that disappears does not stop the walk.
+        let Ok(e) = entry else { continue };
         let path = e.path().display().to_string();
         if SKIP.contains(&path.as_str()) || claimed.is_match(&path) || g.m.files.contains_key(&path) {
             if e.file_type().is_dir() {
@@ -79,7 +145,8 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
             continue;
         }
         let kind = if e.file_type().is_dir() { "directory" } else { "file" };
-        report.push(format!("Unowned {kind}: {path}{}", origins.of(&path, false)));
+        let (rank, note) = evidence.of(&path, None);
+        paths.push((rank, format!("Unowned {kind}: {path}{note}")));
         if e.file_type().is_dir() {
             walk.skip_current_dir();
         }
@@ -112,7 +179,7 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
     report.extend(units.disable.iter().map(|u| format!("Enabled unit not declared and not enabled by a vendor preset: {u}")));
     report.extend(units.enable.iter().filter(|u| g.m.units.enable.contains(*u)).map(|u| format!("Declared unit not enabled: {u}")));
 
-    home(&g, &origins, &mut report)?;
+    home(&g, &evidence, &mut paths)?;
     if let Some(state) = crate::secure::audit(&g, &mut report)? {
         say!("• {state}");
     }
@@ -120,36 +187,57 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
     let mut notes = Vec::new();
     crate::report::audit(&mut notes);
     notes.iter().for_each(|n| say!("• {n}"));
-    print(&report);
+    print(&report, &paths);
     Ok(())
 }
 
-/// Shows the number of items first, then the items under one heading for
-/// each kind, and at the end one line that tells what to do.
-fn print(report: &[String]) {
-    if report.is_empty() {
+/// Shows the number of items first. Then the paths with the evidence of a
+/// former claim, the paths with no evidence, the paths whose name agrees with
+/// a package, and the other items, under one heading for each kind.
+fn print(report: &[String], paths: &[(u8, String)]) {
+    if report.is_empty() && paths.is_empty() {
         say!("• The system agrees with the configuration.");
         return;
     }
+    match report.len() + paths.len() {
+        1 => say!("• 1 item that is not declared or that differs from the configuration:"),
+        n => say!("• {n} items that are not declared or that differ from the configuration:"),
+    }
+    let blocks = [
+        "Paths that a feature claimed in an earlier generation:",
+        "Paths with no known origin:",
+        "Paths with a name or rule match. These matches give clues about the origin:",
+    ];
+    for (rank, title) in blocks.iter().enumerate() {
+        let items: Vec<&str> = paths.iter().filter(|p| p.0 as usize == rank).map(|p| p.1.as_str()).collect();
+        if !items.is_empty() {
+            say!("• {title}");
+            kinds(&items);
+        }
+    }
+    if !report.is_empty() && !paths.is_empty() {
+        say!("• Other items:");
+    }
+    kinds(&report.iter().map(String::as_str).collect::<Vec<_>>());
+    say!("• Apply corrects the managed files, the declared units, the boot files and the TPM2 keys. It never removes a package that it did not install. Declare each other item, add it to claims or audit.ignore, or remove it.");
+    crate::report::gap();
+    say!("• Audit done: {}.", crate::count(report.len() + paths.len(), "item"));
+}
+
+/// Shows the items under one heading for each kind.
+fn kinds(lines: &[&str]) {
     let mut kinds: Vec<(&str, Vec<&str>)> = Vec::new();
-    for line in report {
+    for line in lines {
         let (kind, item) = line.split_once(": ").unwrap_or((line, ""));
         match kinds.iter_mut().find(|k| k.0 == kind) {
             Some(k) => k.1.push(item),
             None => kinds.push((kind, vec![item])),
         }
     }
-    match report.len() {
-        1 => say!("• 1 item that is not declared or that differs from the configuration:"),
-        n => say!("• {n} items that are not declared or that differ from the configuration:"),
-    }
     for (kind, items) in &kinds {
         say!("  {kind} ({}):", items.len());
         items.iter().for_each(|i| say!("    {}", i.replace('\n', "\n    ")));
     }
-    say!("• Apply corrects the managed files, the declared units, the boot files and the TPM2 keys. It never removes a package that it did not install. Declare each other item, add it to claims or audit.ignore, or remove it.");
-    crate::report::gap();
-    say!("• Audit done: {}.", crate::count(report.len(), "item"));
 }
 
 /// The directories of a home directory whose entries the audit lists.
@@ -165,12 +253,14 @@ const SHELL_FILES: &[&str] = &[".bashrc", ".bash_profile", ".bash_logout", ".bas
 /// of the directories in CONTAINERS, and of each directory above a Home
 /// Manager file or above the fixed part of a pattern. Another directory shows
 /// as one entry for all of its content. The walk does not follow links.
-fn home(g: &Generation, origins: &Origins, report: &mut Vec<String>) -> Result<()> {
+fn home(g: &Generation, evidence: &Evidence, paths: &mut Vec<(u8, String)>) -> Result<()> {
     let claims: Vec<&String> = g.m.claims.values().flat_map(|c| &c.home).collect();
     for (dir, managed) in homes()? {
         let base = globset::escape(&dir);
         let patterns: Vec<String> = claims.iter().map(|c| format!("{base}/{c}")).chain([format!("{base}/**/*.pacnix-hm-backup")]).chain(g.m.audit.ignore.iter().cloned()).collect();
         let set = globs(patterns.clone());
+        // The walk also goes down to the paths that features claimed before.
+        let patterns: Vec<String> = patterns.into_iter().chain(evidence.former.iter().flat_map(|f| f.3.iter().map(|c| format!("{base}/{c}")))).collect();
         // A Home Manager file has no managed path below it. Its directories are only on the way to it.
         let leaves: BTreeSet<&String> = managed.iter().filter(|m| !managed.range(format!("{m}/")..).next().is_some_and(|n| n.starts_with(&format!("{m}/")))).collect();
         let above: BTreeSet<String> = leaves.iter().flat_map(|l| Path::new(l.as_str()).ancestors().skip(1).map(|a| a.display().to_string())).collect();
@@ -187,7 +277,8 @@ fn home(g: &Generation, origins: &Origins, report: &mut Vec<String>) -> Result<(
                 continue;
             }
             if !explained {
-                report.push(format!("Unclaimed home path: {abs}{}", origins.of(&rel, true)));
+                let (rank, note) = evidence.of(&abs, Some(&rel));
+                paths.push((rank, format!("Unclaimed home path: {abs}{note}")));
             }
             if is_dir {
                 walk.skip_current_dir();

@@ -15,6 +15,13 @@
 # explained, for example the fontconfig links in /etc/fonts/conf.d. A dangling
 # link, a link to a file of no package and a link to a directory stay listed,
 # and a .pacnew link too.
+# The audit shows the paths that a feature claimed before first, also when the
+# feature still exists and no longer claims the path, then the paths with no
+# known origin, then the paths whose name is the same as an installed package,
+# a program in /usr/bin or a desktop ID, also a hidden entry of the home
+# directory without its dot, or that a package tmpfiles rule has. The names of the
+# directories above a path do not count, and a removed application has no
+# match. A bash file that feature arch claimed before is no former claim.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 demo='{ features.demo.enable = true; }'
@@ -40,22 +47,31 @@ step "remove the feature again and delete its data"
 scenario $h '{ features.demo.enable = true; claims.disposable.home = [ ".bash_history" ]; }'
 on $h 'echo ls >~/.bash_history'
 apply $h >/dev/null || fail "apply failed"
-scenario $h '{ files."/srv/demo/keep.txt".text = "kept\n"; claims.other.home = [ ".cache/demo/keep" ]; }'
+scenario $h '{ files."/srv/demo/keep.txt".text = "kept\n"; claims.other.home = [ ".cache/demo/keep" ]; claims.arch.home = [ ".bash_logout" ]; }'
 apply $h || fail "apply --yes failed"
 refute $h 'test -e /srv/demo/index.html || test -e ~/.cache/demo/page' "the data of the removed feature remains"
 check $h 'test "$(cat /srv/demo/keep.txt)" = kept && test -d ~/.cache/demo/keep' "a declared file or a claimed path is deleted"
 check $h 'test -s ~/.bash_history' "the deletion of the data of a removed feature deleted ~/.bash_history"
 step "the audit of a home directory"
-scenario $h '{ features.home.enable = true; packages.repo = [ "fontconfig" ]; claims.other.home = [ ".var/app/org.demo/cache" ]; audit.ignore = [ "/home/arch/.cache/ignored*" "/home/arch/.local/lib/**/keep" ]; }'
+scenario $h '{ features.home.enable = true; packages.repo = [ "fontconfig" ]; packages.local.desk = ./packages/desk; claims.other.home = [ ".var/app/org.demo/cache" ]; audit.ignore = [ "/home/arch/.cache/ignored*" "/home/arch/.local/lib/**/keep" ]; }'
 apply $h >/dev/null || fail "apply failed"
-on $h 'cd ~ && touch notes.txt .bash_history && mkdir -p .local/state/foo .local/bin .local/lib/x/deep .config/app/a .config/app/b Documents Music Work/Templates Work/Pictures Work/other .var/app/org.demo/cache .var/app/org.demo/data .var/app/other .cache/ignored-x &&
+on $h 'cd ~ && touch notes.txt .bash_history && mkdir -p .local/state/foo .local/bin .local/lib/x/deep .config/app/a .config/app/b Documents Music Work/Templates Work/Pictures Work/other .var/app/org.demo/cache .var/app/org.demo/data .var/app/other .var/app/org.pacnix.Desk .config/fontconfig .config/darkhttpd .desk-tool .cache/ignored-x &&
 	touch .local/bin/tool .local/lib/x/deep/keep .local/lib/x/deep/other .config/demo/extra.conf && ln -s /etc .config/linkdir && cp /etc/skel/.bashrc /etc/skel/.bash_profile . && echo "# mine" >>.bash_profile && rm -f .bash_logout && mkfifo .bash_logout &&
 	printf "XDG_DOCUMENTS_DIR=\"\$HOME/Documents\"\nXDG_DESKTOP_DIR=\"\$HOME\"\nXDG_MUSIC_DIR=\"\$HOME/\`echo Music\`\"\nXDG_TEMPLATES_DIR=\"\$HOME/Work/Templates\"\nXDG_PICTURES_DIR=\"/home/arch/Work/Pictures\"\n" >.config/user-dirs.dirs'
-on $h 'cd /etc && sudo ln -s /usr/bin/pacman demo-pkg && sudo ln -s demo-pkg demo-chain && sudo ln -s /nonexistent demo-dangling && sudo touch demo-file && sudo ln -s demo-file demo-other && sudo ln -s /usr/share demo-dir && sudo ln -s /usr/bin/pacman demo.conf.pacnew && test -L "$(ls -d /etc/fonts/conf.d/* | head -1)"' || fail "the fontconfig links are missing"
-start=$SECONDS
+on $h 'cd /etc && sudo ln -s /usr/bin/pacman demo-pkg && sudo ln -s demo-pkg demo-chain && sudo ln -s /nonexistent demo-dangling && sudo touch demo-file && sudo ln -s demo-file demo-other && sudo ln -s /usr/share demo-dir && sudo ln -s /usr/bin/pacman demo.conf.pacnew && sudo touch /usr/share/fontconfig/demo-child && test -d /var/lib/desk-rule && test -L "$(ls -d /etc/fonts/conf.d/* | head -1)"' || fail "the fontconfig links are missing"
+# The number of items of a kind, in all blocks: count <output> <kind>.
+count() { grep -o "^  $2 ([0-9]*)" <<<"$1" | tr -dc '0-9\n' | awk '{ s += $1 } END { print s + 0 }'; }
+start=$(date +%s.%N)
 out=$(pacnix $h audit) || { echo "$out"; fail "audit failed"; }
-echo "COUNT home: $(grep -o 'Unclaimed home path ([0-9]*)' <<<"$out"), system: $(grep -o 'Unowned file ([0-9]*)' <<<"$out"), audit $((SECONDS - start)) s"
+echo "COUNT home: $(count "$out" 'Unclaimed home path'), unowned files: $(count "$out" 'Unowned file'), unowned directories: $(count "$out" 'Unowned directory'), audit $(awk -v s="$start" -v e="$(date +%s.%N)" 'BEGIN { printf "%.2f", e - s }') s"
 echo "$out"
+for l in '/home/arch/.config/fontconfig (the name is the same as installed package fontconfig)' '/home/arch/.var/app/org.pacnix.Desk (the name is the same as desktop ID org.pacnix.Desk)' '/var/lib/desk-rule (a tmpfiles rule in /usr/lib/tmpfiles.d/desk.conf has this path)' '/etc/xdg/nix (the name is the same as installed package nix)' '/home/arch/.desk-tool (the name is the same as program /usr/bin/desk-tool of installed package desk)'; do
+	grep -qxF "    $l" <<<"$out" || fail "the audit does not show: $l"
+done
+for p in /home/arch/.config/darkhttpd /usr/share/fontconfig/demo-child /home/arch/.bash_logout; do
+	grep -qxF "    $p" <<<"$out" || fail "the audit shows $p with a note"
+done
+awk '/^• Paths that a feature claimed/ { a = NR } /^• Paths with no known origin/ { b = NR } /^• Paths with a name or rule match/ { c = NR } /^• Other items/ { d = NR } END { exit !(a && a < b && b < c && c < d) }' <<<"$out" || fail "the blocks of the audit are not in the order: former claims, no known origin, name matches, other items"
 for p in demo-dangling demo-file demo-other demo-dir; do
 	audit_has "$out" 'Unowned file' "/etc/$p" || fail "the audit does not list /etc/$p"
 done
@@ -70,5 +86,9 @@ for p in .config/app/a .config/demo/settings.conf Documents Work Work/Templates 
 done
 scenario $h '{ features.home.enable = true; claims.other.home = [ ".bash_history" ]; }'
 apply $h >/dev/null || fail "apply failed"
-audit_has "$(pacnix $h audit)" 'Unclaimed home path' /home/arch/.bash_history && fail "the audit lists a claimed bash file"
+out=$(pacnix $h audit)
+echo "$out"
+audit_has "$out" 'Unclaimed home path' /home/arch/.bash_history && fail "the audit lists a claimed bash file"
+matches "$out" '/home/arch/.var/app/org.demo/cache \(claimed by feature other in generation [0-9]+; the feature no longer claims it\)' || fail "the audit does not show the path that feature other no longer claims"
+audit_has "$out" 'Unclaimed home path' /home/arch/.var && fail "the audit shows ~/.var as one entry"
 pass

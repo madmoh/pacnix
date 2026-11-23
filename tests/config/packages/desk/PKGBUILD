@@ -1,0 +1,14 @@
+# A package with a program and a desktop file whose names are not the package
+# name, and a tmpfiles rule that creates a directory that no package owns.
+pkgname=desk
+pkgver=1
+pkgrel=1
+pkgdesc='pacnix test package with a program, a desktop file and a tmpfiles rule'
+arch=(any)
+license=(MIT)
+
+package() {
+  install -Dm755 /dev/null "$pkgdir/usr/bin/desk-tool"
+  printf '[Desktop Entry]\nType=Application\nName=Desk\nExec=true\n' | install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/org.pacnix.Desk.desktop"
+  echo 'd /var/lib/desk-rule 0755 root root -' | install -Dm644 /dev/stdin "$pkgdir/usr/lib/tmpfiles.d/desk.conf"
+}
