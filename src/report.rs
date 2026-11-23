@@ -16,11 +16,11 @@ const RETRY: &str = "/var/lib/pacnix/retry.json";
 
 /// The current step and its start, the size of the pacman log at the start of
 /// the run, and the reasons to reboot at the start of the run.
-static RUN: Mutex<Option<(String, Instant, u64, Vec<String>)>> = Mutex::new(None);
+pub static RUN: Mutex<Option<(String, Instant, u64, Vec<String>)>> = Mutex::new(None);
 /// The number of planned changes of each kind, for the last line.
 static PLANNED: Mutex<Vec<((&str, &str), Vec<String>)>> = Mutex::new(Vec::new());
 /// The start of the run, in seconds since the epoch, less one.
-static STARTED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MAX);
+pub static STARTED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(i64::MAX);
 /// The number of the stage that runs, 0 without a stage.
 static STAGE: Mutex<u64> = Mutex::new(0);
 /// Set before the first change of the system. Before it, an interrupt stops
@@ -110,7 +110,7 @@ pub fn check() -> anyhow::Result<()> {
     }
 }
 /// Lines for the end of the summary, for example the next command after an install.
-static LAST: Mutex<Vec<String>> = Mutex::new(Vec::new());
+pub static LAST: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// The isolated steps that failed in this attempt.
 static FAILED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 

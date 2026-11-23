@@ -1398,17 +1398,21 @@ pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
     recover_lock()?;
     let pins = pinned(g);
     let pins: Vec<&str> = pins.iter().map(String::as_str).collect();
-    let stage = report::stage("Refreshing package databases");
-    run_cmd(pacman(&["-Sy", "--config", CONF]))?;
-    drop(stage);
-    let newer = newer()?;
-    if newer.is_empty() && pins.is_empty() {
-        say!("• System upgrade: the packages are up to date.");
-    } else {
-        report::progress(&format!("Upgrading the system: {}", crate::named("package", "to upgrade", &newer)));
-        download(&[&["-u"][..], &pins].concat())?;
-        report::step("system upgrade");
-        transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
+    // After a handoff, the system upgrade is done, also for the next attempts.
+    if !crate::handoff::resumed() {
+        let stage = report::stage("Refreshing package databases");
+        run_cmd(pacman(&["-Sy", "--config", CONF]))?;
+        drop(stage);
+        let newer = newer()?;
+        if newer.is_empty() && pins.is_empty() {
+            say!("• System upgrade: the packages are up to date.");
+        } else {
+            report::progress(&format!("Upgrading the system: {}", crate::named("package", "to upgrade", &newer)));
+            download(&[&["-u"][..], &pins].concat())?;
+            report::step("system upgrade");
+            transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
+            crate::handoff::check()?;
+        }
     }
     if !builds.queue.is_empty() {
         ensure_chroot()?;

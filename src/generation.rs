@@ -457,13 +457,14 @@ pub fn apply(ctx: &Ctx, offline: bool) -> Result<()> {
     let target = build(ctx)?;
     let (mut plan, mut read) = (None, false);
     if !offline {
-        let news = std::thread::spawn(trust::news);
+        let news = (!crate::handoff::resumed()).then(|| std::thread::spawn(trust::news));
         let mut before = Plan::compute(ctx, target.clone())?;
         files::check(ctx, &before.target, &before.files)?;
         let builds = packages::upgrade_builds(&target)?;
         let fetched = packages::fetch_builds(&before.target, &before.packages)?;
-        let news = news.join().unwrap_or_default();
-        read = news.is_some();
+        let news = news.and_then(|n| n.join().ok()).flatten();
+        read = news.is_some() || crate::handoff::NEWS.load(std::sync::atomic::Ordering::Relaxed);
+        crate::handoff::NEWS.store(read, std::sync::atomic::Ordering::Relaxed);
         let asks = [packages::removals(&before.packages), builds.asks.clone(), fetched.asks.clone(), news.unwrap_or_default()].concat();
         preflight(ctx, &mut before, &asks)?;
         // When the upgrade changes no package and no sync database, the plan and its builds stay the same.

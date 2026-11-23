@@ -11,7 +11,7 @@ use std::sync::Mutex;
 const CREATED: &str = "/var/lib/pacnix/accounts";
 
 /// The passwords of the new accounts, from the question of the apply. They stay in memory.
-static PASSWORDS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+pub static PASSWORDS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
 #[derive(Default)]
 pub struct Plan {

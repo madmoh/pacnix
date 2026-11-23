@@ -11,6 +11,7 @@ macro_rules! esay {
 mod audit;
 mod files;
 mod generation;
+mod handoff;
 mod home;
 mod notes;
 mod packages;
@@ -95,10 +96,11 @@ pub struct Ctx {
 /// As with switch-to-configuration of NixOS, the exit status 4 tells that the
 /// change is done but some steps failed.
 fn main() {
+    handoff::probe();
     let cli = Cli::parse();
     let verb = cli.verb.name();
     report::signals();
-    let result = run(cli);
+    let result = handoff::receive().and_then(|_| run(cli));
     if let Err(e) = &result {
         if !report::interrupted() {
             esay!("• Error: {e:#}");
@@ -134,6 +136,9 @@ fn run(cli: Cli) -> Result<()> {
     // pacnix uses systemd to make changes: it does not run in a chroot, for example arch-chroot.
     if !packages::booted() {
         bail!("pacnix runs only on the booted system. Boot the installed system, then run pacnix again.");
+    }
+    if !handoff::resumed() {
+        handoff::record();
     }
     let _lock = lock()?;
     // A local flake needs flake.nix. Nix tells this without the directory and the option.
@@ -212,9 +217,12 @@ fn cause(e: &anyhow::Error) -> Cause {
 /// The pauses before the next attempts after a failure in the network.
 const PAUSES: [u64; 3] = [10, 30, 60];
 
+/// The number of the attempt that runs, from 0.
+pub static ATTEMPT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Set for the last attempt of a verb: then `isolated` also continues after a
 /// failure in the network.
-static FINAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static FINAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The retry policy of pacnix. A failure in the network repeats the verb up to
 /// three times in about two minutes, with one download at a time. The next
@@ -224,8 +232,11 @@ static FINAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new
 /// evaluation error, a refused plan or a pacman transaction that fails, stops
 /// pacnix one time with the reason.
 fn resilient(f: impl Fn() -> Result<()>) -> Result<()> {
-    report::begin();
-    for (attempt, pause) in PAUSES.iter().enumerate() {
+    if !handoff::resumed() {
+        report::begin();
+    }
+    for (attempt, pause) in PAUSES.iter().enumerate().skip(ATTEMPT.load(std::sync::atomic::Ordering::Relaxed)) {
+        ATTEMPT.store(attempt, std::sync::atomic::Ordering::Relaxed);
         report::reset();
         match f() {
             Ok(()) => return Ok(report::summary()),
@@ -241,6 +252,7 @@ fn resilient(f: impl Fn() -> Result<()>) -> Result<()> {
             },
         }
     }
+    ATTEMPT.store(PAUSES.len(), std::sync::atomic::Ordering::Relaxed);
     report::reset();
     FINAL.store(true, std::sync::atomic::Ordering::Relaxed);
     f().map(|_| report::summary())
@@ -270,9 +282,9 @@ pub fn isolated(step: &str, f: impl FnOnce() -> Result<()>) -> Result<bool> {
 
 /// Set when the questions of the run end, before the long work. Later steps do not ask.
 static CLOSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static DELETE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static DELETE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The items that the user accepted in this run.
-static APPROVED: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+pub static APPROVED: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
 
 pub fn closed() -> bool {
     CLOSED.load(std::sync::atomic::Ordering::Relaxed)
@@ -321,11 +333,18 @@ pub fn ask(items: &[String], data: &[String], opts: &Opts) -> Result<bool> {
     Ok(DELETE.load(Relaxed))
 }
 
+const LOCK_FILE: &str = "/run/lock/pacnix.lock";
+
+/// The lock of the run. After a handoff, the lock that the earlier pacnix took.
 fn lock() -> Result<std::fs::File> {
-    let f = std::fs::File::create("/run/lock/pacnix.lock")?;
-    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&f), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+    if let Some(f) = handoff::GIVEN.lock().unwrap().take() {
+        return Ok(f);
+    }
+    let f = std::fs::File::create(LOCK_FILE)?;
+    if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         bail!("a different pacnix process is running.");
     }
+    handoff::LOCK.store(f.as_raw_fd(), std::sync::atomic::Ordering::Relaxed);
     Ok(f)
 }
 

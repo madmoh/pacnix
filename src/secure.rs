@@ -16,9 +16,9 @@ const TPM: &str = "/sys/class/tpm/tpm0";
 /// The passphrase and the new PIN of each LUKS device, which the user types at the run.
 /// The passphrase and the new PIN of each LUKS device, by its UUID, which the
 /// user types at the start of the run and which stay in memory only.
-static SECRETS: Mutex<BTreeMap<String, (String, String)>> = Mutex::new(BTreeMap::new());
+pub static SECRETS: Mutex<BTreeMap<String, (String, String)>> = Mutex::new(BTreeMap::new());
 /// The names of the LUKS devices that got a recovery key at the start of the run.
-static RECOVERED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+pub static RECOVERED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// The identity of a LUKS device: the UUID of its header, also when the
 /// declaration names it by a path or a label.
