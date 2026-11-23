@@ -22,6 +22,10 @@
 # directory without its dot, or that a package tmpfiles rule has. The names of the
 # directories above a path do not count, and a removed application has no
 # match. A bash file that feature arch claimed before is no former claim.
+# A DKMS build of a package source for an installed kernel has a note: its
+# registration, its build directory and the installed module with the same
+# bytes. A version without source, a registration for a kernel that is not
+# installed, and a module of no build or with other bytes have no note.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 demo='{ features.demo.enable = true; }'
@@ -53,12 +57,19 @@ refute $h 'test -e /srv/demo/index.html || test -e ~/.cache/demo/page' "the data
 check $h 'test "$(cat /srv/demo/keep.txt)" = kept && test -d ~/.cache/demo/keep' "a declared file or a claimed path is deleted"
 check $h 'test -s ~/.bash_history' "the deletion of the data of a removed feature deleted ~/.bash_history"
 step "the audit of a home directory"
-scenario $h '{ features.home.enable = true; packages.repo = [ "fontconfig" ]; packages.local.desk = ./packages/desk; claims.other.home = [ ".var/app/org.demo/cache" ]; audit.ignore = [ "/home/arch/.cache/ignored*" "/home/arch/.local/lib/**/keep" ]; }'
+scenario $h '{ features.home.enable = true; packages.repo = [ "fontconfig" "linux-headers" "dkms" "v4l2loopback-dkms" ]; packages.local.desk = ./packages/desk; claims.other.home = [ ".var/app/org.demo/cache" ]; audit.ignore = [ "/home/arch/.cache/ignored*" "/home/arch/.local/lib/**/keep" ]; }'
 apply $h >/dev/null || fail "apply failed"
 on $h 'cd ~ && touch notes.txt .bash_history && mkdir -p .local/state/foo .local/bin .local/lib/x/deep .config/app/a .config/app/b Documents Music Work/Templates Work/Pictures Work/other .var/app/org.demo/cache .var/app/org.demo/data .var/app/other .var/app/org.pacnix.Desk .config/fontconfig .config/darkhttpd .desk-tool .cache/ignored-x &&
 	touch .local/bin/tool .local/lib/x/deep/keep .local/lib/x/deep/other .config/demo/extra.conf && ln -s /etc .config/linkdir && cp /etc/skel/.bashrc /etc/skel/.bash_profile . && echo "# mine" >>.bash_profile && rm -f .bash_logout && mkfifo .bash_logout &&
 	printf "XDG_DOCUMENTS_DIR=\"\$HOME/Documents\"\nXDG_DESKTOP_DIR=\"\$HOME\"\nXDG_MUSIC_DIR=\"\$HOME/\`echo Music\`\"\nXDG_TEMPLATES_DIR=\"\$HOME/Work/Templates\"\nXDG_PICTURES_DIR=\"/home/arch/Work/Pictures\"\n" >.config/user-dirs.dirs'
 on $h 'cd /etc && sudo ln -s /usr/bin/pacman demo-pkg && sudo ln -s demo-pkg demo-chain && sudo ln -s /nonexistent demo-dangling && sudo touch demo-file && sudo ln -s demo-file demo-other && sudo ln -s /usr/share demo-dir && sudo ln -s /usr/bin/pacman demo.conf.pacnew && sudo touch /usr/share/fontconfig/demo-child && test -d /var/lib/desk-rule && test -L "$(ls -d /etc/fonts/conf.d/* | head -1)"' || fail "the fontconfig links are missing"
+k=$(on $h 'ls /var/lib/dkms/v4l2loopback | sed -n "s/^kernel-\(.*\)-x86_64$/\1/p"')
+v=$(on $h 'pacman -Q v4l2loopback-dkms | sed "s/.* \(.*\)-.*/\1/"')
+d=/usr/lib/modules/$k/updates/dkms
+on $h "test -f $d/v4l2loopback.ko.zst && test -d /var/lib/dkms/v4l2loopback/$v" || fail "DKMS did not install v4l2loopback $v for kernel $k"
+on $h "cd /var/lib/dkms/v4l2loopback && sudo mkdir 0.0.1 && sudo ln -s /usr/src/v4l2loopback-0.0.1 0.0.1/source && sudo ln -s 0.0.1/9.9.9-arch1-1/x86_64 kernel-9.9.9-arch1-1-x86_64 &&
+	sudo touch $d/stray.ko.zst && echo a | sudo tee $v/$k/x86_64/module/other.ko.zst >/dev/null && echo b | sudo tee $d/other.ko.zst >/dev/null" || fail "the stale DKMS paths cannot be made"
+dkms="DKMS module v4l2loopback $v for kernel $k; the source is in package v4l2loopback-dkms"
 # The number of items of a kind, in all blocks: count <output> <kind>.
 count() { grep -o "^  $2 ([0-9]*)" <<<"$1" | tr -dc '0-9\n' | awk '{ s += $1 } END { print s + 0 }'; }
 start=$(date +%s.%N)
@@ -68,10 +79,13 @@ echo "$out"
 for l in '/home/arch/.config/fontconfig (the name is the same as installed package fontconfig)' '/home/arch/.var/app/org.pacnix.Desk (the name is the same as desktop ID org.pacnix.Desk)' '/var/lib/desk-rule (a tmpfiles rule in /usr/lib/tmpfiles.d/desk.conf has this path)' '/etc/xdg/nix (the name is the same as installed package nix)' '/home/arch/.desk-tool (the name is the same as program /usr/bin/desk-tool of installed package desk)'; do
 	grep -qxF "    $l" <<<"$out" || fail "the audit does not show: $l"
 done
+for l in "$d/v4l2loopback.ko.zst (the same bytes as the build of $dkms)" "/var/lib/dkms/v4l2loopback/kernel-$k-x86_64 (active registration of $dkms)" "/var/lib/dkms/v4l2loopback/$v (DKMS module v4l2loopback $v: the source is in package v4l2loopback-dkms, and each kernel directory has an active registration)" /var/lib/dkms/v4l2loopback/0.0.1 /var/lib/dkms/v4l2loopback/kernel-9.9.9-arch1-1-x86_64 $d/stray.ko.zst $d/other.ko.zst; do
+	grep -qxF "    $l" <<<"$out" || fail "the audit does not show: $l"
+done
 for p in /home/arch/.config/darkhttpd /usr/share/fontconfig/demo-child /home/arch/.bash_logout; do
 	grep -qxF "    $p" <<<"$out" || fail "the audit shows $p with a note"
 done
-awk '/^• Paths that a feature claimed/ { a = NR } /^• Paths with no known origin/ { b = NR } /^• Paths with a name or rule match/ { c = NR } /^• Other items/ { d = NR } END { exit !(a && a < b && b < c && c < d) }' <<<"$out" || fail "the blocks of the audit are not in the order: former claims, no known origin, name matches, other items"
+awk '/^• Paths that a feature claimed/ { a = NR } /^• Paths with no known origin/ { b = NR } /^• Paths with a name, rule or DKMS match/ { c = NR } /^• Other items/ { d = NR } END { exit !(a && a < b && b < c && c < d) }' <<<"$out" || fail "the blocks of the audit are not in the order: former claims, no known origin, name matches, other items"
 for p in demo-dangling demo-file demo-other demo-dir; do
 	audit_has "$out" 'Unowned file' "/etc/$p" || fail "the audit does not list /etc/$p"
 done
@@ -84,6 +98,7 @@ audit_has "$out" 'Unclaimed home path' "/home/arch/.bash_history (claimed by fea
 for p in .config/app/a .config/demo/settings.conf Documents Work Work/Templates Work/Pictures .local/lib .local/lib/x .local/lib/x/deep/keep .bashrc .cache/ignored-x .var/app/org.demo/cache .var .var/app .config/linkdir/passwd .config/Code; do
 	audit_has "$out" 'Unclaimed home path' "/home/arch/$p" && fail "the audit lists ~/$p"
 done
+on $h "sudo rm -rf /var/lib/dkms/v4l2loopback/0.0.1 /var/lib/dkms/v4l2loopback/kernel-9.9.9-arch1-1-x86_64 $d/stray.ko.zst $d/other.ko.zst /var/lib/dkms/v4l2loopback/$v/$k/x86_64/module/other.ko.zst"
 scenario $h '{ features.home.enable = true; claims.other.home = [ ".bash_history" ]; }'
 apply $h >/dev/null || fail "apply failed"
 out=$(pacnix $h audit)

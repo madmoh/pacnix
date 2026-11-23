@@ -33,6 +33,9 @@ struct Evidence {
     programs: BTreeMap<String, String>,
     desktop: BTreeSet<String>,
     rules: BTreeMap<String, String>,
+    /// The notes of DKMS paths, and the DKMS directories whose entries the audit lists.
+    dkms: BTreeMap<String, String>,
+    containers: BTreeSet<String>,
 }
 
 impl Evidence {
@@ -71,7 +74,10 @@ impl Evidence {
                 rules.entry(p.trim_end_matches('/').to_string()).or_insert_with(|| file.clone());
             }
         }
+        let (dkms, containers) = dkms(inventory, owned);
         Ok(Evidence {
+            dkms,
+            containers,
             former,
             names: inventory.lines().filter_map(|l| l.split_once(' ')).map(|(n, _)| n.to_string()).collect(),
             programs: inventory.lines().filter_map(|l| l.split_once(' ')).filter_map(|(n, p)| Some((p.strip_prefix("/usr/bin/")?.to_string(), n.to_string()))).filter(|(p, _)| !p.is_empty() && !p.contains('/')).collect(),
@@ -93,6 +99,9 @@ impl Evidence {
         if let Some((n, f, kept, ..)) = found {
             let why = if *kept { "the feature no longer claims it" } else { "the feature is no longer enabled" };
             return (0, format!(" (claimed by feature {f} in generation {n}; {why})"));
+        }
+        if let Some(note) = rel.is_none().then(|| self.dkms.get(path)).flatten() {
+            return (2, note.clone());
         }
         let name = match rel {
             Some(r) => NAMESPACES.iter().find_map(|ns| r.strip_prefix(ns)?.strip_prefix('/')?.split('/').next()).or_else(|| r.split('/').next()?.strip_prefix('.')),
@@ -142,6 +151,9 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
         // A link to a file of a package, for example a fontconfig link in /etc/fonts/conf.d, is explained.
         let target = if e.path_is_symlink() { std::fs::canonicalize(e.path()).ok() } else { None };
         if target.is_some_and(|t| !t.is_dir() && owned.contains(&t.display().to_string())) {
+            continue;
+        }
+        if e.file_type().is_dir() && evidence.containers.contains(&path) && std::fs::read_dir(e.path()).is_ok_and(|mut d| d.next().is_some()) {
             continue;
         }
         let kind = if e.file_type().is_dir() { "directory" } else { "file" };
@@ -206,7 +218,7 @@ fn print(report: &[String], paths: &[(u8, String)]) {
     let blocks = [
         "Paths that a feature claimed in an earlier generation:",
         "Paths with no known origin:",
-        "Paths with a name or rule match. These matches give clues about the origin:",
+        "Paths with a name, rule or DKMS match. These matches give clues about the origin:",
     ];
     for (rank, title) in blocks.iter().enumerate() {
         let items: Vec<&str> = paths.iter().filter(|p| p.0 as usize == rank).map(|p| p.1.as_str()).collect();
@@ -237,6 +249,95 @@ fn kinds(lines: &[&str]) {
     for (kind, items) in &kinds {
         say!("  {kind} ({}):", items.len());
         items.iter().for_each(|i| say!("    {}", i.replace('\n', "\n    ")));
+    }
+}
+
+/// The notes of the paths of DKMS builds that are active: a registration
+/// /var/lib/dkms/MODULE/kernel-KERNEL-ARCH links to VERSION/KERNEL/ARCH, the
+/// dkms.conf of the source of VERSION is a regular file of a package, and the
+/// kernel is installed. An installed module in /usr/lib/modules/KERNEL/updates/dkms
+/// has a note when the build has a module file (.ko, also compressed) with the
+/// same name and the same bytes, and a build directory when all its entries are
+/// the source link and kernels with an active registration. Also the
+/// directories whose entries the audit lists: each module directory and the
+/// updates directories of each kernel.
+fn dkms(inventory: &str, owned: &BTreeSet<String>) -> (BTreeMap<String, String>, BTreeSet<String>) {
+    let confs: BTreeMap<&str, &str> = inventory.lines().filter_map(|l| l.split_once(' ')).filter(|(_, p)| p.ends_with("/dkms.conf")).map(|(n, p)| (p, n)).collect();
+    let is_dir = |p: &Path| p.symlink_metadata().is_ok_and(|m| m.is_dir());
+    let mut notes = BTreeMap::new();
+    let mut containers = BTreeSet::new();
+    for m in std::fs::read_dir("/var/lib/dkms").into_iter().flatten().flatten().filter(|m| is_dir(&m.path())) {
+        let module = m.file_name().to_string_lossy().to_string();
+        containers.insert(m.path().display().to_string());
+        let mut live: BTreeMap<String, (String, BTreeSet<String>)> = BTreeMap::new();
+        for l in std::fs::read_dir(m.path()).into_iter().flatten().flatten() {
+            let Ok(target) = std::fs::read_link(l.path()) else { continue };
+            let parts: Vec<&str> = target.to_str().unwrap_or_default().split('/').collect();
+            let [version, kernel, arch] = parts[..] else { continue };
+            if l.file_name().to_str() != Some(&format!("kernel-{kernel}-{arch}")) || parts.iter().any(|c| c.is_empty() || *c == "." || *c == "..") {
+                continue;
+            }
+            let build = m.path().join(&target);
+            let link = m.path().join(version).join("source");
+            let source = link.symlink_metadata().is_ok_and(|l| l.is_symlink()).then(|| std::fs::canonicalize(&link).ok()).flatten();
+            let conf = source.map(|s| s.join("dkms.conf")).filter(|c| c.symlink_metadata().is_ok_and(|m| m.is_file()));
+            let package = conf.and_then(|c| confs.get(c.to_str()?).copied());
+            let (Some(package), true) = (package, [m.path().join(version), m.path().join(version).join(kernel), build.clone(), build.join("module")].iter().all(|p| is_dir(p))) else { continue };
+            if !owned.contains(&format!("/usr/lib/modules/{kernel}")) {
+                continue;
+            }
+            let what = format!("DKMS module {module} {version} for kernel {kernel}; the source is in package {package}");
+            notes.insert(l.path().display().to_string(), format!(" (active registration of {what})"));
+            let modules = std::fs::read_dir(build.join("module")).into_iter().flatten().flatten();
+            for f in modules.filter(|f| [".ko", ".ko.gz", ".ko.xz", ".ko.zst"].iter().any(|x| f.file_name().to_string_lossy().ends_with(x))) {
+                let installed = Path::new("/usr/lib/modules").join(kernel).join("updates/dkms").join(f.file_name());
+                if same(&f.path(), &installed) {
+                    notes.insert(installed.display().to_string(), format!(" (the same bytes as the build of {what})"));
+                }
+            }
+            live.entry(version.to_string()).or_insert_with(|| (package.to_string(), BTreeSet::new())).1.insert(kernel.to_string());
+        }
+        for (version, (package, kernels)) in live {
+            let dir = m.path().join(&version);
+            if std::fs::read_dir(&dir).into_iter().flatten().flatten().all(|e| e.file_name() == "source" || e.file_name().to_str().is_some_and(|k| kernels.contains(k))) {
+                notes.insert(dir.display().to_string(), format!(" (DKMS module {module} {version}: the source is in package {package}, and each kernel directory has an active registration)"));
+            }
+        }
+    }
+    for k in std::fs::read_dir("/usr/lib/modules").into_iter().flatten().flatten() {
+        containers.insert(k.path().join("updates").display().to_string());
+        containers.insert(k.path().join("updates/dkms").display().to_string());
+    }
+    (notes, containers)
+}
+
+/// Opens a regular file and gives its size. It does not follow a link and does not wait, for example on a FIFO.
+fn open_regular(path: &Path) -> Option<(std::fs::File, u64)> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if !path.symlink_metadata().ok()?.is_file() {
+        return None;
+    }
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path).ok()?;
+    let m = f.metadata().ok()?;
+    m.is_file().then_some((f, m.len()))
+}
+
+/// Whether two paths are regular files with the same bytes, read in parts.
+fn same(a: &Path, b: &Path) -> bool {
+    use std::io::Read;
+    let (Some((mut x, n)), Some((mut y, m))) = (open_regular(a), open_regular(b)) else { return false };
+    let (mut p, mut q) = (vec![0u8; 1 << 16], vec![0u8; 1 << 16]);
+    if n != m {
+        return false;
+    }
+    loop {
+        let Ok(i) = x.read(&mut p) else { return false };
+        if i == 0 {
+            return y.read(&mut q).is_ok_and(|j| j == 0);
+        }
+        if y.read_exact(&mut q[..i]).is_err() || p[..i] != q[..i] {
+            return false;
+        }
     }
 }
 
@@ -310,14 +411,7 @@ fn enters(patterns: &[String], dir: &str, home: &str) -> bool {
 /// user: a link, a FIFO and a device give None, and no read waits.
 fn read_small(path: &Path) -> Option<Vec<u8>> {
     use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
-    if !path.symlink_metadata().ok()?.is_file() {
-        return None;
-    }
-    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path).ok()?;
-    if !f.metadata().ok()?.is_file() {
-        return None;
-    }
+    let (f, _) = open_regular(path)?;
     let mut buf = Vec::new();
     f.take(65537).read_to_end(&mut buf).ok()?;
     (buf.len() <= 65536).then_some(buf)
