@@ -38,7 +38,8 @@ out=$(plan $h) || { echo "$out"; fail "the replacement plan failed"; }
 has "$out" 'Remove package fortune-mod (apply asks first)' || { echo "$out"; fail "the plan misses the package that leaves"; }
 has "$out" 'Remove package recode' && { echo "$out"; fail "the plan removes a dependency of the replacement"; }
 out=$(apply $h) || { echo "$out"; fail "the replacement did not finish in one apply"; }
-refute $h 'pacman -Q fortune-mod' "the old package is still installed"
+has "$out" 'package removed: fortune-mod' || { echo "$out"; fail "the transaction did not remove the old package"; }
+refute $h 'pacman -Qq | grep -Fxq fortune-mod' "the old package is still installed"
 check $h 'pacman -Qqe fortune-local && pacman -Qqd recode' "the replacement or its dependency is missing"
 empty_plan $h
 pass
