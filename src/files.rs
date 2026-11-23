@@ -281,11 +281,12 @@ fn write_temporary(path: &str, spec: &FileSpec) -> Result<()> {
     Ok(())
 }
 
-/// Replaces a file with the content from the package archive in the pacman cache.
+/// Replaces a file with the content from the package archive in a cache directory of pacman.
 fn restore(path: &str, pkg: &str) -> Result<()> {
     let version = output_any(cmd("pacman", &["-Q", pkg]))?.split_whitespace().nth(1).unwrap_or("").to_string();
     let find = || -> Option<String> {
-        std::fs::read_dir("/var/cache/pacman/pkg").ok()?.flatten().map(|e| e.path().display().to_string()).find(|p| {
+        let dirs = output_any(cmd("pacman-conf", &["--config", crate::packages::CONF, "CacheDir"])).ok()?;
+        dirs.lines().flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten()).map(|e| e.path().display().to_string()).find(|p| {
             let name = Path::new(p).file_name().unwrap().to_string_lossy().into_owned();
             name.starts_with(&format!("{pkg}-{version}-")) && name.rsplit_once("-").is_some_and(|(head, _)| head == format!("{pkg}-{version}")) && !name.ends_with(".sig")
         })

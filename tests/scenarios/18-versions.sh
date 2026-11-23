@@ -6,6 +6,7 @@
 # of its files. A new maintainer of a built AUR package needs a confirmation.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
+cache=$(cache_list $h)
 now=$(on $h "pacman -Si tree | awk '/^Version/ { print \$3 }'")
 listing=$(curl -fsS --connect-timeout 10 --max-time 30 https://archive.archlinux.org/packages/t/tree/) || fail "blocked: the host cannot read https://archive.archlinux.org/packages/t/tree/ (curl exit status $?)"
 old=$(grep -o 'tree-[0-9][^"]*-x86_64\.pkg\.tar\.zst"' <<<"$listing" | sed 's/^tree-//; s/-x86_64.*//' | grep -vx "$now" | sort -V | tail -1)
@@ -21,7 +22,10 @@ step "pacnix apply keeps the pinned version"
 pacnix $h apply --yes >/dev/null || fail "upgrade failed"
 check $h "test \"\$(pacman -Q tree)\" = 'tree $old'" "the upgrade changed the pinned version"
 step "apply corrects a manual upgrade"
+cache_kept $h "$cache"
 on $h 'sudo pacman -S --noconfirm tree >/dev/null 2>&1'
+# The manual upgrade with pacman downloads into /var/cache/pacman/pkg.
+cache=$(cache_list $h)
 check $h "test \"\$(pacman -Q tree)\" = 'tree $now'" "the manual upgrade did not happen"
 apply $h >/dev/null || fail "apply failed"
 check $h "test \"\$(pacman -Q tree)\" = 'tree $old'" "apply did not restore the pinned version"
@@ -49,4 +53,5 @@ matches "$out" 'The AUR package downgrade has new maintainers: .*, before: someo
 has "$out" '• Error: these items need a confirmation. Give --yes to continue without a terminal' || fail "apply without a terminal does not ask for --yes"
 apply $h >/dev/null || fail "apply --yes failed"
 out=$(pacnix $h apply 2>&1) || { echo "$out" | tail -5; fail "apply asks again after the confirmation"; }
+cache_kept $h "$cache"
 pass

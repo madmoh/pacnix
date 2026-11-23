@@ -11,6 +11,12 @@ const BUILD: &str = "/var/lib/pacnix/build";
 /// are in /run, and pacnix plan does not change /var/lib/pacnix.
 pub const CONF: &str = "/run/pacnix/pacman.conf";
 const LOCAL_CONF: &str = "/run/pacnix/pacman-local.conf";
+/// The first cache directory of the pacman configuration of pacnix. pacman
+/// downloads only into the first cache directory and reads the others, thus
+/// the cache directories of the system stay as they are. An apply without a
+/// failure deletes the files at the end; after a failure, the next attempt
+/// uses them.
+pub const STAGING: &str = "/var/lib/pacnix/cache";
 const SOURCES: &str = "/var/lib/pacnix/local-sources.json";
 /// The packages that pacnix installed or marked explicit for a declaration.
 /// Only these become dependencies again when their declaration goes.
@@ -284,14 +290,19 @@ fn write_confs(g: &Generation) -> Result<()> {
     // The declared pacman.conf applies from the start, also in the chroot of an
     // installation, where /etc/pacman.conf is still the file of the package.
     let declared = g.m.files.get("/etc/pacman.conf").filter(|f| f.target.is_none()).map_or("/etc/pacman.conf", |f| f.source.as_str());
-    let mut system = std::fs::read_to_string(declared)?;
-    if SERIAL.load(std::sync::atomic::Ordering::Relaxed) {
-        system = system
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("ParallelDownloads"))
-            .map(|l| if l.trim() == "[options]" { format!("{l}\nParallelDownloads = 1\n") } else { format!("{l}\n") })
-            .collect();
+    // STAGING comes first, then the cache directories of the system, which
+    // include the default when the configuration names none.
+    let mut options = std::iter::once(STAGING.to_string()).chain(output(cmd("pacman-conf", &["--config", declared, "CacheDir"]))?.lines().map(String::from)).map(|d| format!("CacheDir = {d}\n")).collect::<String>();
+    let serial = SERIAL.load(std::sync::atomic::Ordering::Relaxed);
+    if serial {
+        options.push_str("ParallelDownloads = 1\n");
     }
+    let key = |l: &str| l.split('=').next().unwrap_or("").trim().to_string();
+    let system: String = std::fs::read_to_string(declared)?
+        .lines()
+        .filter(|l| key(l) != "CacheDir" && !(serial && key(l) == "ParallelDownloads"))
+        .map(|l| if l.trim() == "[options]" { format!("{l}\n{options}") } else { format!("{l}\n") })
+        .collect();
     // pacman warns about a repository without a synced database. The plan reads
     // the database of pacnix-local from the repository, thus the section of
     // pacnix-local goes into the system configuration after its first sync.
@@ -715,6 +726,7 @@ pub static SERIAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// terminal, pacman shows no progress, thus pacnix shows the packages and
 /// MiB in the cache every 30 s, from the sizes that pacman -Sp gives.
 fn download(args: &[&str]) -> Result<()> {
+    std::fs::create_dir_all(STAGING)?;
     let list = output(pacman(&["-Sp", "--print-format", "%s %l", "--config", CONF]).args(args))?;
     let files: Vec<(String, u64)> = list
         .lines()
@@ -732,8 +744,7 @@ fn download(args: &[&str]) -> Result<()> {
         true => format!("{label}: {:.0} KiB", (size / 1024.0).ceil()),
         false => format!("{label}: {:.1} MiB", size / 1048576.0),
     });
-    let cache = output(cmd("pacman-conf", &["--config", CONF, "CacheDir"]))?.lines().next().unwrap_or("/var/cache/pacman/pkg/").to_string();
-    report::download(&label, &cache, Some(files));
+    report::download(&label, STAGING, Some(files));
     let result = run_cmd(pacman(&["-Sw", "--noconfirm", "--ask=4", "--config", CONF]).args(args));
     report::download("", "", None);
     result
@@ -887,6 +898,7 @@ fn chroot(args: &[&str]) -> Command {
 /// configuration. mkarchroot writes .arch-chroot at the end, thus a chroot
 /// without it is the remainder of a failed attempt.
 fn ensure_chroot() -> Result<()> {
+    std::fs::create_dir_all(STAGING)?;
     let root = Path::new("/var/lib/aurbuild/x86_64/root");
     if root.join(".arch-chroot").exists() {
         report::progress("Updating the build chroot");
@@ -896,7 +908,12 @@ fn ensure_chroot() -> Result<()> {
     if root.exists() {
         run_cmd(cmd("rm", &["-rf", "--one-file-system"]).arg(root))?;
     }
-    run_cmd(chroot(&["--create"]))
+    // mkarchroot takes the cache directories from /etc/pacman.conf, thus it
+    // sees the configuration of pacnix there, in a mount namespace of its own.
+    let create = chroot(&["--create"]);
+    let mut c = cmd("unshare", &["--mount", "--propagation", "private", "--", "sh", "-c", r#"mount --bind "$1" /etc/pacman.conf && shift && exec "$@""#, "sh", CONF]);
+    c.arg(create.get_program()).args(create.get_args()).envs(create.get_envs().filter_map(|(k, v)| Some((k, v?))));
+    run_cmd(c)
 }
 
 /// The packages to build, in build order, with a flag for local packages, the
@@ -1049,7 +1066,7 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<BTreeSet<String>> {
             }
             // makechrootpkg downloads the sources on the host as the builder user, and
             // systemd-nspawn locks the chroot in /run.
-            let writable = [BUILD, REPO, "/var/lib/aurbuild", "/var/cache/pacman/pkg", "/run"];
+            let writable = [BUILD, REPO, "/var/lib/aurbuild", STAGING, "/run"];
             let ok = isolated(&step, || run_cmd(sandboxed(c, None, &writable)));
             // No process of the builder user stays to change the packages.
             let _ = cmd("pkill", &["-KILL", "-u", "pacnix"]).status();
@@ -1179,6 +1196,7 @@ pub fn recover_lock() -> Result<()> {
 /// when no installed package owns them.
 fn transaction(args: &[&str]) -> Result<()> {
     recover_lock()?;
+    std::fs::create_dir_all(STAGING)?;
     let mut c = pacman(args);
     // The lists of packages and optional dependencies stay out of the output.
     // The summary shows the install notes and the .pacnew files.
@@ -1344,6 +1362,23 @@ pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
         build_dirs(g, builds)?;
         sync_pacnix_db(g)?;
         transaction(&[&["-Su", "--noconfirm", "--config", CONF][..], &pins].concat())?;
+    }
+    Ok(())
+}
+
+/// Deletes the package files, signatures and partial downloads of pacnix
+/// after an apply without a failure.
+pub fn clean_staging() -> Result<()> {
+    let dir = match std::fs::read_dir(STAGING) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        dir => dir.context(STAGING)?,
+    };
+    for e in dir {
+        let e = e?;
+        match e.file_type()?.is_dir() {
+            true => std::fs::remove_dir_all(e.path())?,
+            false => std::fs::remove_file(e.path())?,
+        }
     }
     Ok(())
 }

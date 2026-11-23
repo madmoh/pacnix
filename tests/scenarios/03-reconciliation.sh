@@ -10,6 +10,7 @@
 # pacnix kept, and removes a link in the build directory, not its target.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
+cache=$(cache_list $h)
 apply $h >/dev/null || fail "first apply failed"
 repo='pacman -Slq --config /run/pacnix/pacman.conf pacnix-local'
 
@@ -125,4 +126,5 @@ apply $h || fail "apply failed"
 [[ $(on $h 'md5sum /etc/pacman.conf /etc/locale.gen /etc/pam.d/su') == "$originals" ]] || fail "the original files did not come back"
 refute $h "locale -a | grep -q ar_AE" "the locale trigger did not run after the restore"
 empty_plan $h
+cache_kept $h "$cache"
 pass

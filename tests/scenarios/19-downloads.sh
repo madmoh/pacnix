@@ -6,11 +6,14 @@
 # mirror that stays down stops pacnix after four attempts in about two
 # minutes. A mirror without a file of the sync databases (404) stops pacnix at
 # once and tells to run pacnix apply without --offline. A no-op apply
-# downloads nothing.
+# downloads nothing. The package files stay in /var/lib/pacnix/cache after a
+# failed step, for the next apply, and leave after an apply without a failure;
+# the files in /var/cache/pacman/pkg do not change.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 apply $h >/dev/null || fail "first apply failed"
 conf=$(on $h 'md5sum /etc/pacman.conf')
+cache=$(cache_list $h)
 # Runs a command in the VM when pacnix shows its next failed first attempt, so
 # that the next attempt, after 10 s, succeeds.
 after_failure() { on $h "sudo systemd-run --quiet sh -c 'n=\$(grep -c \"Attempt 1 of\" /var/log/pacnix-test.log); until [ \$(grep -c \"Attempt 1 of\" /var/log/pacnix-test.log) -gt \$n ]; do sleep 0.2; done; $1'"; }
@@ -24,6 +27,7 @@ matches "$out" "• Attempt 1 of 4 failed in the network: error: failed retrievi
 check $h 'pacman -Q cowsay' "cowsay is not installed"
 check $h 'grep -qx "ParallelDownloads = 1" /run/pacnix/pacman.conf' "the next attempt does not download one file at a time"
 [[ $(on $h 'md5sum /etc/pacman.conf') == "$conf" ]] || fail "pacnix changed /etc/pacman.conf"
+cache_kept $h "$cache"
 
 step "the source host does not resolve until the first attempt fails"
 on $h 'echo "127.0.0.1 fastly.mirror.pkgbuild.com" | sudo tee -a /etc/hosts >/dev/null'
@@ -32,10 +36,19 @@ scenario $h '{ packages.repo = [ "cowsay" ]; packages.local.remote = ./packages/
 out=$(apply $h) || { echo "$out" | tail -20; fail "apply failed while the source host did not resolve"; }
 has "$out" '• Attempt 1 of 4 failed in the network: curl: (7) Failed to connect to fastly.mirror.pkgbuild.com' || { echo "$out"; fail "apply does not try the source download again"; }
 check $h 'test -s /usr/share/remote/lastupdate' "the package with the remote source is not installed"
+cache_kept $h "$cache"
+
+step "a failed step keeps the downloaded package files until an apply without a failure"
+scenario $h '{ packages.repo = [ "cowsay" "sl" ]; packages.local.remote = ./packages/remote; files."/etc/st.conf".text = "1\n"; triggers.stfail = { paths = [ "/etc/st.conf" ]; command = "test -e /etc/st-ok"; }; }'
+apply $h >/dev/null && fail "apply succeeded with a failed trigger"
+check $h 'pacman -Q sl && sudo ls /var/lib/pacnix/cache | grep -q "^sl-.*\.pkg\.tar\.zst$"' "the package file of sl is not in /var/lib/pacnix/cache after the failed step"
+on $h 'sudo touch /etc/st-ok'
+apply $h >/dev/null || fail "apply failed after the correction of the trigger"
+cache_kept $h "$cache"
 
 step "a mirror that stays down stops pacnix after four attempts"
 on $h 'echo "Server = http://127.0.0.1:9/\$repo/os/\$arch" | sudo tee /etc/pacman.d/mirrorlist >/dev/null'
-scenario $h '{ packages.repo = [ "cowsay" "sl" ]; packages.local.remote = ./packages/remote; }'
+scenario $h '{ packages.repo = [ "cowsay" "sl" "fortune-mod" ]; packages.local.remote = ./packages/remote; }'
 s=$(date +%s)
 out=$(apply $h) && fail "apply succeeded without a mirror"
 echo "stopped after $(($(date +%s) - s)) s"

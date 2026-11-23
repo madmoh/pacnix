@@ -69,6 +69,14 @@ audit_has() {
 		{ check(); item = "" }
 		END { check(); exit !found }' <<<"$1"
 }
+# The names, sizes and times of the files in the pacman cache of the system:
+# pacnix downloads into /var/lib/pacnix/cache, and an apply without a failure
+# leaves it empty. cache_kept <host> <list> fails when the cache changed.
+cache_list() { on "$1" 'sudo find /var/cache/pacman/pkg -printf "%P %s %T@\n" | sort | md5sum'; }
+cache_kept() {
+	[[ $(cache_list "$1") == "$2" ]] || fail "pacnix changed the files in /var/cache/pacman/pkg"
+	check "$1" 'test -z "$(sudo ls -A /var/lib/pacnix/cache)"' "files stay in /var/lib/pacnix/cache after an apply without a failure"
+}
 # Fails unless the plan of a host is empty.
 empty_plan() {
 	local out
