@@ -124,10 +124,15 @@ struct Notes {
 }
 
 /// The install notes of the configuration that this apply activates.
-static MANUAL: Mutex<Option<BTreeMap<String, crate::generation::InstallNote>>> = Mutex::new(None);
+struct ManualNotes {
+    unchecked: BTreeMap<String, (String, bool)>,
+    ready: Vec<(String, String)>,
+}
 
-pub fn install_notes(notes: BTreeMap<String, crate::generation::InstallNote>) {
-    *MANUAL.lock().unwrap() = Some(notes);
+static MANUAL: Mutex<Option<ManualNotes>> = Mutex::new(None);
+
+pub fn install_notes(unchecked: BTreeMap<String, (String, bool)>, ready: Vec<(String, String)>) {
+    *MANUAL.lock().unwrap() = Some(ManualNotes { unchecked, ready });
 }
 
 /// The install notes of the configuration that show: a note without a check
@@ -135,24 +140,18 @@ pub fn install_notes(notes: BTreeMap<String, crate::generation::InstallNote>) {
 /// can be the installation that the note is about; a note with a check while
 /// the check exits with status 1, or the reason when the check gives no result.
 fn manual(saved: &mut Notes) -> Vec<(String, String)> {
-    let Some(notes) = MANUAL.lock().unwrap().take() else { return Vec::new() };
-    saved.manual.retain(|name, _| notes.get(name).is_some_and(|n| n.check.is_none()));
-    let mut show = Vec::new();
-    for (name, n) in notes {
-        match &n.check {
-            None if failed() || saved.manual.get(&name) == Some(&n.message) => {}
-            None => {
-                saved.manual.insert(name.clone(), n.message.clone());
-                show.push((name, n.message));
+    let Some(ManualNotes { unchecked, mut ready }) = MANUAL.lock().unwrap().take() else { return Vec::new() };
+    saved.manual.retain(|name, _| unchecked.contains_key(name));
+    if !failed() {
+        for (name, (message, eligible)) in unchecked {
+            if eligible && saved.manual.get(&name) != Some(&message) {
+                saved.manual.insert(name.clone(), message.clone());
+                ready.push((name, message));
             }
-            Some(c) => match crate::notes::check(c) {
-                Ok(false) => {}
-                Ok(true) => show.push((name, n.message)),
-                Err(why) => show.push((name, format!("the check gave no result: {why}"))),
-            },
         }
     }
-    show
+    ready.sort_by(|a, b| a.0.cmp(&b.0));
+    ready
 }
 
 /// Starts a run that changes the system: progress lines and a summary at the end.
@@ -338,6 +337,12 @@ pub fn declared(names: Vec<String>) {
 /// The number of planned changes of each kind, for the last line.
 pub fn planned(kinds: Vec<((&'static str, &'static str), Vec<String>)>) {
     *PLANNED.lock().unwrap() = kinds;
+}
+
+pub fn setup_actions(names: Vec<String>) {
+    if !names.is_empty() {
+        PLANNED.lock().unwrap().push((("setup action", "run"), names));
+    }
 }
 
 /// The packages that pacman changed after the offset in the pacman log, by verb.

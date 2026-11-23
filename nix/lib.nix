@@ -85,6 +85,8 @@ let
     (lib.filterAttrs (name: o: visible o && hm.config.${kind}.${name}.enable && lib.elem hm.config.${kind}.${name}.package (homePackages hm)) hm.options.${kind})) [ "programs" "services" ]);
   # A program or service with an enable and a package option that are not removed or renamed.
   visible = o: lib.isAttrs o && !lib.isOption o && lib.all (n: lib.isOption (o.${n} or null) && o.${n}.visible or true != false) [ "enable" "package" ];
+  noteOrder = lib.toposort (a: b: lib.elem a cfg.installNotes.${b}.after) (lib.attrNames cfg.installNotes);
+  noteNames = noteOrder.result or (throw "installNotes.${lib.head noteOrder.cycle}.after: the prerequisites form a cycle: ${lib.concatStringsSep " -> " noteOrder.cycle}");
   failed = map (a: a.message) (lib.filter (a: !a.assertion) (cfg.assertions ++ lib.concatLists (lib.mapAttrsToList (user: hm: [{
     assertion = homePackages hm == [ ];
     message = "home.users.${user}: Home Manager installs these packages from Nix: ${toString (map lib.getName (homePackages hm))}. pacnix installs software only with pacman. Remove them from home.packages${lib.optionalString (packageOptions hm != [ ]) " and remove ${lib.concatStringsSep ", " (packageOptions hm)}"}, and declare them in packages.repo or packages.aur.";
@@ -125,7 +127,7 @@ let
       luks = lib.mapAttrs (name: d: { inherit (d) device recoveryKey; tpm2 = { inherit (d.tpm2) enable pcrs pin; }; }) cfg.boot.initrd.luks.devices;
     };
     claims = cfg.claims;
-    installNotes = cfg.installNotes;
+    installSteps = map (name: cfg.installNotes.${name} // { inherit name; }) noteNames;
     audit.ignore = lib.unique cfg.audit.ignore;
     home = lib.mapAttrs (user: hm: {
       directory = hm.config.home.homeDirectory;

@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use crate::{Ctx, ask, audit, cmd, files, forward, home, packages, report, run_cmd, secure, trust, units, users};
+use crate::{Ctx, ask, audit, cmd, files, forward, home, notes, packages, report, run_cmd, secure, trust, units, users};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -24,18 +24,21 @@ pub struct Manifest {
     pub users: Accounts,
     pub mounts: BTreeMap<String, String>,
     pub boot: BootSpec,
-    #[serde(rename = "installNotes")]
-    pub install_notes: BTreeMap<String, InstallNote>,
+    #[serde(rename = "installSteps")]
+    pub install_steps: Vec<InstallStep>,
 }
 
-/// A manual step that apply shows at its end.
+/// A setup step that waits for its prerequisites.
 #[derive(Deserialize, Clone)]
-pub struct InstallNote {
-    pub message: String,
+pub struct InstallStep {
+    pub name: String,
+    pub message: Option<String>,
     pub check: Option<NoteCheck>,
+    pub after: Vec<String>,
+    pub action: Option<Vec<String>>,
 }
 
-/// A command that tells if the step of an install note is done.
+/// A command that tells if a setup step is done.
 #[derive(Deserialize, Clone)]
 pub struct NoteCheck {
     pub user: String,
@@ -479,6 +482,7 @@ pub fn apply(ctx: &Ctx, offline: bool) -> Result<()> {
     activate(ctx, target.clone(), plan)?;
     commit(&target)?;
     trust::news_read(read);
+    report::setup_actions(notes::apply(&target)?);
     Ok(())
 }
 
@@ -529,7 +533,6 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<(Plan, packages::Builds)
     };
     let p = &plan.target.m.packages;
     report::declared(p.repo.iter().chain(&p.aur).chain(p.local.keys()).cloned().collect());
-    report::install_notes(plan.target.m.install_notes.clone());
     let mut kinds: Vec<_> = plan.sections().into_iter().skip(1).map(|(kind, lines)| (kind, lines.into_iter().map(|l| link(l.0)).collect())).collect();
     // The recovery keys of the start of the run left the plan.
     kinds.push((("recovery key", "enrolled"), secure::recovered()));

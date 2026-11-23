@@ -143,4 +143,69 @@ grep -q 'later' <<<"$out" && fail "the note shows after a failed step"
 trigger true
 out=$(apply $h) || fail "apply failed"
 grep -qx '  later: Use the new feature.' <<<"$out" || { echo "$out"; fail "the note does not show after the apply without a failed step"; }
+
+step "setup starts a user service and waits for a manual step"
+setup=$(cat <<'EOF'
+{
+  files."/etc/systemd/user/setup-demo.service".text = ''
+    [Service]
+    Type=oneshot
+    RemainAfterExit=yes
+    ExecStart=/usr/bin/true
+  '';
+  installNotes.start = {
+    check = {
+      user = "arch";
+      command = [ "/usr/bin/sh" "-c" "systemctl --user is-active --quiet setup-demo.service; case $? in 0) exit 0;; 3|4) exit 1;; *) exit 2;; esac" ];
+    };
+    action = [ "/usr/bin/sh" "-c" "systemctl --user daemon-reload && systemctl --user start setup-demo.service" ];
+  };
+  imports = [ {
+    installNotes.login = {
+      after = [ "start" ];
+      message = "Complete the login.";
+      check = { user = "arch"; command = [ "/usr/bin/test" "-f" "/var/tmp/setup-login" ]; };
+    };
+  } ];
+  installNotes.finish = {
+    after = [ "login" ];
+    check = { user = "arch"; command = [ "/usr/bin/test" "-f" "/var/tmp/setup-done" ]; };
+    action = [ "/usr/bin/sh" "-c" "test -f /var/tmp/setup-ready || exit 8; id -un > /var/tmp/setup-done" ];
+  };
+}
+EOF
+)
+scenario "$h" "$setup"
+plan "$h" >/dev/null || fail "plan rejected the setup"
+pacnix "$h" audit >/dev/null
+refute "$h" 'test -e /var/tmp/setup-done || systemctl --user is-active --quiet setup-demo.service' "plan or audit ran a setup action"
+out=$(apply "$h" --offline) || { echo "$out"; fail "the start action failed"; }
+check "$h" 'systemctl --user is-active --quiet setup-demo.service' "the setup service did not start"
+grep -qx '  login: Complete the login.' <<<"$out" || { echo "$out"; fail "the manual step did not appear after the action"; }
+refute "$h" 'test -e /var/tmp/setup-done' "the final action ran before the login"
+
+step "a later apply resumes setup, retries a failed action and skips finished actions"
+on "$h" 'touch /var/tmp/setup-login'
+rc=0
+out=$(apply "$h" --offline) || rc=$?
+((rc == 4)) || { echo "$out"; fail "the failed setup action did not give exit status 4"; }
+has "$out" 'Setup action finish: the action ended with exit status 8.' || { echo "$out"; fail "the action failure did not show"; }
+has "$out" 'Complete the login.' && fail "a completed manual step still shows"
+refute "$h" 'test -e /var/tmp/setup-done' "the failed action completed the step"
+on "$h" 'touch /var/tmp/setup-ready'
+out=$(apply "$h" --offline) || { echo "$out"; fail "the final action did not resume"; }
+has "$out" 'setup action run: finish' || { echo "$out"; fail "the summary missed the action"; }
+check "$h" 'test "$(cat /var/tmp/setup-done)" = arch && test "$(stat -c %U /var/tmp/setup-done)" = arch' "the final action did not run as its user"
+out=$(apply "$h" --offline) || { echo "$out"; fail "the no-op apply failed"; }
+has "$out" 'Apply done. No changes.' || { echo "$out"; fail "completed setup ran again"; }
+
+step "plan refuses missing, unchecked and cyclic prerequisites"
+for bad in 'start.after = [ "missing" ];' \
+	'start.after = [ "unchecked" ]; unchecked.message = "Read this.";' \
+	'start.after = [ "start" ];' \
+	'start.after = [ "other" ]; other = { message = "Other."; inherit (config.installNotes.start) check; after = [ "start" ]; };'; do
+	scenario "$h" "{ config, ... }: { installNotes = { start.message = \"Start.\"; start.check = { user = \"arch\"; command = [ \"/usr/bin/true\" ]; }; $bad }; }"
+	out=$(plan "$h") && fail "plan accepted a bad prerequisite: $bad"
+	matches "$out" 'installNotes\.(start|other)\.after:' || { echo "$out"; fail "the error does not name the prerequisite option"; }
+done
 pass
