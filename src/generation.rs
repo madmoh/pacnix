@@ -554,6 +554,7 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<(Plan, packages::Builds)
     keep_or_delete(&plan.target, &plan.data, delete)?;
     if !report::failed() {
         packages::clean_staging()?;
+        packages::prune(&plan.target)?;
     }
     report::save_retries();
     Ok(())

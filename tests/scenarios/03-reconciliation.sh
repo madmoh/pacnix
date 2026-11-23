@@ -8,19 +8,36 @@
 # chroot stays. A package base in packages.keepBuildCache keeps its sources until
 # it leaves the list. The apply removes the sources that an earlier version of
 # pacnix kept, and removes a link in the build directory, not its target.
+# After an apply without a failure, the built packages leave the local
+# repository: an installed package does not build again, and a removed one
+# builds again. A local split package with a version from pkgver() does not
+# build again while its installed version is the built one, and a local
+# package that needs a local package that left the repository builds. A host
+# that serves packages keeps them; the first apply after the end of serving
+# removes the package files of earlier applies and builds nothing, as the
+# first apply after the upgrade from pacnix 0.16.1.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 cache=$(cache_list $h)
 apply $h >/dev/null || fail "first apply failed"
 repo='pacman -Slq --config /run/pacnix/pacman.conf pacnix-local'
 
-step "add a repo package and AUR packages, one with an AUR dependency"
-scenario $h '{ packages.repo = [ "htop" ]; packages.aur = [ "downgrade" "perl-email-outlook-message" ]; }'
+step "add a repo package and AUR packages, one with an AUR dependency, on a host that serves one"
+scenario $h '{ packages.repo = [ "htop" ]; packages.aur = [ "downgrade" "perl-email-outlook-message" ]; packages.serve.aur = [ "downgrade" ]; }'
 out=$(apply $h) || { echo "$out"; fail "apply failed"; }
+check $h "$repo | grep -qx perl-ole-storage-lite && ls /var/lib/pacnix/repo/downgrade-*.pkg.tar.zst" "a host that serves packages does not keep them"
+refute $h "sudo test -e /var/lib/pacnix/pruned.json" "a host that serves packages has a record of removed packages"
 grep -q 'packages ignored' <<<"$out" && fail "apply shows the list of aur sync"
 check $h "pacman -Q htop downgrade perl-email-outlook-message" "declared packages are missing"
+
+step "the first apply after the end of serving removes the package files and builds nothing"
+scenario $h '{ packages.repo = [ "htop" ]; packages.aur = [ "downgrade" "perl-email-outlook-message" ]; }'
+out=$(apply $h) || { echo "$out"; fail "apply failed"; }
+grep -q '^• Building' <<<"$out" && { echo "$out"; fail "the apply builds"; }
 check $h "pacman -Qqd perl-ole-storage-lite" "the AUR dependency is not installed as a dependency"
-check $h "$repo | grep -qx perl-ole-storage-lite" "the AUR dependency is not in the local repository"
+refute $h "ls /var/lib/pacnix/repo/*.pkg.tar*" "package files stay in the local repository after the install"
+refute $h "$repo | grep -q ." "the database of the local repository names packages that left it"
+check $h "sudo jq -e '.downgrade and .\"perl-email-outlook-message\" and .\"perl-ole-storage-lite\"' /var/lib/pacnix/pruned.json" "the record of the packages that left the repository is incomplete"
 ckout="sudo ls -A /var/lib/pacnix/build/.cache/aurutils/sync"
 # A checkout without files that git does not track: the sources and logs went.
 clean() { check $h "test -z \"\$(sudo -u pacnix git -C /var/lib/pacnix/build/.cache/aurutils/sync/$1 status --porcelain --ignored)\" && $ckout/$1 | grep -qx PKGBUILD" "$2"; }
@@ -32,7 +49,7 @@ packages_match $h
 
 step "a new AUR dependency of a built AUR package needs a confirmation"
 scenario $h '{ packages.repo = [ "htop" ]; packages.aur = [ "downgrade" "perl-email-outlook-message" ]; packages.keepBuildCache = [ "perl-email-outlook-message" ]; }'
-on $h "sudo jq '.\"perl-email-outlook-message\".depends = []' /var/lib/pacnix/aur.json | sudo tee /var/lib/pacnix/aur.json.new >/dev/null && sudo mv /var/lib/pacnix/aur.json.new /var/lib/pacnix/aur.json && sudo GNUPGHOME=/var/lib/pacnix/gnupg repo-remove -s -q /var/lib/pacnix/repo/pacnix-local.db.tar.gz perl-email-outlook-message"
+on $h "sudo jq '.\"perl-email-outlook-message\".depends = []' /var/lib/pacnix/aur.json | sudo tee /var/lib/pacnix/aur.json.new >/dev/null && sudo mv /var/lib/pacnix/aur.json.new /var/lib/pacnix/aur.json && sudo jq 'del(.\"perl-email-outlook-message\")' /var/lib/pacnix/pruned.json | sudo tee /var/lib/pacnix/pruned.json.new >/dev/null && sudo mv /var/lib/pacnix/pruned.json.new /var/lib/pacnix/pruned.json"
 out=$(pacnix $h apply 2>&1) && fail "apply built a package with a new AUR dependency without a confirmation"
 has "$out" 'The AUR package perl-email-outlook-message has new AUR dependencies: perl-ole-storage-lite.' || { echo "$out" | tail -5; fail "apply does not show the new AUR dependency"; }
 out=$(apply $h) || { echo "$out"; fail "apply --yes failed"; }
@@ -53,6 +70,28 @@ before=$(on $h 'stat -c %Y /var/lib/pacnix/build-cache.json')
 empty_plan $h
 apply $h >/dev/null || fail "the no-op apply failed"
 [[ $before == $(on $h 'stat -c %Y /var/lib/pacnix/build-cache.json') ]] || fail "the no-op apply wrote the record of the sources"
+
+step "a removed package that left the repository builds again"
+on $h 'sudo pacman -R --noconfirm downgrade >/dev/null'
+out=$(apply $h) || { echo "$out"; fail "apply failed"; }
+has "$out" 'Building AUR package 1/1: downgrade' || { echo "$out" | tail; fail "downgrade did not build again"; }
+check $h "pacman -Q downgrade" "downgrade is not installed again"
+refute $h "ls /var/lib/pacnix/repo/*.pkg.tar*" "package files stay in the local repository"
+
+step "local packages: a split package with a version from pkgver(), and a package that needs a package that left the repository"
+scenario $h '{ packages.repo = [ "htop" ]; packages.aur = [ "downgrade" "perl-email-outlook-message" ]; packages.local = { split-a = ./packages/split; kg-a = ./packages/kg-a; }; }'
+apply $h >/dev/null || fail "apply failed"
+v=$(on $h 'pacman -Q split-a')
+refute $h "ls /var/lib/pacnix/repo/*.pkg.tar*" "package files stay in the local repository"
+out=$(apply $h) || { echo "$out"; fail "the no-op apply failed"; }
+grep -q '^• Building' <<<"$out" && { echo "$out"; fail "the no-op apply builds"; }
+[[ $(on $h 'pacman -Q split-a') == "$v" ]] || fail "the no-op apply changed split-a"
+empty_plan $h
+scenario $h '{ packages.repo = [ "htop" ]; packages.aur = [ "downgrade" "perl-email-outlook-message" ]; packages.local = { split-a = ./packages/split; split-b = ./packages/split; kg-a = ./packages/kg-a; kg-b = ./packages/kg-b; }; }'
+out=$(apply $h) || { echo "$out"; fail "apply of split-b and of kg-b, which needs kg-a, failed"; }
+check $h "pacman -Q split-b kg-b" "split-b or kg-b is not installed"
+refute $h "ls /var/lib/pacnix/repo/*.pkg.tar*" "package files stay in the local repository"
+empty_plan $h
 
 step "remove them"
 scenario $h ''

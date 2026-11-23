@@ -27,6 +27,9 @@ const AURDEST: &str = "/var/lib/pacnix/build/.cache/aurutils/sync";
 /// The package bases that did not build in this run.
 static FAILED_BASES: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
 const MADE: &str = "/var/lib/pacnix/packages.json";
+/// The packages that left the local repository after their install, with the
+/// installed version: see `prune`.
+const PRUNED: &str = "/var/lib/pacnix/pruned.json";
 /// The signing key of the local repository, which only root reads. Hosts that
 /// install from this repository check the fingerprint of its public key.
 const GNUPG: &str = "/var/lib/pacnix/gnupg";
@@ -396,6 +399,17 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
     let sync = sync_names()?;
     let repo = repo_db(g)?;
     let repo_names: BTreeSet<String> = repo.iter().map(|i| i.name.clone()).collect();
+    let inst = installed()?;
+    // A package that left the local repository is built while the installed
+    // version is the built one, on a host that serves no packages, and while
+    // the configuration declares no file of the package: the restore of the
+    // file needs its package file.
+    let mut have = repo_names.clone();
+    if !serves(g) {
+        let gone: BTreeMap<String, String> = pruned().into_iter().filter(|(n, v)| inst.get(n).is_some_and(|i| &i.version == v)).collect();
+        let owners = if gone.is_empty() { BTreeMap::new() } else { crate::files::owners(&g.m.files.keys().chain(old.m.files.keys()).map(String::as_str).collect::<Vec<_>>()) };
+        have.extend(gone.into_keys().filter(|n| !owners.values().any(|o| o == n)));
+    }
     let local_names: Vec<String> = p.local.keys().cloned().collect();
     let (declared, unknown) = declared(g, &sync)?;
     plan.unknown = unknown.into_iter().map(|n| format!("packages.repo: {}", suggest(n, &sync))).collect();
@@ -404,7 +418,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
     built_aur.extend(p.providers.values().filter(|v| !sync.contains(*v) && !locals.contains_key(*v)).cloned());
     built_aur.sort();
     built_aur.dedup();
-    let missing_aur: Vec<String> = built_aur.iter().filter(|n| !repo_names.contains(*n)).cloned().collect();
+    let missing_aur: Vec<String> = built_aur.iter().filter(|n| !have.contains(*n)).cloned().collect();
     let mut table = Vec::new();
     if is_builder(g) {
         plan.stale = !stale(&repo).is_empty();
@@ -416,7 +430,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
         for (name, dir) in &local_dirs(g) {
             if !Path::new(dir).join("PKGBUILD").exists() {
                 plan.unknown.push(format!("packages.local: {name} (no PKGBUILD in {dir})"));
-            } else if !repo_names.contains(name) || built.get(name) != Some(dir) {
+            } else if !have.contains(name) || built.get(name) != Some(dir) {
                 plan.local.push(name.clone());
             }
         }
@@ -446,7 +460,6 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
     }
 
     // Reconciliation of the installed packages.
-    let inst = installed()?;
     plan.made = made(&self::declared(old, &sync)?.0);
     plan.install = declared.iter().filter(|n| !inst.contains_key(*n)).cloned().collect();
     plan.explicit = declared.iter().filter(|n| inst.get(*n).is_some_and(|i| !i.explicit)).cloned().collect();
@@ -952,11 +965,20 @@ pub fn fetch_builds(g: &Generation, plan: &Plan) -> Result<Builds> {
     let mut dirs = Vec::new();
     let sync = sync_names()?;
     let dirs_of = local_dirs(g);
-    for name in &plan.local {
+    let in_repo: BTreeSet<String> = repo_db(g)?.into_iter().map(|i| i.name).collect();
+    // A local package that a local package to build needs, and that the local
+    // repository does not have, builds too. A local package builds after the
+    // local packages that it needs.
+    let mut names = plan.local.clone();
+    let mut needs: HashMap<String, Vec<String>> = HashMap::new();
+    let mut i = 0;
+    while i < names.len() {
+        let name = names[i].clone();
+        i += 1;
         let dir = format!("{BUILD}/local/{name}");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(format!("{BUILD}/local"))?;
-        run_cmd(cmd("cp", &["-rT", &dirs_of[name], &dir]))?;
+        run_cmd(cmd("cp", &["-rT", &dirs_of[&name], &dir]))?;
         run_cmd(cmd("chown", &["-R", "pacnix:pacnix", &format!("{BUILD}/local")]))?;
         run_cmd(cmd("chmod", &["-R", "u+w", &dir]))?;
         let deps = srcinfo(&dir)?;
@@ -964,9 +986,22 @@ pub fn fetch_builds(g: &Generation, plan: &Plan) -> Result<Builds> {
         let satisfied = |d: &String| {
             sync.contains(d) || dirs_of.contains_key(d) || g.m.packages.providers.contains_key(d) || pacman(&["-Sddp", "--config", CONF, d]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
         };
+        for d in &deps {
+            if dirs_of.contains_key(d) && !in_repo.contains(d) && !names.contains(d) {
+                names.push(d.clone());
+            }
+        }
+        needs.insert(name, deps.iter().filter(|d| dirs_of.contains_key(*d)).cloned().collect());
         aur.extend(deps.into_iter().filter(|d| !satisfied(d)));
-        dirs.push(dir);
     }
+    fn visit(n: &str, needs: &HashMap<String, Vec<String>>, seen: &mut BTreeSet<String>, order: &mut Vec<String>) {
+        if needs.contains_key(n) && seen.insert(n.to_string()) {
+            needs[n].iter().for_each(|d| visit(d, needs, seen, order));
+            order.push(format!("{BUILD}/local/{n}"));
+        }
+    }
+    let mut seen = BTreeSet::new();
+    names.iter().for_each(|n| visit(n, &needs, &mut seen, &mut dirs));
     aur.sort();
     aur.dedup();
     let mut queue = Vec::new();
@@ -1323,6 +1358,25 @@ pub fn upgrade_builds(g: &Generation) -> Result<Builds> {
     if !ignore.is_empty() {
         c.args(["--ignore", &ignore.join(",")]);
     }
+    // aur sync checks the packages of the repository;
+    // aur vercmp checks the installed packages that left it, at the built version, in the same way.
+    let inst = installed()?;
+    let gone: String = pruned()
+        .into_iter()
+        .filter(|(n, v)| inst.get(n).is_some_and(|i| &i.version == v) && !local.contains_key(n) && !built.contains(n) && !ignore.contains(&n.as_str()))
+        .map(|(n, v)| format!("{n}\t{v}\n"))
+        .collect();
+    if !gone.is_empty() {
+        use std::io::Write;
+        let mut v = cmd("aur", &["vercmp", "--quiet"]);
+        let mut child = v.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn()?;
+        child.stdin.take().context("aur vercmp")?.write_all(gone.as_bytes())?;
+        let out = child.wait_with_output()?;
+        if !out.status.success() {
+            return Err(failed(&v, out.status, &String::from_utf8_lossy(&out.stderr).lines().map(String::from).collect::<Vec<_>>()));
+        }
+        c.args(String::from_utf8_lossy(&out.stdout).split_whitespace());
+    }
     report::progress("Downloading AUR package updates");
     let dirs = fetch(c.args(AUR_ARGS))?;
     Builds::of(dirs.into_iter().map(|d| (d, false)).collect(), &[])
@@ -1381,6 +1435,59 @@ pub fn clean_staging() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// True when the host serves AUR or local packages to other hosts.
+fn serves(g: &Generation) -> bool {
+    !g.m.packages.serve.aur.is_empty() || !g.m.packages.serve.local.is_empty()
+}
+
+fn pruned() -> BTreeMap<String, String> {
+    std::fs::read(PRUNED).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+/// Removes the packages from the local repository after an apply without a
+/// failure, on a host that serves no packages: pacman needs the file of a
+/// package only to install it, and a package that is not there builds again.
+/// The record keeps the version of each installed package, which the plan
+/// and the upgrade take as the built version. These packages stay: the pinned
+/// packages with their dependencies, because the AUR does not keep old
+/// versions, and the packages that own a declared file, for its restore. The
+/// database names only the files that remain.
+pub fn prune(g: &Generation) -> Result<()> {
+    if !is_builder(g) || serves(g) || !Path::new(REPO).join("pacnix-local.db.tar.gz").exists() {
+        return Ok(());
+    }
+    let repo = repo_db(g)?;
+    if repo.is_empty() {
+        return Ok(());
+    }
+    let by_name: HashMap<&str, &Info> = repo.iter().map(|i| (i.name.as_str(), i)).collect();
+    let mut keep = BTreeSet::new();
+    let mut queue: Vec<String> = g.m.packages.versions.keys().cloned().collect();
+    while let Some(n) = queue.pop() {
+        if let Some(i) = by_name.get(n.as_str()).filter(|_| keep.insert(n.clone())) {
+            queue.extend(i.depends.iter().map(|d| dep_name(d).to_string()));
+        }
+    }
+    keep.extend(crate::files::owners(&g.m.files.keys().map(String::as_str).collect::<Vec<_>>()).into_values());
+    let gone: Vec<&Info> = repo.iter().filter(|i| !keep.contains(&i.name) && !i.name.strip_suffix("-debug").is_some_and(|b| keep.contains(b))).collect();
+    if gone.is_empty() {
+        return Ok(());
+    }
+    let inst = installed()?;
+    let mut record = pruned();
+    record.retain(|n, v| inst.get(n).is_some_and(|i| &i.version == v));
+    record.extend(gone.iter().filter(|i| inst.get(&i.name).is_some_and(|x| x.version == i.version)).map(|i| (i.name.clone(), i.version.clone())));
+    let tmp = format!("{PRUNED}.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(&record)?)?;
+    std::fs::rename(&tmp, PRUNED)?;
+    let key = signing_key()?;
+    run_cmd(cmd("repo-remove", &["-q", "-s", "-k", &key, &format!("{REPO}/pacnix-local.db.tar.gz")]).args(gone.iter().map(|i| &i.name)).env("GNUPGHOME", GNUPG))?;
+    for f in stale(&repo_db(g)?) {
+        std::fs::remove_file(format!("{REPO}/{f}"))?;
+    }
+    sync_pacnix_db(g)
 }
 
 /// The packages that pacnix uninstall removes: pacnix, aurutils and nix, less
