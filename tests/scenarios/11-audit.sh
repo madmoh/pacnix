@@ -2,7 +2,15 @@
 # Scenario 11: a feature creates state, then the feature goes. The one question
 # of the run offers to delete the data of the feature. The answer k keeps it,
 # and the audit lists it with the feature that claimed it. --yes deletes it,
-# except a declared file and a path that a feature of the configuration claims.
+# except a declared file, a path that a feature of the configuration claims and
+# a bash file.
+# The audit of a home directory lists visible and hidden entries, the entries
+# of ~/.config, ~/.cache and ~/.local with its children, and the siblings of a
+# Home Manager file and of a claimed path. An unexplained directory is one
+# entry, and a link is not followed. An XDG user directory, also a nested one
+# or one with an absolute path, a path that audit.ignore matches, also below
+# **, and an unchanged bash skeleton file are explained; a FIFO does not stop
+# the audit. A claim explains a bash file.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 demo='{ features.demo.enable = true; }'
@@ -25,10 +33,32 @@ echo "$out"
 matches "$out" 'Unowned directory \([0-9]+\):.* /srv/demo \(claimed by feature demo in generation [0-9]+; the feature is no longer enabled\)' || fail "the audit does not list /srv/demo with its origin"
 matches "$out" 'Unclaimed home path \([0-9]+\):.* /home/arch/.cache/demo \(claimed by feature demo in generation [0-9]+; the feature is no longer enabled\)' || fail "the audit does not list ~/.cache/demo with its origin"
 step "remove the feature again and delete its data"
-scenario $h "$demo"
+scenario $h '{ features.demo.enable = true; claims.disposable.home = [ ".bash_history" ]; }'
+on $h 'echo ls >~/.bash_history'
 apply $h >/dev/null || fail "apply failed"
 scenario $h '{ files."/srv/demo/keep.txt".text = "kept\n"; claims.other.home = [ ".cache/demo/keep" ]; }'
 apply $h || fail "apply --yes failed"
 refute $h 'test -e /srv/demo/index.html || test -e ~/.cache/demo/page' "the data of the removed feature remains"
 check $h 'test "$(cat /srv/demo/keep.txt)" = kept && test -d ~/.cache/demo/keep' "a declared file or a claimed path is deleted"
+check $h 'test -s ~/.bash_history' "the deletion of the data of a removed feature deleted ~/.bash_history"
+step "the audit of a home directory"
+scenario $h '{ features.home.enable = true; claims.other.home = [ ".var/app/org.demo/cache" ]; audit.ignore = [ "/home/arch/.cache/ignored*" "/home/arch/.local/lib/**/keep" ]; }'
+apply $h >/dev/null || fail "apply failed"
+on $h 'cd ~ && touch notes.txt .bash_history && mkdir -p .local/state/foo .local/bin .local/lib/x/deep .config/app/a .config/app/b Documents Music Work/Templates Work/Pictures Work/other .var/app/org.demo/cache .var/app/org.demo/data .var/app/other .cache/ignored-x &&
+	touch .local/bin/tool .local/lib/x/deep/keep .local/lib/x/deep/other .config/demo/extra.conf && ln -s /etc .config/linkdir && cp /etc/skel/.bashrc /etc/skel/.bash_profile . && echo "# mine" >>.bash_profile && rm -f .bash_logout && mkfifo .bash_logout &&
+	printf "XDG_DOCUMENTS_DIR=\"\$HOME/Documents\"\nXDG_DESKTOP_DIR=\"\$HOME\"\nXDG_MUSIC_DIR=\"\$HOME/\`echo Music\`\"\nXDG_TEMPLATES_DIR=\"\$HOME/Work/Templates\"\nXDG_PICTURES_DIR=\"/home/arch/Work/Pictures\"\n" >.config/user-dirs.dirs'
+start=$SECONDS
+out=$(pacnix $h audit) || { echo "$out"; fail "audit failed"; }
+echo "COUNT home: $(grep -o 'Unclaimed home path ([0-9]*)' <<<"$out"), audit $((SECONDS - start)) s"
+echo "$out"
+for p in notes.txt .local/state/foo .local/bin/tool .local/lib/x/deep/other Work/other .config/demo/extra.conf .config/app .config/linkdir Music .bash_profile .bash_logout .var/app/org.demo/data .var/app/other; do
+	audit_has "$out" 'Unclaimed home path' "/home/arch/$p" || fail "the audit does not list ~/$p"
+done
+audit_has "$out" 'Unclaimed home path' "/home/arch/.bash_history (claimed by feature disposable in generation 4; the feature is no longer enabled)" || fail "the audit does not list ~/.bash_history"
+for p in .config/app/a .config/demo/settings.conf Documents Work Work/Templates Work/Pictures .local/lib .local/lib/x .local/lib/x/deep/keep .bashrc .cache/ignored-x .var/app/org.demo/cache .var .var/app .config/linkdir/passwd .config/Code; do
+	audit_has "$out" 'Unclaimed home path' "/home/arch/$p" && fail "the audit lists ~/$p"
+done
+scenario $h '{ features.home.enable = true; claims.other.home = [ ".bash_history" ]; }'
+apply $h >/dev/null || fail "apply failed"
+audit_has "$(pacnix $h audit)" 'Unclaimed home path' /home/arch/.bash_history && fail "the audit lists a claimed bash file"
 pass

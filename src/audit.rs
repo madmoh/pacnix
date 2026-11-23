@@ -147,33 +147,113 @@ fn print(report: &[String]) {
     say!("• Audit done: {}.", crate::count(report.len(), "item"));
 }
 
-/// Lists entries of ~/.config, ~/.local/share, ~/.cache and dot entries of
-/// each home directory that no claim and no Home Manager file explains.
+/// The directories of a home directory whose entries the audit lists.
+const CONTAINERS: &[&str] = &[".config", ".cache", ".local", ".local/share", ".local/state", ".local/bin"];
+/// The skeleton files that are explained while they equal the file in /etc/skel.
+const SKELETON: &[&str] = &[".bashrc", ".bash_profile", ".bash_logout"];
+/// Home files that the deletion of the data of a removed feature keeps.
+const SHELL_FILES: &[&str] = &[".bashrc", ".bash_profile", ".bash_logout", ".bash_history"];
+
+/// Lists the entries of each home directory that no claim, no audit.ignore
+/// pattern, no Home Manager file, no XDG user directory and no unchanged
+/// skeleton file explains. The walk lists the entries of the home directory,
+/// of the directories in CONTAINERS, and of each directory above a Home
+/// Manager file or above the fixed part of a pattern. Another directory shows
+/// as one entry for all of its content. The walk does not follow links.
 fn home(g: &Generation, origins: &Origins, report: &mut Vec<String>) -> Result<()> {
-    let claims = globs(g.m.claims.values().flat_map(|c| c.home.clone()).chain(["**/*.pacnix-hm-backup".to_string()]));
+    let claims: Vec<&String> = g.m.claims.values().flat_map(|c| &c.home).collect();
     for (dir, managed) in homes()? {
-        let dir = dir.as_str();
-        let mut entries = Vec::new();
-        for sub in [".config", ".local/share", ".cache", ""] {
-            let Ok(rd) = std::fs::read_dir(Path::new(dir).join(sub)) else { continue };
-            for e in rd.flatten() {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if sub.is_empty() && (!name.starts_with('.') || [".config", ".local", ".cache"].contains(&name.as_str())) {
-                    continue;
-                }
-                entries.push(if sub.is_empty() { name } else { format!("{sub}/{name}") });
+        let base = globset::escape(&dir);
+        let patterns: Vec<String> = claims.iter().map(|c| format!("{base}/{c}")).chain([format!("{base}/**/*.pacnix-hm-backup")]).chain(g.m.audit.ignore.iter().cloned()).collect();
+        let set = globs(patterns.clone());
+        // A Home Manager file has no managed path below it. Its directories are only on the way to it.
+        let leaves: BTreeSet<&String> = managed.iter().filter(|m| !managed.range(format!("{m}/")..).next().is_some_and(|n| n.starts_with(&format!("{m}/")))).collect();
+        let above: BTreeSet<String> = leaves.iter().flat_map(|l| Path::new(l.as_str()).ancestors().skip(1).map(|a| a.display().to_string())).collect();
+        let xdg = xdg_dirs(&dir);
+        let above: BTreeSet<String> = above.into_iter().chain(xdg.iter().flat_map(|x| Path::new(x.as_str()).ancestors().skip(1).map(|a| a.display().to_string()))).collect();
+        let mut walk = walkdir::WalkDir::new(&dir).min_depth(1).sort_by_file_name().into_iter();
+        while let Some(entry) = walk.next() {
+            let Ok(e) = entry else { continue };
+            let abs = e.path().display().to_string();
+            let rel = e.path().strip_prefix(&dir)?.display().to_string();
+            let is_dir = e.file_type().is_dir();
+            let explained = set.is_match(&abs) || leaves.contains(&rel) || xdg.contains(&rel) || skeleton(&dir, &rel);
+            if !explained && is_dir && (CONTAINERS.contains(&rel.as_str()) || above.contains(&rel) || enters(&patterns, &abs, &dir)) {
+                continue;
             }
-        }
-        entries.sort();
-        for rel in entries {
-            let explained = claims.is_match(&rel)
-                || managed.iter().any(|m| m == &rel || m.starts_with(&format!("{rel}/")));
             if !explained {
-                report.push(format!("Unclaimed home path: {dir}/{rel}{}", origins.of(&rel, true)));
+                report.push(format!("Unclaimed home path: {abs}{}", origins.of(&rel, true)));
+            }
+            if is_dir {
+                walk.skip_current_dir();
             }
         }
     }
     Ok(())
+}
+
+/// Whether the walk enters a directory for a pattern: the directory is above
+/// the fixed part of the pattern, or below a fixed part inside the home
+/// directory, at any depth for a pattern with ** and above the depth of the
+/// pattern without.
+fn enters(patterns: &[String], dir: &str, home: &str) -> bool {
+    let depth = dir.split('/').count();
+    patterns.iter().any(|p| {
+        let parts: Vec<&str> = p.trim_end_matches('/').split('/').collect();
+        let fixed = parts.iter().take_while(|c| !c.contains(['*', '?', '[', '{', '\\'])).count();
+        let literal = parts[..fixed].join("/");
+        literal.starts_with(&format!("{dir}/"))
+            || (literal.starts_with(&format!("{home}/"))
+                && fixed < parts.len()
+                && (p.contains("**") || depth < parts.len())
+                && (dir == literal || dir.starts_with(&format!("{literal}/"))))
+    })
+}
+
+/// The content of a regular file of at most 64 KiB. The file can belong to a
+/// user: a link, a FIFO and a device give None, and no read waits.
+fn read_small(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    if !path.symlink_metadata().ok()?.is_file() {
+        return None;
+    }
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path).ok()?;
+    if !f.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut buf = Vec::new();
+    f.take(65537).read_to_end(&mut buf).ok()?;
+    (buf.len() <= 65536).then_some(buf)
+}
+
+/// The XDG user directories in ~/.config/user-dirs.dirs, relative to the home
+/// directory. Only a line XDG_NAME_DIR="$HOME/path" or "/absolute/path" inside
+/// the home directory, with a plain path, counts: pacnix does not run the file
+/// as shell, and a disabled directory, which is the home directory itself,
+/// explains nothing.
+fn xdg_dirs(home: &str) -> BTreeSet<String> {
+    let config = Path::new(home).join(".config");
+    if !config.symlink_metadata().is_ok_and(|m| m.is_dir()) {
+        return BTreeSet::new();
+    }
+    let text = read_small(&config.join("user-dirs.dirs")).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    text.lines()
+        .filter_map(|l| {
+            let (key, value) = l.split_once('=')?;
+            let name = key.strip_prefix("XDG_")?.strip_suffix("_DIR")?;
+            let value = value.strip_prefix('"')?.strip_suffix('"')?;
+            let rel = value.strip_prefix("$HOME/").or_else(|| value.strip_prefix(home)?.strip_prefix('/'))?.trim_end_matches('/');
+            let plain = !name.is_empty() && name.chars().all(|c| c.is_ascii_uppercase() || c == '_');
+            let safe = !rel.is_empty() && !rel.contains(['$', '`', '\\', '"']) && rel.split('/').all(|c| !c.is_empty() && c != "." && c != "..");
+            (plain && safe).then(|| rel.to_string())
+        })
+        .collect()
+}
+
+/// Whether a bash skeleton file equals its counterpart in /etc/skel.
+fn skeleton(home: &str, rel: &str) -> bool {
+    SKELETON.contains(&rel) && read_small(&Path::new(home).join(rel)).is_some_and(|c| Some(c) == read_small(&Path::new("/etc/skel").join(rel)))
 }
 
 /// The home directories of the users, with the paths of the active Home
@@ -214,7 +294,7 @@ impl Keep {
             owned: output(cmd("pacman", &["-Qlq"]))?.lines().map(|l| l.trim_end_matches('/').to_string()).collect(),
             files: target.m.files.keys().cloned().collect(),
             system: globs(target.m.claims.values().flat_map(|c| c.system.clone())),
-            home: globs(target.m.claims.values().flat_map(|c| c.home.clone())),
+            home: globs(target.m.claims.values().flat_map(|c| c.home.clone()).chain(SHELL_FILES.iter().map(|f| f.to_string()))),
             homes: homes()?,
         })
     }

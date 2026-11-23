@@ -19,7 +19,6 @@
     "/var/cache" "/var/log" "/var/lib/systemd" "/var/lib/dbus" "/var/lib/private" "/var/lib/machines" "/var/lib/portables"
     "/var/lib/lastlog" "/var/lib/libuuid" "/var/db/sudo" "/var/spool" "/var/lib/tpm2-tss" "/var/lib/polkit-1"
   ];
-  claims.arch.home = [ ".bash_logout" ".bash_profile" ".bashrc" ".bash_history" ];
   claims.pacnix.system = [
     "/nix" "/var/lib/pacnix" "/var/lib/aurbuild" "/var/lib/pacman/sync/pacnix-local.*"
     "/etc/systemd/system-preset" "/etc/profiles/per-user" "/root/.cache/nix" "/root/.nix-defexpr"
