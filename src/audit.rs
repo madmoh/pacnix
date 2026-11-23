@@ -73,6 +73,11 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
             report.push(format!("File {}: {path}", &path[path.rfind('.').unwrap()..]));
             continue;
         }
+        // A link to a file of a package, for example a fontconfig link in /etc/fonts/conf.d, is explained.
+        let target = if e.path_is_symlink() { std::fs::canonicalize(e.path()).ok() } else { None };
+        if target.is_some_and(|t| !t.is_dir() && owned.contains(&t.display().to_string())) {
+            continue;
+        }
         let kind = if e.file_type().is_dir() { "directory" } else { "file" };
         report.push(format!("Unowned {kind}: {path}{}", origins.of(&path, false)));
         if e.file_type().is_dir() {

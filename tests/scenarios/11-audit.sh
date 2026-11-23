@@ -11,6 +11,10 @@
 # or one with an absolute path, a path that audit.ignore matches, also below
 # **, and an unchanged bash skeleton file are explained; a FIFO does not stop
 # the audit. A claim explains a bash file.
+# A system link to a file of a package, also through a second link, is
+# explained, for example the fontconfig links in /etc/fonts/conf.d. A dangling
+# link, a link to a file of no package and a link to a directory stay listed,
+# and a .pacnew link too.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 demo='{ features.demo.enable = true; }'
@@ -42,15 +46,21 @@ refute $h 'test -e /srv/demo/index.html || test -e ~/.cache/demo/page' "the data
 check $h 'test "$(cat /srv/demo/keep.txt)" = kept && test -d ~/.cache/demo/keep' "a declared file or a claimed path is deleted"
 check $h 'test -s ~/.bash_history' "the deletion of the data of a removed feature deleted ~/.bash_history"
 step "the audit of a home directory"
-scenario $h '{ features.home.enable = true; claims.other.home = [ ".var/app/org.demo/cache" ]; audit.ignore = [ "/home/arch/.cache/ignored*" "/home/arch/.local/lib/**/keep" ]; }'
+scenario $h '{ features.home.enable = true; packages.repo = [ "fontconfig" ]; claims.other.home = [ ".var/app/org.demo/cache" ]; audit.ignore = [ "/home/arch/.cache/ignored*" "/home/arch/.local/lib/**/keep" ]; }'
 apply $h >/dev/null || fail "apply failed"
 on $h 'cd ~ && touch notes.txt .bash_history && mkdir -p .local/state/foo .local/bin .local/lib/x/deep .config/app/a .config/app/b Documents Music Work/Templates Work/Pictures Work/other .var/app/org.demo/cache .var/app/org.demo/data .var/app/other .cache/ignored-x &&
 	touch .local/bin/tool .local/lib/x/deep/keep .local/lib/x/deep/other .config/demo/extra.conf && ln -s /etc .config/linkdir && cp /etc/skel/.bashrc /etc/skel/.bash_profile . && echo "# mine" >>.bash_profile && rm -f .bash_logout && mkfifo .bash_logout &&
 	printf "XDG_DOCUMENTS_DIR=\"\$HOME/Documents\"\nXDG_DESKTOP_DIR=\"\$HOME\"\nXDG_MUSIC_DIR=\"\$HOME/\`echo Music\`\"\nXDG_TEMPLATES_DIR=\"\$HOME/Work/Templates\"\nXDG_PICTURES_DIR=\"/home/arch/Work/Pictures\"\n" >.config/user-dirs.dirs'
+on $h 'cd /etc && sudo ln -s /usr/bin/pacman demo-pkg && sudo ln -s demo-pkg demo-chain && sudo ln -s /nonexistent demo-dangling && sudo touch demo-file && sudo ln -s demo-file demo-other && sudo ln -s /usr/share demo-dir && sudo ln -s /usr/bin/pacman demo.conf.pacnew && test -L "$(ls -d /etc/fonts/conf.d/* | head -1)"' || fail "the fontconfig links are missing"
 start=$SECONDS
 out=$(pacnix $h audit) || { echo "$out"; fail "audit failed"; }
-echo "COUNT home: $(grep -o 'Unclaimed home path ([0-9]*)' <<<"$out"), audit $((SECONDS - start)) s"
+echo "COUNT home: $(grep -o 'Unclaimed home path ([0-9]*)' <<<"$out"), system: $(grep -o 'Unowned file ([0-9]*)' <<<"$out"), audit $((SECONDS - start)) s"
 echo "$out"
+for p in demo-dangling demo-file demo-other demo-dir; do
+	audit_has "$out" 'Unowned file' "/etc/$p" || fail "the audit does not list /etc/$p"
+done
+audit_has "$out" 'File .pacnew' /etc/demo.conf.pacnew || fail "the audit does not list /etc/demo.conf.pacnew"
+grep -q '/etc/demo-pkg\|/etc/demo-chain\|/etc/fonts' <<<"$out" && fail "the audit lists a link to a file of a package"
 for p in notes.txt .local/state/foo .local/bin/tool .local/lib/x/deep/other Work/other .config/demo/extra.conf .config/app .config/linkdir Music .bash_profile .bash_logout .var/app/org.demo/data .var/app/other; do
 	audit_has "$out" 'Unclaimed home path' "/home/arch/$p" || fail "the audit does not list ~/$p"
 done
