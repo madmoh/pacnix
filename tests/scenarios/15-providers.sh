@@ -28,4 +28,17 @@ apply $h >/dev/null || fail "apply failed"
 refute $h 'pacman -Q pipewire-jack' "the provider stays after its dependent goes"
 refute $h 'pacman -Q pdfium-binaries-v8-bin' "the AUR provider stays after its dependent goes"
 packages_match $h
+
+step "replace a repository package with a local provider that needs the same dependency"
+scenario $h '{ packages.repo = [ "fortune-mod" ]; }'
+apply $h >/dev/null || fail "the repository package did not install"
+check $h 'pacman -Qqd recode' "the repository package did not install recode as a dependency"
+scenario $h '{ packages.local.fortune-local = ./packages/fortune-local; packages.providers.fortune-mod = "fortune-local"; }'
+out=$(plan $h) || { echo "$out"; fail "the replacement plan failed"; }
+has "$out" 'Remove package fortune-mod (apply asks first)' || { echo "$out"; fail "the plan misses the package that leaves"; }
+has "$out" 'Remove package recode' && { echo "$out"; fail "the plan removes a dependency of the replacement"; }
+out=$(apply $h) || { echo "$out"; fail "the replacement did not finish in one apply"; }
+refute $h 'pacman -Q fortune-mod' "the old package is still installed"
+check $h 'pacman -Qqe fortune-local && pacman -Qqd recode' "the replacement or its dependency is missing"
+empty_plan $h
 pass

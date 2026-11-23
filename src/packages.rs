@@ -346,12 +346,46 @@ fn aur_table(names: &[String]) -> Result<Vec<(String, String, String)>> {
 /// Writes the .SRCINFO of a local package, as an AUR package has one, and
 /// returns its dependencies.
 fn srcinfo(dir: &str) -> Result<Vec<String>> {
-    let mut c = cmd("makepkg", &["--printsrcinfo"]);
-    c.env("HOME", BUILD).env("LC_ALL", "C").current_dir(dir);
-    let text = output(&mut sandboxed(c, Some("pacnix"), &[BUILD]))
-        .with_context(|| format!("read the PKGBUILD in {dir}"))?;
+    let text = read_srcinfo(dir, &[BUILD])?;
     std::fs::write(Path::new(dir).join(".SRCINFO"), text)?;
     Ok(srcinfo_file(dir).2)
+}
+
+fn read_srcinfo(dir: &str, writable: &[&str]) -> Result<String> {
+    let mut c = cmd("makepkg", &["--printsrcinfo"]);
+    c.env("HOME", BUILD).env("LC_ALL", "C").current_dir(dir);
+    if writable.is_empty() {
+        // makepkg checks these directories even when it only prints metadata.
+        c.envs([("BUILDDIR", "/tmp"), ("PKGDEST", "/tmp"), ("SRCDEST", "/tmp")]);
+    }
+    output(&mut sandboxed(c, Some("pacnix"), writable)).with_context(|| format!("read the PKGBUILD in {dir}"))
+}
+
+/// Reads the runtime dependencies of one output from makepkg's SRCINFO.
+fn local_depends(text: &str, name: &str) -> Vec<String> {
+    let arch_depends = format!("depends_{}", std::env::consts::ARCH);
+    let mut base = BTreeMap::new();
+    let mut package = BTreeMap::new();
+    let mut section = None;
+    for (key, value) in text.lines().filter_map(|l| l.trim_start().split_once('=')) {
+        let (key, value) = (key.trim_end(), value.trim());
+        if key == "pkgname" {
+            section = Some(value);
+        }
+        if key == "depends" || key == arch_depends {
+            let fields = match section {
+                None => &mut base,
+                Some(n) if n == name => &mut package,
+                _ => continue,
+            };
+            let deps: &mut Vec<String> = fields.entry(key).or_default();
+            if !value.is_empty() {
+                deps.push(dep_name(value).to_string());
+            }
+        }
+    }
+    base.extend(package);
+    base.into_values().flatten().collect()
 }
 
 fn local_sources() -> BTreeMap<String, String> {
@@ -468,6 +502,16 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
     plan.orphans = output_any(&mut pacman(&["-Qqdtt"]))?.split_whitespace().map(String::from).collect();
     pin(g, &mut plan, &inst, &sync, &repo)?;
 
+    // A local replacement may not have a repository entry until it builds.
+    // Read its current dependencies before planning which old packages can go.
+    let mut local_needs = HashMap::new();
+    if !plan.deps.is_empty() {
+        for name in &plan.local {
+            let src = read_srcinfo(&locals[name], &[])?;
+            local_needs.insert(name.clone(), local_depends(&src, name));
+        }
+    }
+
     // The local or served repository database is current, the synced copy of it can be older.
     let mut universe: HashMap<String, Info> = repo.iter().map(|i| (i.name.clone(), i.clone())).collect();
     let wanted: Vec<String> = plan.install.iter().filter(|n| sync.contains(*n) && !repo_names.contains(*n)).cloned().collect();
@@ -505,6 +549,11 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
                 chosen.insert(d.clone());
             }
             if !seen.insert(d.clone()) {
+                continue;
+            }
+            if let Some(deps) = local_needs.get(&d) {
+                keep.insert(d);
+                queue.extend(deps.iter().cloned());
                 continue;
             }
             let resolved: Vec<String> = if inst.contains_key(&d) {
@@ -559,6 +608,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
     plan.deps.extend(chosen);
     plan.unknown.extend(wrong_providers(g, &repo, &sync)?);
     plan.depends = universe.into_iter().map(|(n, i)| (n, i.depends.iter().map(|d| dep_name(d).to_string()).collect())).collect();
+    plan.depends.extend(local_needs);
     // Only the packages that become dependencies and their dependencies can leave.
     let mut reach: BTreeSet<String> = BTreeSet::new();
     let mut queue: Vec<String> = plan.deps.clone();
@@ -1302,6 +1352,7 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
     list.retain(|n| !plan.deps.contains(*n) || plan.made.contains(*n));
     std::fs::write(MADE, serde_json::to_vec(&list)?)?;
     let targets = plan.targets(skip);
+    let installs = !targets.is_empty() || !plan.archive.is_empty();
     if !targets.is_empty() {
         report::progress(&format!("Installing {}: {}", count(targets.len(), "package"), report::items(&targets)));
         let mut args = vec!["-S", "--needed", "--noconfirm", "--ask=4", "--config", CONF];
@@ -1325,12 +1376,22 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
         }
         return save_made(plan);
     }
-    if !plan.deps.is_empty() {
-        run_cmd(pacman(&["-D", "--asdeps"]).args(&plan.deps))?;
+    // An install can remove an old package that conflicts with its replacement.
+    let installed = if installs && (!plan.deps.is_empty() || !plan.remove.is_empty()) {
+        Some(output(pacman(&["-Qq"]))?)
+    } else {
+        None
+    };
+    let present: BTreeSet<&str> = installed.as_deref().unwrap_or_default().split_whitespace().collect();
+    let remains = |name: &&str| installed.is_none() || present.contains(name);
+    let deps: Vec<&str> = plan.deps.iter().map(String::as_str).filter(remains).collect();
+    if !deps.is_empty() {
+        run_cmd(pacman(&["-D", "--asdeps"]).args(deps))?;
     }
-    if !plan.remove.is_empty() {
-        report::progress(&format!("Removing {}: {}", count(plan.remove.len(), "package"), report::items(&plan.remove)));
-        transaction(&[&["-Rns", "--noconfirm"][..], &plan.remove.iter().map(String::as_str).collect::<Vec<_>>()].concat())?;
+    let remove: Vec<&str> = plan.remove.iter().map(String::as_str).filter(remains).collect();
+    if !remove.is_empty() {
+        report::progress(&format!("Removing {}: {}", count(remove.len(), "package"), report::items(&remove)));
+        transaction(&[&["-Rns", "--noconfirm"][..], &remove].concat())?;
     }
     let orphans = output_any(&mut pacman(&["-Qqdtt"]))?;
     let orphans: Vec<&str> = orphans.split_whitespace().filter(|n| !plan.orphans.contains(*n)).collect();

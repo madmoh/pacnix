@@ -1,0 +1,13 @@
+pkgname=fortune-local
+pkgver=1
+pkgrel=1
+pkgdesc='pacnix test replacement for fortune-mod'
+arch=(x86_64)
+license=(MIT)
+provides=(fortune-mod)
+conflicts=(fortune-mod)
+depends_x86_64=(recode)
+
+package() {
+  install -Dm644 /dev/null "$pkgdir/usr/share/fortune-local/done"
+}
