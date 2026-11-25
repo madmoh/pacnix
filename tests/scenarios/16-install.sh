@@ -29,9 +29,12 @@ step "install by hand with the installation guide"
 on live "set -e
 printf 'label: gpt\n,512M,U\n,,L\n' | sudo sfdisk -q /dev/vdb
 sudo mkfs.fat -F32 -n ESP /dev/vdb1 >/dev/null && sudo mkfs.ext4 -qL root /dev/vdb2
+sudo udevadm trigger --action=change --settle /dev/vdb1 /dev/vdb2
 sudo mount /dev/vdb2 /mnt && sudo mount --mkdir /dev/vdb1 /mnt/boot
 sudo pacstrap -K /mnt base linux openssh sudo zsh git >/dev/null
 sudo genfstab -U /mnt | sudo tee -a /mnt/etc/fstab >/dev/null
+sudo awk '\$1 ~ /^UUID=/ { mounted[\$2] = 1 } END { exit !(mounted[\"/\"] && mounted[\"/boot\"]) }' /mnt/etc/fstab ||
+	{ echo 'The root and boot entries in fstab need filesystem UUIDs.' >&2; exit 1; }
 # Not steps of the guide: the test repository [pacnix] is a directory, Nix downloads
 # through the cache of the tests, and a Git repository takes the role of GitHub.
 sudo cp -a /srv/pacnix /mnt/srv/ && sudo install -Dm644 /etc/xdg/nix/nix.conf /mnt/etc/xdg/nix/nix.conf
