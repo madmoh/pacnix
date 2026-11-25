@@ -7,16 +7,25 @@
 - Support what Arch supports (desktops, kernels, network stacks, boot loaders). pacman is the only fixed part. Never assume the author's stack.
 - When pacman or systemd already lets a user choose something (providers, presets, drop-ins), expose that choice instead of a new concept.
 - Call the pacman and systemctl commands, not libalpm, so that upstream releases do not break pacnix.
-- Changing the system means editing the config: one obvious place per change. An imperative front end can come later if it adds value.
+- Changing the system means editing the config: one obvious place per change.
+- One `pacnix apply` does the full pipeline: the user never needs to run it twice.
 - One path: pacnix runs only on the booted system and refuses in a chroot. The user installs with the Arch guide, boots, and the first apply takes over. Never assume a fresh or minimal system: a system that was used and configured before must work too, unless something on it breaks or blocks pacnix.
 - Adopt, never refuse, an existing system: keep the original of each unmanaged file that a declaration replaces, show it in the plan, and restore it when the declaration goes.
 - Declare what applications read; claim what they write, for the audit.
 - In scope: users and groups, mounts and swap, kernels and boot loaders, Secure Boot keys and signatures, TPM2 disk unlock, host name, time zone and locale, as first-class options that compile to files, triggers and units. Option names stay stable after a release.
 - Out of scope: partitions, making file systems, firmware settings (Secure Boot mode, Setup Mode) and the EFI boot order, secrets and passwords in the config (ask at the run, never store), generating config from a live system.
-- Upstream failures and bad configurations are not pacnix's to fix or block. Refuse only what breaks pacnix's own guarantees, before any change.
+- Upstream failures and bad configurations are not pacnix's to fix or block. Refuse only what breaks pacnix's own guarantees, before any change. A failure stops only what depends on it. Classify failures by their effect, never by package name or scenario.
 - What is in scope must work completely and correctly.
 - Keep one mechanism per concern. VM evidence overrides any earlier decision.
 - Latency matters: compare with plain pacman and keep the no-op path fast as the system grows.
-- Tests are VM scenarios that must pass now; delete obsolete ones. No unit tests.
+- Keep no file after its use: no package archives, no build caches, no staging data.
+- The audit replaces the manual search for leftovers after a removal. It must show every path that no declaration or package owns, and miss none.
+- Every interaction (output, questions, help, arguments, errors) must be unambiguous and uncluttered. Show only what the user needs now.
+- The output works on an 80x25 console without scrollback and very well in a GUI terminal. The lines and the layout are the same in every terminal.
+- UI copy uses sentence case and full stops. Progress lines describe what pacnix does, so that the user cannot read them as a command.
+- Ask for all input (sudo, passphrases, PINs, confirmations) at the start of apply, before long work. A secret that pacnix shows one time stops the output until the user confirms it.
+- Tests are VM scenarios that must pass now; delete obsolete ones. No unit tests. Test the exact commit with a fresh build target. Remove the VMs and processes that a test run leaves.
+- Never change a real host. The user installs and applies. Read-only inspection is permitted.
+- When the scenarios that cover a change pass, release it.
 - Iterate fast: prove each kind of case once instead of building every real package; size VMs to the scenario and the host.
 - README.md is the only documentation: for users, in the style of the Arch wiki, and it links to upstream docs instead of repeating them.
