@@ -454,35 +454,53 @@ pub fn plan(ctx: &Ctx) -> Result<()> {
 /// of changed AUR packages, then the plan. The questions of the run come
 /// before any long work, see `preflight`: the removals and the AUR builds that
 /// the plan shows now, the changes of the AUR packages that upgrade, and the
-/// Arch Linux news since the last upgrade. Offline, the sync databases and the
-/// AUR packages stay as they are.
-pub fn apply(ctx: &Ctx, offline: bool) -> Result<()> {
-    let target = build(ctx)?;
+/// Arch Linux news since the last upgrade. Without `upgrade`, the sync
+/// databases and the AUR packages stay as they are. Without `configure`, the
+/// upgrade uses the active generation and the flake is not evaluated.
+pub fn apply(ctx: &Ctx, upgrade: bool, configure: bool) -> Result<()> {
+    let target = match configure {
+        true => build(ctx)?,
+        false => active()?.context("no generation is active. Run pacnix apply without --upgrade-only")?,
+    };
     let (mut plan, mut read) = (None, false);
-    if !offline {
+    if upgrade {
         let news = (!crate::handoff::resumed()).then(|| std::thread::spawn(trust::news));
-        let mut before = Plan::compute(ctx, target.clone())?;
-        files::check(ctx, &before.target, &before.files)?;
+        let mut before = configure.then(|| Plan::compute(ctx, target.clone())).transpose()?;
+        if let Some(b) = &before {
+            files::check(ctx, &b.target, &b.files)?;
+        }
         let builds = packages::upgrade_builds(&target)?;
-        let fetched = packages::fetch_builds(&before.target, &before.packages)?;
+        let fetched = match &before {
+            Some(b) => packages::fetch_builds(&b.target, &b.packages)?,
+            None => packages::Builds::default(),
+        };
         let news = news.and_then(|n| n.join().ok()).flatten();
         read = news.is_some() || crate::handoff::NEWS.load(std::sync::atomic::Ordering::Relaxed);
         crate::handoff::NEWS.store(read, std::sync::atomic::Ordering::Relaxed);
-        let asks = [packages::removals(&before.packages), builds.asks.clone(), fetched.asks.clone(), news.unwrap_or_default()].concat();
-        preflight(ctx, &mut before, &asks)?;
+        let removals = before.as_ref().map(|b| packages::removals(&b.packages)).unwrap_or_default();
+        let asks = [removals, builds.asks.clone(), fetched.asks.clone(), news.unwrap_or_default()].concat();
+        match &mut before {
+            Some(b) => preflight(ctx, b, &asks)?,
+            None => ask(&asks, &[], &ctx.opts)?,
+        };
         // When the upgrade changes no package and no sync database, the plan and its builds stay the same.
         let (state, built) = (packages::databases(), builds.queue.is_empty());
         report::changing();
         packages::upgrade(&target, builds)?;
-        plan = (built && packages::databases() == state).then_some((before, fetched));
+        plan = before.filter(|_| built && packages::databases() == state).map(|b| (b, fetched));
+    } else {
+        say!("• System upgrade: skipped, because of --config-only.");
     }
-    if offline {
-        say!("• System upgrade: skipped, because of --offline.");
+    if configure {
+        activate(ctx, target.clone(), plan)?;
+        commit(&target)?;
+    } else {
+        packages::clean_staging()?;
     }
-    activate(ctx, target.clone(), plan)?;
-    commit(&target)?;
     trust::news_read(read);
-    report::setup_actions(notes::apply(&target)?);
+    if configure {
+        report::setup_actions(notes::apply(&target)?);
+    }
     Ok(())
 }
 

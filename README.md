@@ -136,11 +136,11 @@ Arch Linux does not support [partial upgrades](https://wiki.archlinux.org/title/
 
 When two declared packages conflict, pacnix refuses the plan. `pacnix apply` does not remove a package because of a conflict. If an upgrade needs such a removal, pacman stops, and you do the steps in the [Arch Linux news](https://archlinux.org/news/).
 
-`pacnix apply` runs `pacman -Syu`, builds the AUR packages again when necessary, and then makes the other changes. `pacnix apply --offline` does not refresh the sync databases and does not build the AUR packages again. Use it for a change that needs no download, for example a file.
+`pacnix apply` upgrades the system and then applies the configuration. The system upgrade runs `pacman -Syu` and builds the AUR packages again when necessary. To apply the configuration installs and removes the declared packages and makes the other changes. `pacnix apply --config-only` does not upgrade the system. It still downloads and builds the packages that the configuration adds. `pacnix apply --upgrade-only` upgrades the system with the configuration of the last apply and does not read the flake.
 
 Each AUR user can change an AUR package. At the first build of an AUR package, pacnix records its maintainer, its co-maintainers and its AUR dependencies in `/var/lib/pacnix`, without a question. When a later build shows a different maintainer or co-maintainer, or a new AUR dependency, pacnix asks before it changes the system. To see the changes of a PKGBUILD before the build, run `pacnix plan` and read the PKGBUILD on the [AUR](https://aur.archlinux.org/).
 
-pacnix downloads the packages into the pacman cache before the transaction. If a mirror does not have a package version of the sync databases, the databases are old: run `pacnix apply` without `--offline`.
+pacnix downloads the packages into the pacman cache before the transaction. If a mirror does not have a package version of the sync databases, the databases are old: run `pacnix apply` without `--config-only`.
 
 ### Files
 
@@ -278,7 +278,7 @@ Run pacnix as your user. pacnix starts itself again with `sudo`, which asks for 
 | Command | Function |
 |---|---|
 | `pacnix plan` | Shows each change that `apply` will do. It does not change the system. |
-| `pacnix apply` | Upgrades the system, then makes it agree with the configuration. It also shows the Arch Linux news since the last upgrade. With `--offline`, it does not upgrade. |
+| `pacnix apply` | Upgrades the system, then makes it agree with the configuration. It also shows the Arch Linux news since the last upgrade. With `--config-only`, it does not upgrade. With `--upgrade-only`, it only upgrades. |
 | `pacnix uninstall` | Removes pacnix, aurutils and Nix with pacman, and deletes the data, users and groups that they made. The declared files, units and packages stay. The Home Manager files become copies outside the Nix store. |
 | `pacnix audit` | Shows the state that the configuration does not explain: files without an owner, changed package files, `.pacnew` files, explicitly installed packages that are not declared, enabled units that are not declared and that no vendor preset enables, and paths in home directories that no claim explains. It shows first if a reboot is necessary and the install notes of the last change. Then it shows the number of items, the items of each kind, and what to do. The last line shows the number of items of each kind. |
 

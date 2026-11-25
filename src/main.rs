@@ -81,9 +81,12 @@ pub struct Opts {
 struct ApplyOpts {
     #[command(flatten)]
     opts: Opts,
-    /// No pacman -Syu and no AUR builds
+    /// Only upgrade the system, with the active configuration
+    #[arg(long, conflicts_with = "config_only")]
+    upgrade_only: bool,
+    /// Only apply the configuration. Do not upgrade the system
     #[arg(long)]
-    offline: bool,
+    config_only: bool,
 }
 
 pub struct Ctx {
@@ -152,7 +155,7 @@ fn run(cli: Cli) -> Result<()> {
     let ctx = |opts| Ctx { flake: flake.clone(), host: host.clone(), opts };
     match cli.verb {
         Verb::Plan => generation::plan(&ctx(Opts::default())),
-        Verb::Apply(a) => resilient(|| generation::apply(&ctx(a.opts.clone()), a.offline)),
+        Verb::Apply(a) => resilient(|| generation::apply(&ctx(a.opts.clone()), !a.config_only, !a.upgrade_only)),
         Verb::Audit => audit::audit(&ctx(Opts::default())),
         Verb::Uninstall(o) => resilient(|| generation::uninstall(&ctx(o.clone()))),
     }
@@ -247,7 +250,7 @@ fn resilient(f: impl Fn() -> Result<()>) -> Result<()> {
                     packages::SERIAL.store(true, std::sync::atomic::Ordering::Relaxed);
                     std::thread::sleep(Duration::from_secs(*pause));
                 }
-                Cause::Stale => return Err(e.context("the mirror does not have a package of the sync databases, thus the databases or the mirror are old. Run pacnix apply without --offline, or use a different mirror")),
+                Cause::Stale => return Err(e.context("the mirror does not have a package of the sync databases, thus the databases or the mirror are old. Run pacnix apply without --config-only, or use a different mirror")),
                 Cause::Other => return Err(e),
             },
         }

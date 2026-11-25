@@ -3,7 +3,8 @@
 # kernel update, DKMS builds from the repositories and the AUR, .pacnew files
 # and a reboot. The summary of the upgrade tells to reboot for the new kernel.
 # A system upgrade that replaces pacnix hands the apply to the new pacnix,
-# which evaluates the configuration again and completes the same apply.
+# which evaluates the configuration again and completes the same apply. An
+# apply with --upgrade-only upgrades with the active generation.
 size=(4 4096 1)
 source "$(dirname "$0")/../lib.sh"
 old=$cache/base-20261001.604814.qcow2
@@ -34,7 +35,13 @@ step "switch to the mirrors of the other VMs and upgrade"
 servers=$(for m in $("$vm" mirror); do printf 'Server = %s/$repo/os/$arch\\n' "$m"; done)
 scenario old "{ files.\"/etc/pacman.d/mirrorlist\".text = \"$servers\"; features.overrides.enable = true; }"
 apply old >/dev/null || fail "apply of the mirrors failed"
-out=$(pacnix old apply --yes) || { echo "$out" | tail -20; fail "upgrade failed"; }
+# --upgrade-only upgrades with the active generation: a later edit of the flake waits for the next apply.
+generation=$(on old 'readlink /nix/var/nix/profiles/pacnix')
+scenario old "{ files.\"/etc/pacman.d/mirrorlist\".text = \"$servers\"; features.overrides.enable = true; files.\"/etc/pending\".text = \"x\"; }"
+out=$(pacnix old apply --yes --upgrade-only) || { echo "$out" | tail -20; fail "upgrade failed"; }
+refute old 'test -e /etc/pending' "the upgrade-only apply applied the edit of the flake"
+check old "test \"\$(readlink /nix/var/nix/profiles/pacnix)\" = $generation" "the upgrade-only apply changed the generation"
+check old 'test -z "$(ls -A /var/lib/pacnix/cache 2>/dev/null)"' "the upgrade-only apply did not empty the staging cache"
 new=$(on old 'pacman -Q linux | cut -d" " -f2')
 [[ $new != "$kernel" ]] || fail "the kernel did not change ($kernel)"
 echo "kernel $kernel -> $new"
@@ -81,7 +88,7 @@ upgrades=$(on old "tail -c +$((log + 1)) /var/log/pacman.log | grep -c \"Running
 check old 'grep -q "a different pacnix process is running" /var/tmp/parallel' "a second pacnix ran while the new pacnix continued the apply"
 out=$(apply old) || { echo "$out" | tail -20; fail "the no-op apply failed"; }
 has "$out" "continues the apply" && fail "the no-op apply handed off"
-out=$(apply old --offline) || { echo "$out" | tail -20; fail "the offline apply failed"; }
-has "$out" "continues the apply" && fail "the offline apply handed off"
+out=$(apply old --config-only) || { echo "$out" | tail -20; fail "the config-only apply failed"; }
+has "$out" "continues the apply" && fail "the config-only apply handed off"
 empty_plan old
 pass
