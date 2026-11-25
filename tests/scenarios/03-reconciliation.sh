@@ -29,11 +29,12 @@ check $h "$repo | grep -qx perl-ole-storage-lite && ls /var/lib/pacnix/repo/down
 refute $h "sudo test -e /var/lib/pacnix/pruned.json" "a host that serves packages has a record of removed packages"
 grep -q 'packages ignored' <<<"$out" && fail "apply shows the list of aur sync"
 check $h "pacman -Q htop downgrade perl-email-outlook-message" "declared packages are missing"
+matches "$out" 'Downloading source Email-Outlook-Message-.* for perl-email-outlook-message\. .*Downloaded source Email-Outlook-Message-.* \([0-9.]+ (B|KiB|MiB)\)\. .*Packaging perl-email-outlook-message\.' || { echo "$out"; fail "apply does not show the AUR source download, its size and packaging in order"; }
 
 step "the first apply after the end of serving removes the package files and builds nothing"
 scenario $h '{ packages.repo = [ "htop" ]; packages.aur = [ "downgrade" "perl-email-outlook-message" ]; }'
 out=$(apply $h) || { echo "$out"; fail "apply failed"; }
-grep -q '^• Building' <<<"$out" && { echo "$out"; fail "the apply builds"; }
+grep -qE '^• (Preparing .*package|Building|Packaging)' <<<"$out" && { echo "$out"; fail "the apply builds"; }
 check $h "pacman -Qqd perl-ole-storage-lite" "the AUR dependency is not installed as a dependency"
 refute $h "ls /var/lib/pacnix/repo/*.pkg.tar*" "package files stay in the local repository after the install"
 refute $h "$repo | grep -q ." "the database of the local repository names packages that left it"
@@ -74,7 +75,7 @@ apply $h >/dev/null || fail "the no-op apply failed"
 step "a removed package that left the repository builds again"
 on $h 'sudo pacman -R --noconfirm downgrade >/dev/null'
 out=$(apply $h) || { echo "$out"; fail "apply failed"; }
-has "$out" 'Building AUR package 1/1: downgrade' || { echo "$out" | tail; fail "downgrade did not build again"; }
+has "$out" 'Packaging downgrade.' || { echo "$out" | tail; fail "downgrade did not build again"; }
 check $h "pacman -Q downgrade" "downgrade is not installed again"
 refute $h "ls /var/lib/pacnix/repo/*.pkg.tar*" "package files stay in the local repository"
 
@@ -84,7 +85,7 @@ apply $h >/dev/null || fail "apply failed"
 v=$(on $h 'pacman -Q split-a')
 refute $h "ls /var/lib/pacnix/repo/*.pkg.tar*" "package files stay in the local repository"
 out=$(apply $h) || { echo "$out"; fail "the no-op apply failed"; }
-grep -q '^• Building' <<<"$out" && { echo "$out"; fail "the no-op apply builds"; }
+grep -qE '^• (Preparing .*package|Building|Packaging)' <<<"$out" && { echo "$out"; fail "the no-op apply builds"; }
 [[ $(on $h 'pacman -Q split-a') == "$v" ]] || fail "the no-op apply changed split-a"
 empty_plan $h
 scenario $h '{ packages.repo = [ "htop" ]; packages.aur = [ "downgrade" "perl-email-outlook-message" ]; packages.local = { split-a = ./packages/split; split-b = ./packages/split; kg-a = ./packages/kg-a; kg-b = ./packages/kg-b; }; }'
@@ -106,6 +107,28 @@ for p in htop downgrade perl-email-outlook-message perl-ole-storage-lite; do
 	refute $h "ls /var/lib/pacnix/repo/$p-[0-9]*" "the file of $p stays in the local repository"
 done
 packages_match $h
+
+step "adopt an older AUR package installed outside pacnix"
+on $h 'set -e
+	work=$(mktemp -d)
+	trap "rm -rf \"$work\"" EXIT
+	cd "$work"
+	printf "%s\n" "pkgname=downgrade" "pkgver=0.1" "pkgrel=1" "arch=(any)" \
+		"package() { install -dm755 \"\$pkgdir/usr/share/downgrade\"; }" >PKGBUILD
+	makepkg --noconfirm >/dev/null
+	printf "[options]\nSigLevel = Never\n" >pacman.conf
+	sudo pacman -U --config "$work/pacman.conf" --noconfirm downgrade-*.pkg.tar.zst >/dev/null'
+scenario $h '{ packages.aur = [ "downgrade" ]; }'
+out=$(apply $h) || { echo "$out"; fail "apply failed"; }
+has "$out" 'package upgraded: downgrade' || { echo "$out"; fail "apply does not report the upgrade"; }
+check $h 'test "$(vercmp "$(pacman -Q downgrade | cut -d" " -f2)" 0.1-1)" = 1' "the older AUR package is still installed"
+out=$(apply $h) || { echo "$out"; fail "the second apply failed"; }
+has "$out" 'Apply done. No changes.' || { echo "$out"; fail "the second apply changed packages"; }
+grep -qE '^• (Preparing .*package|Building|Packaging|Downloading)' <<<"$out" && { echo "$out"; fail "the second apply reports a build or download"; }
+scenario $h ''
+apply $h >/dev/null || fail "apply failed after the removal of the declaration"
+check $h 'pacman -Qqe downgrade' "apply removed the externally installed package"
+on $h 'sudo pacman -Rns --noconfirm downgrade >/dev/null'
 
 step "a group stands for its members, as with pacman -S"
 scenario $h '{ packages.repo = [ "fprint" ]; }'

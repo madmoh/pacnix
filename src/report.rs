@@ -565,16 +565,20 @@ pub fn save_retries() {
 
 /// A line for a command that writes no output for a long time, so that the
 /// output shows that the step continues, with the last state of a progress meter.
-pub fn heartbeat(command: &str, minutes: u64, meter: &str) {
+pub fn heartbeat(command: &str, minutes: u64, meter: &str) -> bool {
     let guard = RUN.lock().unwrap();
     let (step, minutes) = match guard.as_ref() {
         Some((s, start, _, _)) if !s.is_empty() => (s.clone(), start.elapsed().as_secs() / 60),
         _ => (command.to_string(), minutes),
     };
+    if minutes == 0 {
+        return false;
+    }
     match meter.trim() {
         "" => say!("• The step continues after {minutes} min without output: {step}"),
         meter => say!("• The step continues after {minutes} min: {step}: {meter}"),
     }
+    true
 }
 
 /// The install notes and the new .pacnew files in the part of the pacman log

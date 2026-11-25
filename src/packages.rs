@@ -44,6 +44,7 @@ pub struct Plan {
     local: Vec<String>,
     drop: Vec<String>,
     install: Vec<String>,
+    aur_updates: BTreeMap<String, String>,
     archive: Vec<String>,
     explicit: Vec<String>,
     deps: Vec<String>,
@@ -64,10 +65,16 @@ impl Plan {
     /// packages that build again, which pacman -S --needed upgrades, less the
     /// skipped packages.
     fn targets(&self, skip: &BTreeSet<String>) -> Vec<&str> {
-        let mut t: Vec<&str> = self.install.iter().chain(&self.local).map(String::as_str).filter(|n| !skip.contains(*n)).collect();
+        let mut t: Vec<&str> = self.install.iter().chain(&self.local).chain(self.aur_updates.keys()).map(String::as_str).filter(|n| !skip.contains(*n)).collect();
         t.sort();
         t.dedup();
         t
+    }
+
+    fn install_targets(&self, targets: &[&str]) -> Vec<String> {
+        targets.iter().map(|&n| {
+            if self.aur_updates.contains_key(n) { format!("pacnix-local/{n}") } else { n.to_string() }
+        }).collect()
     }
 
     /// The packages that did not build and the targets that need one of them,
@@ -496,6 +503,13 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
     // Reconciliation of the installed packages.
     plan.made = made(&self::declared(old, &sync)?.0);
     plan.install = declared.iter().filter(|n| !inst.contains_key(*n)).cloned().collect();
+    plan.aur_updates = p.aur.iter().filter_map(|n| {
+        let version = &inst.get(n)?.version;
+        if p.versions.contains_key(n) || !(plan.build.contains(n) || repo.iter().any(|i| &i.name == n && &i.version != version)) {
+            return None;
+        }
+        Some((n.clone(), version.clone()))
+    }).collect();
     plan.explicit = declared.iter().filter(|n| inst.get(*n).is_some_and(|i| !i.explicit)).cloned().collect();
     plan.deps = inst.values().filter(|i| i.explicit && !declared.contains(&i.name) && plan.made.contains(&i.name)).map(|i| i.name.clone()).collect();
     plan.deps.sort();
@@ -1056,7 +1070,7 @@ pub fn fetch_builds(g: &Generation, plan: &Plan) -> Result<Builds> {
     aur.dedup();
     let mut queue = Vec::new();
     if !aur.is_empty() {
-        report::progress(&format!("Downloading {} and their AUR dependencies", count(aur.len(), "AUR package")));
+        report::progress("Fetching AUR recipes.");
         let fetched = fetch(as_builder(&["aur", "sync", "--no-view", "--no-build"]).args(AUR_ARGS).args(ignored(g)).args(&aur))?;
         queue.extend(fetched.into_iter().map(|d| (d, false)));
     }
@@ -1102,6 +1116,65 @@ fn fetch(mut c: impl std::borrow::BorrowMut<Command>) -> Result<Vec<String>> {
     Ok(std::fs::read_to_string(&list).unwrap_or_default().lines().map(String::from).collect())
 }
 
+/// The bytes received in the standard curl meter used by makepkg's default
+/// download agents. Other agents can report a download without a size.
+fn curl_received(line: &str) -> Option<String> {
+    let mut fields = line.split_whitespace();
+    fields.next()?.parse::<u8>().ok()?;
+    fields.next()?;
+    fields.next()?.parse::<u8>().ok()?;
+    let size = fields.next()?;
+    let (value, unit) = match size.as_bytes().last()? {
+        b'k' => (&size[..size.len() - 1], "KiB"),
+        b'M' => (&size[..size.len() - 1], "MiB"),
+        b'G' => (&size[..size.len() - 1], "GiB"),
+        b'T' => (&size[..size.len() - 1], "TiB"),
+        _ => (size, "B"),
+    };
+    (value.parse::<f64>().ok()? > 0.0).then(|| format!("{value} {unit}"))
+}
+
+/// Reports makepkg's phases without forwarding the output of the recipe.
+fn build_package(mut c: Command, kind: &str, name: &str) -> Result<()> {
+    let (mut source, mut size, mut curl, mut packaging) = (None, None, false, false);
+    let (status, lines) = forward(&mut c, 20, true, |line| {
+        let line = line.trim_start();
+        if line.starts_with("==>") || line.starts_with("->") {
+            if let (Some(file), Some(bytes)) = (source.take(), size.take()) {
+                if !line.starts_with("==> ERROR:") {
+                    report::progress(&format!("Downloaded source {file} ({bytes})."));
+                }
+            }
+            curl = false;
+        }
+        if let Some(file) = line.strip_prefix("-> Downloading ").and_then(|l| l.strip_suffix("...")) {
+            report::progress(&format!("Downloading source {file} for {name}."));
+            source = Some(file.to_string());
+        } else if line.starts_with("-> Cloning ") || (line.starts_with("-> Updating ") && line.ends_with(" repo...")) {
+            report::progress(&format!("Fetching a source repository for {name}."));
+        } else if line.starts_with("==> Validating source") {
+            report::step(&format!("Verifying sources for {name}."));
+        } else if line == "==> Extracting sources..." {
+            report::step(&format!("Extracting sources for {name}."));
+        } else if line == "==> Starting build()..." {
+            report::progress(&format!("Building {kind} package {name}."));
+        } else if !packaging && (line.starts_with("==> Starting package") || line.starts_with("==> Creating package ")) {
+            report::progress(&format!("Packaging {name}."));
+            packaging = true;
+        } else if source.is_some() {
+            curl |= line.starts_with("% Total    % Received % Xferd");
+            if curl && let Some(bytes) = curl_received(line) {
+                size = Some(bytes);
+            }
+        }
+        false
+    })?;
+    if !status.success() {
+        return Err(failed(&c, status, &lines));
+    }
+    Ok(())
+}
+
 /// Builds package directories in their order, one by one, so that the
 /// progress shows each package. An AUR package that the local repository has
 /// at the version of its .SRCINFO is skipped, thus a new attempt continues
@@ -1119,8 +1192,8 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<BTreeSet<String>> {
     let mut failed = BTreeSet::new();
     for (i, (dir, local)) in builds.queue.iter().enumerate() {
         let name = base(dir);
-        let step = format!("build {} package {name}", if *local { "local" } else { "AUR" });
-        report::progress(&format!("Building {} package {}/{count}: {name}", if *local { "local" } else { "AUR" }, i + 1));
+        let kind = if *local { "local" } else { "AUR" };
+        let step = format!("build {kind} package {name}");
         let (names, version, deps) = srcinfo_file(dir);
         if let Some(d) = deps.iter().find(|d| failed.contains(*d)) {
             report::failure(&step, &format!("it needs {d}, which did not build."));
@@ -1138,6 +1211,7 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<BTreeSet<String>> {
             false => output(as_builder(&["git", "-C", dir, "rev-parse", "HEAD"]))?.trim().to_string(),
         };
         if *local || !names.iter().all(|n| built.get(n) == Some(&version)) {
+            report::progress(&format!("Preparing {kind} package {}/{count} ({name}).", i + 1));
             let _ = std::fs::remove_dir_all(&out);
             run_cmd(as_builder(&["mkdir", &out]))?;
             // makechrootpkg builds in a copy of the chroot that it removes after the build.
@@ -1152,7 +1226,7 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<BTreeSet<String>> {
             // makechrootpkg downloads the sources on the host as the builder user, and
             // systemd-nspawn locks the chroot in /run.
             let writable = [BUILD, REPO, "/var/lib/aurbuild", STAGING, "/run"];
-            let ok = isolated(&step, || run_cmd(sandboxed(c, None, &writable)));
+            let ok = isolated(&step, || build_package(sandboxed(c, None, &writable), kind, &name));
             // No process of the builder user stays to change the packages.
             let _ = cmd("pkill", &["-KILL", "-u", "pacnix"]).status();
             if !ok? {
@@ -1313,7 +1387,7 @@ fn transaction(args: &[&str]) -> Result<()> {
 /// transaction then installs from the cache. Without packages to install,
 /// nothing downloads. Returns the packages that the transaction skips: the
 /// packages that did not build and the packages that need them.
-pub fn prepare(g: &Generation, plan: &Plan, builds: Builds) -> Result<BTreeSet<String>> {
+pub fn prepare(g: &Generation, plan: &mut Plan, builds: Builds) -> Result<BTreeSet<String>> {
     let mut failed = BTreeSet::new();
     write_confs(g)?;
     // pacnix 0.11 kept its pacman configurations in /var/lib/pacnix.
@@ -1335,10 +1409,22 @@ pub fn prepare(g: &Generation, plan: &Plan, builds: Builds) -> Result<BTreeSet<S
     if has_local(g) {
         sync_pacnix_db(g)?;
     }
+    if !plan.aur_updates.is_empty() {
+        let candidates = std::mem::take(&mut plan.aur_updates);
+        for package in repo_db(g)? {
+            if let Some(version) = candidates.get(&package.name) {
+                let order = output(cmd("vercmp", &[&package.version, version]))?;
+                if order.trim() == "1" {
+                    plan.aur_updates.insert(package.name, package.version);
+                }
+            }
+        }
+    }
     let skip = plan.skipped(failed);
     let targets = plan.targets(&skip);
     if !targets.is_empty() {
-        download(&targets)?;
+        let targets = plan.install_targets(&targets);
+        download(&targets.iter().map(String::as_str).collect::<Vec<_>>())?;
     }
     Ok(skip)
 }
@@ -1356,7 +1442,8 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
     if !targets.is_empty() {
         report::progress(&format!("Installing {}: {}", count(targets.len(), "package"), report::items(&targets)));
         let mut args = vec!["-S", "--needed", "--noconfirm", "--ask=4", "--config", CONF];
-        args.extend(targets);
+        let targets = plan.install_targets(&targets);
+        args.extend(targets.iter().map(String::as_str));
         transaction(&args)?;
     }
     if !plan.archive.is_empty() {
@@ -1409,6 +1496,7 @@ pub fn upgrade_builds(g: &Generation) -> Result<Builds> {
     if !is_builder(g) || !Path::new(REPO).join("pacnix-local.db.tar.gz").exists() {
         return Ok(Builds::default());
     }
+    let _stage = report::stage("Checking for AUR updates.");
     write_confs(g)?;
     // aur sync keeps the pinned AUR packages, the dependencies with a chosen
     // provider and the local packages, which can have the name of an AUR package.
@@ -1438,7 +1526,6 @@ pub fn upgrade_builds(g: &Generation) -> Result<Builds> {
         }
         c.args(String::from_utf8_lossy(&out.stdout).split_whitespace());
     }
-    report::progress("Downloading AUR package updates");
     let dirs = fetch(c.args(AUR_ARGS))?;
     Builds::of(dirs.into_iter().map(|d| (d, false)).collect(), &[])
 }

@@ -90,13 +90,13 @@ check newbox 'sudo test -s /var/lib/pacnix/build/sources/slow/lastupdate' "the d
 step "the next apply builds the package and asks no question"
 on newbox 'echo ok >/etc/pacnix/packages/slow/mode'
 out=$(pacnix newbox apply 2>&1) || { echo "$out" | tail -30; fail "the apply after the correction failed"; }
-for l in '• Building local package 1/1: slow' '• The step continues after 1 min without output: Building local package 1/1: slow'; do
+for l in '• Preparing local package 1/1 (slow).' '• Building local package slow.' '• The step continues after 1 min without output: Building local package slow.' '• Packaging slow.'; do
 	has "$out" "$l" || fail "the output does not show: $l"
 done
 grep -q '==> colored line\|progress done' <<<"$out" && fail "the output shows the output of a build that succeeded"
 refute newbox 'sudo test -e /var/lib/pacnix/build/sources/slow' "the download stays after the build succeeded"
 refute newbox 'sudo test -e /var/lib/pacnix/build/local/slow' "the build directory stays after the install"
-matches "$out" '• The step continues after 2 min: Building local package 1/1: slow: downloaded [0-9]+ MB' || fail "the output does not show the progress meter after 60 s of redraws"
+matches "$out" '• The step continues after 2 min: Building local package slow\.?: downloaded [0-9]+ MB' || fail "the output does not show the progress meter after 60 s of redraws"
 grep -q 'progress 10%\|not writing modified lock file\|Added input' <<<"$out" && fail "the output shows progress meter redraws or Nix notes"
 grep -q $'\e\|\r' <<<"$out" && fail "the output has escape sequences or carriage returns"
 check newbox 'sudo grep -q "^UUID=" /var/lib/pacnix/originals/etc/fstab && sudo grep -q "timeout 3" /var/lib/pacnix/originals/boot/loader/loader.conf' "the originals are not kept"

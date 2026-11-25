@@ -563,7 +563,7 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<(Plan, packages::Builds)
         run_cmd(cmd("nix-store", &["--add-root", PENDING, "--realise", &plan.target.path]))?;
     }
     let leaving = units::leaving(&plan.units, &plan.files.deleted());
-    let skip = packages::prepare(&plan.target, &plan.packages, builds)?;
+    let skip = packages::prepare(&plan.target, &mut plan.packages, builds)?;
     units::stop(&leaving)?;
     packages::apply(&plan.packages, &skip)?;
     packages::discard(&plan.target)?;

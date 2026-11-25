@@ -36,6 +36,9 @@ scenario $h '{ packages.repo = [ "cowsay" ]; packages.local.remote = ./packages/
 out=$(apply $h) || { echo "$out" | tail -20; fail "apply failed while the source host did not resolve"; }
 has "$out" '• Attempt 1 of 4 failed in the network: curl: (7) Failed to connect to fastly.mirror.pkgbuild.com' || { echo "$out"; fail "apply does not try the source download again"; }
 check $h 'test -s /usr/share/remote/lastupdate' "the package with the remote source is not installed"
+bytes=$(on $h 'stat -c %s /usr/share/remote/lastupdate')
+matches "$out" "Downloading source lastupdate for remote\. .*Downloaded source lastupdate \($bytes B\)\. .*Packaging remote\. .*Installing 1 package: remote" || { echo "$out"; fail "apply does not show the measured source download, packaging and installation in order"; }
+grep -q '^• Building local package remote' <<<"$out" && { echo "$out"; fail "apply reports compilation for a package that only repackages its source"; }
 cache_kept $h "$cache"
 
 step "a failed step keeps the downloaded package files until an apply without a failure"

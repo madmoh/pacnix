@@ -460,8 +460,9 @@ pub fn forward(cmd: &mut Command, keep: usize, stdout: bool, mut show: impl FnMu
         }
         if report::meter() || report::live() {
             quiet = Instant::now();
-        } else if quiet.elapsed() >= Duration::from_secs(60) {
-            report::heartbeat(&describe(cmd), start.elapsed().as_secs() / 60, &strip_escapes(&line));
+        } else if quiet.elapsed() >= Duration::from_secs(60)
+            && report::heartbeat(&describe(cmd), start.elapsed().as_secs() / 60, &strip_escapes(&line))
+        {
             quiet = Instant::now();
         }
         if !ready {
