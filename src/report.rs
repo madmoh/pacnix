@@ -576,7 +576,7 @@ pub fn heartbeat(command: &str, minutes: u64, meter: &str) -> bool {
     }
     match meter.trim() {
         "" => say!("• The step continues after {minutes} min without output: {step}"),
-        meter => say!("• The step continues after {minutes} min: {step}: {meter}"),
+        meter => say!("• The step continues after {minutes} min: {}: {meter}", step.trim_end_matches('.')),
     }
     true
 }
