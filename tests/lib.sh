@@ -36,8 +36,9 @@ noise="^copying path"
 # The login shell of a host can be bash or zsh: zsh keeps the statuses in pipestatus.
 # The log in the VM has the time of each line.
 pacnix() { local h=$1; shift; on "$h" "pacnix $* 2>&1 | awk '{ print strftime(\"%T\"), \$0; fflush() }' | sudo tee -a /var/log/pacnix-test.log | cut -d' ' -f2- | grep -v \"$noise\"; exit \${PIPESTATUS[0]:-\${pipestatus[1]}}"; }
-plan() { pacnix "$1" plan; }
-apply() { local h=$1; shift; pacnix "$h" apply --yes "$@"; }
+# The plan of a host: apply without the upgrade and the configuration changes nothing.
+plan() { local h=$1; shift; pacnix "$h" apply --no-upgrade --no-config "$@"; }
+apply() { local h=$1; shift; pacnix "$h" apply "$@"; }
 # Declared packages of the active generation, sorted.
 declared() { on "$1" "jq -r '.packages.repo[], .packages.aur[], (.packages.local|keys[])' /nix/var/nix/profiles/pacnix | sort -u"; }
 # Fails unless each declared package is explicitly installed and no orphan exists.
@@ -81,7 +82,7 @@ cache_kept() {
 empty_plan() {
 	local out
 	out=$(plan "$1")
-	if ! grep -q '^• Plan done: no changes' <<<"$out"; then
+	if grep -q '^• Planned changes' <<<"$out"; then
 		printf '%s\n' "$out"
 		fail "the plan of $1 is not empty"
 	fi

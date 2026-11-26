@@ -1,6 +1,6 @@
 pkgbase=pacnix
 pkgname=(pacnix pacnix-keyring)
-pkgver=0.18.3
+pkgver=0.19.0
 pkgrel=1
 pkgdesc='Declarative, reconciling management of an Arch Linux host from a Nix flake'
 arch=(x86_64)
@@ -23,6 +23,7 @@ package_pacnix() {
   cd "$startdir/pkg"
   install -Dm644 sysusers.conf "$pkgdir/usr/lib/sysusers.d/pacnix.conf"
   install -Dm644 tmpfiles.conf "$pkgdir/usr/lib/tmpfiles.d/pacnix.conf"
+  install -Dm644 removal.hook "$pkgdir/usr/share/libalpm/hooks/pacnix-removal.hook"
 }
 
 # The key of the [pacnix] repository for pacman-key --populate, as with

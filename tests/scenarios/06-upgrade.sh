@@ -4,7 +4,7 @@
 # and a reboot. The summary of the upgrade tells to reboot for the new kernel.
 # A system upgrade that replaces pacnix hands the apply to the new pacnix,
 # which evaluates the configuration again and completes the same apply. An
-# apply with --upgrade-only upgrades with the active generation.
+# apply with --no-config upgrades with the active generation.
 size=(4 4096 1)
 source "$(dirname "$0")/../lib.sh"
 old=$cache/base-20261001.604814.qcow2
@@ -35,13 +35,13 @@ step "switch to the mirrors of the other VMs and upgrade"
 servers=$(for m in $("$vm" mirror); do printf 'Server = %s/$repo/os/$arch\\n' "$m"; done)
 scenario old "{ files.\"/etc/pacman.d/mirrorlist\".text = \"$servers\"; features.overrides.enable = true; }"
 apply old >/dev/null || fail "apply of the mirrors failed"
-# --upgrade-only upgrades with the active generation: a later edit of the flake waits for the next apply.
+# --no-config upgrades with the active generation: a later edit of the flake waits for the next apply.
 generation=$(on old 'readlink /nix/var/nix/profiles/pacnix')
 scenario old "{ files.\"/etc/pacman.d/mirrorlist\".text = \"$servers\"; features.overrides.enable = true; files.\"/etc/pending\".text = \"x\"; }"
-out=$(pacnix old apply --yes --upgrade-only) || { echo "$out" | tail -20; fail "upgrade failed"; }
-refute old 'test -e /etc/pending' "the upgrade-only apply applied the edit of the flake"
-check old "test \"\$(readlink /nix/var/nix/profiles/pacnix)\" = $generation" "the upgrade-only apply changed the generation"
-check old 'test -z "$(ls -A /var/lib/pacnix/cache 2>/dev/null)"' "the upgrade-only apply did not empty the staging cache"
+out=$(pacnix old apply --no-config) || { echo "$out" | tail -20; fail "upgrade failed"; }
+refute old 'test -e /etc/pending' "apply --no-config applied the edit of the flake"
+check old "test \"\$(readlink /nix/var/nix/profiles/pacnix)\" = $generation" "apply --no-config changed the generation"
+check old 'test -z "$(ls -A /var/lib/pacnix/cache 2>/dev/null)"' "apply --no-config did not empty the staging cache"
 new=$(on old 'pacman -Q linux | cut -d" " -f2')
 [[ $new != "$kernel" ]] || fail "the kernel did not change ($kernel)"
 echo "kernel $kernel -> $new"
@@ -74,7 +74,7 @@ on old "cd /tmp && sudo mv $pkg $pkg.sig pacnix.db.tar.gz pacnix.db.tar.gz.sig /
 on old 'sudo mkdir -p /var/lib/pacnix/cache && sudo touch /var/lib/pacnix/cache/old-1-1-any.pkg.tar.zst'
 log=$(on old 'stat -c %s /var/log/pacman.log')
 # A second pacnix while the new pacnix continues: the lock refuses it.
-on old "sudo systemd-run --quiet sh -c 'until grep -q \"continues the apply\" /var/log/pacnix-test.log; do sleep 0.1; done; pacnix plan >/var/tmp/parallel 2>&1'"
+on old "sudo systemd-run --quiet sh -c 'until grep -q \"continues the apply\" /var/log/pacnix-test.log; do sleep 0.1; done; pacnix apply --no-upgrade --no-config >/var/tmp/parallel 2>&1'"
 out=$(apply old) || { echo "$out" | tail -30; fail "the apply that upgrades pacnix failed"; }
 once "$out" "• pacnix was upgraded. The new version continues the apply." || { echo "$out"; fail "the old pacnix did not hand off"; }
 once "$out" "• pacnix 0.99.0 continues the apply." || { echo "$out"; fail "the new pacnix did not continue the apply"; }
@@ -88,7 +88,7 @@ upgrades=$(on old "tail -c +$((log + 1)) /var/log/pacman.log | grep -c \"Running
 check old 'grep -q "a different pacnix process is running" /var/tmp/parallel' "a second pacnix ran while the new pacnix continued the apply"
 out=$(apply old) || { echo "$out" | tail -20; fail "the no-op apply failed"; }
 has "$out" "continues the apply" && fail "the no-op apply handed off"
-out=$(apply old --config-only) || { echo "$out" | tail -20; fail "the config-only apply failed"; }
-has "$out" "continues the apply" && fail "the config-only apply handed off"
+out=$(apply old --no-upgrade) || { echo "$out" | tail -20; fail "apply --no-upgrade failed"; }
+has "$out" "continues the apply" && fail "apply --no-upgrade handed off"
 empty_plan old
 pass

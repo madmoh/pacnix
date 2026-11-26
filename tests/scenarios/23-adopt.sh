@@ -5,8 +5,8 @@
 # configuration declares these files with a different content, a mount, a
 # swap file, a group and a user. The plan shows that pacnix keeps the originals, the apply replaces
 # the files, and the next plan is empty. When the declarations go, the
-# originals come back with their content, mode and owner, the swap file goes
-# as the data of a removed feature, and the user and group that pacnix created
+# originals come back with their content, mode and owner, the swap file stays
+# as the data of a removed feature until the audit deletes it, and the user and group that pacnix created
 # go, without the home directory. A new user without a terminal has no password.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
@@ -49,7 +49,9 @@ done
 apply $h >/dev/null || fail "the restore failed"
 after=$(on $h "$sum")
 [[ $before == "$after" ]] || { diff <(echo "$before") <(echo "$after"); fail "the originals did not come back"; }
-refute $h 'test -e /swapfile' "the swap file stays"
+check $h 'test -e /swapfile' "apply deleted the swap file"
+pacnix $h audit <<<a >/dev/null || fail "audit with the answer a failed"
+refute $h 'test -e /swapfile' "the audit did not delete the swap file"
 refute $h 'getent passwd alice || getent group team' "the user or the group that pacnix created stays"
 check $h 'test -d /home/alice' "the home directory of the deleted user is gone"
 refute $h 'sudo find /var/lib/pacnix/originals -name fstab -o -name loader.conf -o -name "*hand*" | grep -q .' "the kept originals stay"

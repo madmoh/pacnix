@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Scenario 11: a feature creates state, then the feature goes. The one question
-# of the run offers to delete the data of the feature. The answer k keeps it,
-# and the audit lists it with the feature that claimed it. --yes deletes it,
+# Scenario 11: a feature creates state, then the feature goes. Apply keeps the
+# data of the feature and tells that the audit shows it. The audit lists it
+# last, numbered, with the feature that claimed it, and asks which leftovers to
+# delete: at the end of the input nothing goes, a number deletes one leftover,
+# and the others show again in the next audit. The answer a deletes all,
 # except a declared file, a path that a feature of the configuration claims and
 # a bash file.
 # The audit of a home directory lists visible and hidden entries, the entries
@@ -15,13 +17,20 @@
 # explained, for example the fontconfig links in /etc/fonts/conf.d. A dangling
 # link, a link to a file of no package and a link to a directory stay listed,
 # and a .pacnew link too.
-# The audit shows the paths that a feature claimed before first, also when the
-# feature still exists and no longer claims the path, then the paths with no
-# known origin, then the paths whose name is the same as an installed package,
-# a program in /usr/bin or a desktop ID, also a hidden entry of the home
-# directory without its dot, or that a package tmpfiles rule has. The names of the
-# directories above a path do not count, and a removed application has no
-# match. A bash file that feature arch claimed before is no former claim.
+# The audit shows the paths with no known origin, then the paths whose name
+# is the same as an installed package, a program in /usr/bin or a desktop ID,
+# also a hidden entry of the home directory without its dot, or that a package
+# tmpfiles rule has, then the other items, and last the leftovers: the paths
+# that a feature claimed before, also when the feature still exists and no
+# longer claims the path. The names of the directories above a path do not
+# count. A bash file that feature arch claimed before is no former claim.
+# When apply removes a package, the audit offers what it left as leftovers:
+# the paths of its tmpfiles rules and unit directories, also in a home
+# directory, the files of its system user, its .pacsave files and the paths
+# with the name of the package, a program or a desktop ID. A rule for a path
+# that an installed package owns makes no leftovers below it. When the leftovers
+# go, the record of the package goes too. An application that was removed
+# before it made a path has no match.
 # A DKMS build of a package source for an installed kernel has a note: its
 # registration, its build directory and the installed module with the same
 # bytes. A version without source, a registration for a kernel that is not
@@ -36,23 +45,39 @@ step "the audit of a configured system"
 out=$(pacnix $h audit) || fail "audit failed"
 echo "$out"
 grep -q '/srv/demo\|\.cache/demo' <<<"$out" && fail "the audit lists claimed paths"
-step "remove the feature and keep its data"
+step "remove the feature: apply keeps its data, and the audit deletes the selected leftovers"
 scenario $h ''
-out=$(on $h "printf 'k\n' | script -qec 'NO_COLOR=1 pacnix apply' /dev/null" 2>&1) || { echo "$out" | tail; fail "apply with the answer k failed"; }
-has "$out" 'Delete the data of removed feature demo: /srv/demo, /home/arch/.cache/demo.' || { echo "$out" | tail; fail "the question does not show the data of the feature"; }
-grep -qF 'Continue? [y/N] (N stops pacnix, k continues and keeps the data)' <<<"$out" || fail "the question does not offer to keep the data"
-grep -q '^• The data of the removed features stays. pacnix audit shows it.' <<<"$out" || fail "the summary does not tell that the data stays"
-check $h 'test -e /srv/demo/index.html && test -e ~/.cache/demo/page' "the answer k deleted the data"
+out=$(pacnix $h audit <<<a) || { echo "$out" | tail; fail "audit before the apply failed"; }
+has "$out" '• The configuration differs from the active configuration. Run pacnix apply, then pacnix audit can delete the leftovers.' || { echo "$out" | tail; fail "the audit offers to delete data of the active configuration"; }
+check $h 'test -e /srv/demo/index.html && test -e ~/.cache/demo/page' "the audit deleted data of the active configuration"
+out=$(apply $h) || { echo "$out" | tail; fail "apply failed"; }
+has "$out" 'Keep the data of removed feature demo for pacnix audit: /srv/demo, /home/arch/.cache/demo' || { echo "$out" | tail; fail "the plan does not show the data of the feature"; }
+grep -q '^• The data of the removed packages and features stays. pacnix audit shows it and deletes it when you ask.' <<<"$out" || fail "the summary does not tell that the data stays"
+check $h 'test -e /srv/demo/index.html && test -e ~/.cache/demo/page' "apply deleted the data"
 out=$(pacnix $h audit) || fail "audit failed"
 echo "$out"
-matches "$out" 'Unowned directory \([0-9]+\):.* /srv/demo \(claimed by feature demo in generation [0-9]+; the feature is no longer enabled\)' || fail "the audit does not list /srv/demo with its origin"
-matches "$out" 'Unclaimed home path \([0-9]+\):.* /home/arch/.cache/demo \(claimed by feature demo in generation [0-9]+; the feature is no longer enabled\)' || fail "the audit does not list ~/.cache/demo with its origin"
+has "$out" '• Leftovers of removed packages and features (2): 1 Unowned directory: /srv/demo (claimed by feature demo in generation' || fail "the audit does not list /srv/demo first with its origin"
+matches "$out" '2 Unclaimed home path: /home/arch/.cache/demo \(claimed by feature demo in generation [0-9]+; the feature is no longer enabled\)' || fail "the audit does not list ~/.cache/demo with its origin"
+has "$out" 'Delete leftovers? [a]ll, [N]one, or numbers such as 1 3-5:' || fail "the audit does not ask which leftovers to delete"
+check $h 'test -e /srv/demo/index.html && test -e ~/.cache/demo/page' "the audit deleted data at the end of the input"
+out=$(pacnix $h audit <<<'1 3') && fail "the audit accepted a number that is not in the list"
+has "$out" '• Error: 3 is not a number or a range of the list, thus nothing is deleted. Run pacnix audit again' || { echo "$out" | tail; fail "wrong error for a number that is not in the list"; }
+check $h 'test -e /srv/demo/index.html && test -e ~/.cache/demo/page' "the audit deleted data at an answer with an error"
+out=$(pacnix $h audit <<<1) || { echo "$out" | tail; fail "audit with the answer 1 failed"; }
+has "$out" ', 1 deleted.' || { echo "$out" | tail; fail "the last line does not count the deleted leftover"; }
+refute $h 'test -e /srv/demo' "the answer 1 did not delete /srv/demo"
+check $h 'test -e ~/.cache/demo/page' "the answer 1 deleted ~/.cache/demo"
+has "$(pacnix $h audit)" '• Leftovers of removed packages and features (1): 1 Unclaimed home path: /home/arch/.cache/demo' || fail "the next audit does not show the leftover that stays"
+pacnix $h audit <<<a >/dev/null || fail "audit with the answer a failed"
+refute $h 'test -e ~/.cache/demo' "the answer a did not delete ~/.cache/demo"
 step "remove the feature again and delete its data"
 scenario $h '{ features.demo.enable = true; claims.disposable.home = [ ".bash_history" ]; }'
 on $h 'echo ls >~/.bash_history'
 apply $h >/dev/null || fail "apply failed"
+on $h 'mkdir -p ~/.cache/demo/keep && curl -fs -o ~/.cache/demo/page localhost:8081' || fail "the demo service does not answer"
 scenario $h '{ files."/srv/demo/keep.txt".text = "kept\n"; claims.other.home = [ ".cache/demo/keep" ]; claims.arch.home = [ ".bash_logout" ]; }'
-apply $h || fail "apply --yes failed"
+apply $h || fail "apply failed"
+pacnix $h audit <<<a >/dev/null || fail "audit with the answer a failed"
 refute $h 'test -e /srv/demo/index.html || test -e ~/.cache/demo/page' "the data of the removed feature remains"
 check $h 'test "$(cat /srv/demo/keep.txt)" = kept && test -d ~/.cache/demo/keep' "a declared file or a claimed path is deleted"
 check $h 'test -s ~/.bash_history' "the deletion of the data of a removed feature deleted ~/.bash_history"
@@ -85,7 +110,7 @@ done
 for p in /home/arch/.config/darkhttpd /usr/share/fontconfig/demo-child /home/arch/.bash_logout; do
 	grep -qxF "    $p" <<<"$out" || fail "the audit shows $p with a note"
 done
-awk '/^• Paths that a feature claimed/ { a = NR } /^• Paths with no known origin/ { b = NR } /^• Paths with a name, rule or DKMS match/ { c = NR } /^• Other items/ { d = NR } END { exit !(a && a < b && b < c && c < d) }' <<<"$out" || fail "the blocks of the audit are not in the order: former claims, no known origin, name matches, other items"
+awk '/^• Leftovers of removed packages and features/ { a = NR } /^• Paths with no known origin/ { b = NR } /^• Paths with a name, rule or DKMS match/ { c = NR } /^• Other items/ { d = NR } END { exit !(b && b < c && c < d && d < a) }' <<<"$out" || fail "the blocks of the audit are not in the order: no known origin, name matches, other items, leftovers"
 for p in demo-dangling demo-file demo-other demo-dir; do
 	audit_has "$out" 'Unowned file' "/etc/$p" || fail "the audit does not list /etc/$p"
 done
@@ -94,16 +119,34 @@ grep -q '/etc/demo-pkg\|/etc/demo-chain\|/etc/fonts' <<<"$out" && fail "the audi
 for p in notes.txt .local/state/foo .local/bin/tool .local/lib/x/deep/other Work/other .config/demo/extra.conf .config/app .config/linkdir Music .bash_profile .bash_logout .var/app/org.demo/data .var/app/other; do
 	audit_has "$out" 'Unclaimed home path' "/home/arch/$p" || fail "the audit does not list ~/$p"
 done
-audit_has "$out" 'Unclaimed home path' "/home/arch/.bash_history (claimed by feature disposable in generation 4; the feature is no longer enabled)" || fail "the audit does not list ~/.bash_history"
+# pacnix never deletes a bash file: the former claim is a note, not a leftover to delete.
+audit_has "$out" 'Unclaimed home path' '/home/arch/.bash_history (claimed by feature disposable in generation 4; the feature is no longer enabled)' || fail "the audit does not list ~/.bash_history with its former claim"
+grep -qE '^ *[0-9]+  Unclaimed home path: /home/arch/.bash_history' <<<"$out" && fail "the audit offers to delete ~/.bash_history"
 for p in .config/app/a .config/demo/settings.conf Documents Work Work/Templates Work/Pictures .local/lib .local/lib/x .local/lib/x/deep/keep .bashrc .cache/ignored-x .var/app/org.demo/cache .var .var/app .config/linkdir/passwd .config/Code; do
 	audit_has "$out" 'Unclaimed home path' "/home/arch/$p" && fail "the audit lists ~/$p"
 done
 on $h "sudo rm -rf /var/lib/dkms/v4l2loopback/0.0.1 /var/lib/dkms/v4l2loopback/kernel-9.9.9-arch1-1-x86_64 $d/stray.ko.zst $d/other.ko.zst /var/lib/dkms/v4l2loopback/$v/$k/x86_64/module/other.ko.zst"
+on $h 'sudo systemctl start desk.service && systemctl --user start desk.service && sudo install -d -o desk /srv/desk-data && echo setting=2 | sudo tee /etc/desk.conf >/dev/null' || fail "the desk services did not start"
+step "remove a package: the audit offers what it left"
 scenario $h '{ features.home.enable = true; claims.other.home = [ ".bash_history" ]; }'
 apply $h >/dev/null || fail "apply failed"
 out=$(pacnix $h audit)
 echo "$out"
-audit_has "$out" 'Unclaimed home path' /home/arch/.bash_history && fail "the audit lists a claimed bash file"
+for l in 'Unowned directory: /var/lib/desk-rule (a tmpfiles rule in /usr/lib/tmpfiles.d/desk.conf of removed package desk)' \
+	'Unowned directory: /var/lib/desk-state (the StateDirectory of unit desk.service of removed package desk)' \
+	'Unowned directory: /srv/desk-data (the owner is user desk of removed package desk)' \
+	'File .pacsave: /etc/desk.conf.pacsave (the saved copy of /etc/desk.conf of removed package desk)' \
+	'Unclaimed home path: /home/arch/.cache/desk-cache (the CacheDirectory of unit desk.service of removed package desk)' \
+	'Unclaimed home path: /home/arch/.desk-tool (the name is the same as program or desktop ID desk-tool of removed package desk)' \
+	'Unclaimed home path: /home/arch/.var/app/org.pacnix.Desk (the name is the same as program or desktop ID org.pacnix.Desk of removed package desk)'; do
+	grep -E '^ *[0-9]+  ' <<<"$out" | grep -qF -- "  $l" || fail "the audit does not offer the leftover: $l"
+done
+grep -qE '^ *[0-9]+  .*/srv/pacnix' <<<"$out" && fail "the audit offers a path below a directory that an installed package owns"
+pacnix $h audit <<<a >/dev/null || fail "audit with the answer a failed"
+refute $h 'test -e /var/lib/desk-rule || test -e /var/lib/desk-state || test -e /srv/desk-data || test -e /etc/desk.conf.pacsave || test -e ~/.cache/desk-cache || test -e ~/.desk-tool' "a leftover of the removed package stays"
+grep -q 'of removed package desk' <<<"$(pacnix $h audit)" && fail "the audit shows a leftover of desk after the deletion"
+check $h '! sudo jq -e "has(\"desk\")" /var/lib/pacnix/removed.json' "the record of desk stays after its leftovers went"
+grep -q '/home/arch/.bash_history' <<<"$out" && fail "the audit lists a claimed bash file"
 matches "$out" '/home/arch/.var/app/org.demo/cache \(claimed by feature other in generation [0-9]+; the feature no longer claims it\)' || fail "the audit does not show the path that feature other no longer claims"
 audit_has "$out" 'Unclaimed home path' /home/arch/.var && fail "the audit shows ~/.var as one entry"
 pass

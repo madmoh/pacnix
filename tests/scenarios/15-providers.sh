@@ -35,11 +35,12 @@ apply $h >/dev/null || fail "the repository package did not install"
 check $h 'pacman -Qqd recode' "the repository package did not install recode as a dependency"
 scenario $h '{ packages.local.fortune-local = ./packages/fortune-local; packages.providers.fortune-mod = "fortune-local"; }'
 out=$(plan $h) || { echo "$out"; fail "the replacement plan failed"; }
-has "$out" 'Remove package fortune-mod (apply asks first)' || { echo "$out"; fail "the plan misses the package that leaves"; }
+has "$out" 'Remove package fortune-mod' || { echo "$out"; fail "the plan misses the package that leaves"; }
 has "$out" 'Remove package recode' && { echo "$out"; fail "the plan removes a dependency of the replacement"; }
 out=$(apply $h) || { echo "$out"; fail "the replacement did not finish in one apply"; }
 has "$out" 'package removed: fortune-mod' || { echo "$out"; fail "the transaction did not remove the old package"; }
 refute $h 'pacman -Qq | grep -Fxq fortune-mod' "the old package is still installed"
+check $h 'sudo jq -e "has(\"fortune-mod\")" /var/lib/pacnix/removed.json' "the pacman hook did not record the package that the conflict removed"
 check $h 'pacman -Qqe fortune-local && pacman -Qqd recode' "the replacement or its dependency is missing"
 empty_plan $h
 pass

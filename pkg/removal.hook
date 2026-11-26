@@ -1,0 +1,12 @@
+# Before pacman removes packages, also for a conflict or a replacement,
+# pacnix records what they can leave, for pacnix audit.
+[Trigger]
+Operation = Remove
+Type = Package
+Target = *
+
+[Action]
+Description = Recording the paths that the removed packages can leave...
+When = PreTransaction
+Exec = /usr/bin/pacnix record-removal
+NeedsTargets

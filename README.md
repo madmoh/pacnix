@@ -57,11 +57,11 @@ cat >/etc/pacnix/host.nix <<EOF
   };
 }
 EOF
-pacnix plan
+pacnix apply --no-upgrade --no-config
 pacnix apply
 ```
 
-`pacnix plan` shows each change and changes nothing. Change the configuration until the plan shows only the changes that you want, then run `pacnix apply`. Keep the configuration in a Git repository, for example to use it on a different host. When a declared file replaces a file that pacnix did not write, also a file of a package, pacnix keeps the original file in `/var/lib/pacnix/originals`, and the plan line tells this. A declared file that has the declared content already is no change. When you remove the declaration, pacnix puts the original file back. A declared user that exists keeps its password and its home directory. If you declare `/etc/pacman.conf`, keep the section `[pacnix]` in it.
+`pacnix apply --no-upgrade --no-config` shows the plan and changes nothing. Change the configuration until the plan shows only the changes that you want, then run `pacnix apply`. Keep the configuration in a Git repository, for example to use it on a different host. When a declared file replaces a file that pacnix did not write, also a file of a package, pacnix keeps the original file in `/var/lib/pacnix/originals`, and the plan line tells this. A declared file that has the declared content already is no change. When you remove the declaration, pacnix puts the original file back. A declared user that exists keeps its password and its home directory. If you declare `/etc/pacman.conf`, keep the section `[pacnix]` in it.
 
 The first apply builds and installs the AUR and local packages, and activates the home configurations. The builds can take a long time. When a step gives no output for 60 s, pacnix writes a line that tells that the step continues. A download shows the packages and MiB that arrived every 30 s, and tells when no data arrived for a minute.
 
@@ -136,11 +136,11 @@ Arch Linux does not support [partial upgrades](https://wiki.archlinux.org/title/
 
 When two declared packages conflict, pacnix refuses the plan. `pacnix apply` does not remove a package because of a conflict. If an upgrade needs such a removal, pacman stops, and you do the steps in the [Arch Linux news](https://archlinux.org/news/).
 
-`pacnix apply` upgrades the system and then applies the configuration. The system upgrade runs `pacman -Syu` and builds the AUR packages again when necessary. To apply the configuration installs and removes the declared packages and makes the other changes. `pacnix apply --config-only` does not upgrade the system. It still downloads and builds the packages that the configuration adds. `pacnix apply --upgrade-only` upgrades the system with the configuration of the last apply and does not read the flake.
+`pacnix apply` shows the plan, upgrades the system and then applies the configuration. The system upgrade runs `pacman -Syu` and builds the AUR packages again when necessary. To apply the configuration installs and removes the declared packages and makes the other changes. `pacnix apply --no-upgrade` does not upgrade the system. It still downloads and builds the packages that the configuration adds. `pacnix apply --no-config` upgrades the system with the configuration of the last apply. `--no-plan` does not show the plan.
 
-Each AUR user can change an AUR package. At the first build of an AUR package, pacnix records its maintainer, its co-maintainers and its AUR dependencies in `/var/lib/pacnix`, without a question. When a later build shows a different maintainer or co-maintainer, or a new AUR dependency, pacnix asks before it changes the system. To see the changes of a PKGBUILD before the build, run `pacnix plan` and read the PKGBUILD on the [AUR](https://aur.archlinux.org/).
+Each AUR user can change an AUR package. At the first build of an AUR package, pacnix records its maintainer, its co-maintainers and its AUR dependencies in `/var/lib/pacnix`, without a question. When a later build shows a different maintainer or co-maintainer, or a new AUR dependency, `apply` shows a notice and continues. `pacnix audit` shows the notices of the last 30 days. To see the changes of a PKGBUILD before the build, run `pacnix apply --no-upgrade --no-config` and read the PKGBUILD on the [AUR](https://aur.archlinux.org/).
 
-pacnix downloads the packages into the pacman cache before the transaction. If a mirror does not have a package version of the sync databases, the databases are old: run `pacnix apply` without `--config-only`.
+pacnix downloads the packages into the pacman cache before the transaction. If a mirror does not have a package version of the sync databases, the databases are old: run `pacnix apply` without `--no-upgrade`.
 
 ### Files
 
@@ -173,7 +173,7 @@ Directories are files in [tmpfiles.d](https://man.archlinux.org/man/tmpfiles.d.5
 | `users.users.<name>.description` | The full name (GECOS field). |
 | `users.groups.<name>.gid` | A group, and the group ID of a new group. |
 
-The configuration contains no passwords. Before it changes the system, `pacnix apply` asks for the password of each account that it creates, and gives it to [chpasswd](https://man.archlinux.org/man/chpasswd.8). pacnix does not keep the password. With `--yes` or without a terminal, the new account has no password, and the summary tells you to set it with `passwd`. When you remove the declaration of an account that pacnix created, pacnix deletes the account with `userdel`. The home directory stays. pacnix does not delete an account that it did not create.
+The configuration contains no passwords. Before it changes the system, `pacnix apply` asks for the password of each account that it creates, and gives it to [chpasswd](https://man.archlinux.org/man/chpasswd.8). pacnix does not keep the password. Without a terminal, the new account has no password, and the summary tells you to set it with `passwd`. When you remove the declaration of an account that pacnix created, pacnix deletes the account with `userdel`. The home directory stays. pacnix does not delete an account that it did not create.
 
 ### File systems and swap
 
@@ -221,7 +221,7 @@ pacnix creates the keys in `/var/lib/sbctl` when they are missing, and signs sys
 Do these steps in the firmware setup. The summary of the apply tells the next step:
 
 1. Set Secure Boot to custom mode, and reset it to Setup Mode. This deletes the factory keys.
-2. Run `pacnix apply` in a terminal. It enrolls the keys of this host. With `recoveryKey`, it asks for the current passphrase of each device and shows the recovery key one time, in a separate block. Write down the recovery key, then type `written` to continue. `--yes` does not skip this step. If the input ends before `written`, `apply` stops and the key stays enrolled: if you do not have the key, remove it with `systemd-cryptenroll --wipe-slot=recovery`, then run `pacnix apply` to get a new key. When sbctl refuses the keys, the firmware stays in Setup Mode, and pacnix tells the correction from the message of sbctl: for example, add `tpm-eventlog` or `microsoft` to `dbAdditions` when the firmware loads option ROMs, or remove `tpm-eventlog` when the TPM event log has no option ROM.
+2. Run `pacnix apply` in a terminal. It enrolls the keys of this host. With `recoveryKey`, it asks for the current passphrase of each device and shows the recovery key one time, in a separate block. Write down the recovery key, then type `written` to continue. If the input ends before `written`, `apply` stops and the key stays enrolled: if you do not have the key, remove it with `systemd-cryptenroll --wipe-slot=recovery`, then run `pacnix apply` to get a new key. When sbctl refuses the keys, the firmware stays in Setup Mode, and pacnix tells the correction from the message of sbctl: for example, add `tpm-eventlog` or `microsoft` to `dbAdditions` when the firmware loads option ROMs, or remove `tpm-eventlog` when the TPM event log has no option ROM.
 3. Reboot, and turn on Secure Boot if it is off.
 4. Run `pacnix apply` in a terminal. It asks for the current passphrase of each device and for a new PIN, then enrolls the TPM2 key.
 
@@ -261,9 +261,9 @@ Declare the input that an application reads:
 - dconf keys
 - drop-ins
 
-Do not declare the data that an application writes, for example databases, tokens and caches. Add these paths to `claims` so that the audit does not show them. When an apply removes a feature from `claims`, the question of the run shows the paths of that feature that exist. Answer `y` to delete them, or `k` to keep them: the audit then shows them with their feature. pacnix does not delete a path that a package owns, or that a declared file or a different claim includes.
+Do not declare the data that an application writes, for example databases, tokens and caches. Add these paths to `claims` so that the audit does not show them. When an apply removes a feature from `claims`, the paths of that feature stay, and `pacnix audit` shows them as leftovers with a number. Before an apply removes a package, pacnix records what the package can leave: the paths of its [tmpfiles](https://man.archlinux.org/man/tmpfiles.d.5) rules, the `StateDirectory=`, `CacheDirectory=`, `LogsDirectory=` and `ConfigurationDirectory=` of its system and user units ([systemd.exec](https://man.archlinux.org/man/systemd.exec.5)), the system users of its [sysusers](https://man.archlinux.org/man/sysusers.d.5) files, its files in `/etc` and the names of the package, its programs and its desktop IDs. The audit shows the paths that this record explains as leftovers too, with the evidence, for example `(the owner is user postgres of removed package postgresql)`. When no path agrees with the record of a package, the audit deletes the record. The audit then asks which leftovers to delete: `a` for all, Enter or `n` for none, or the numbers and ranges, for example `1 3-5`. The leftovers that stay show again in the next audit. pacnix does not delete a path that a package owns, or that a declared file or a different claim includes.
 
-`audit.ignore` contains glob patterns of paths that the audit does not show, for example `[ "/var/lib/docker/**" ]`. Use it for paths that no feature owns and that pacnix must never delete. `claims` groups the paths by feature: when the feature goes, pacnix asks to delete them.
+`audit.ignore` contains glob patterns of paths that the audit does not show, for example `[ "/var/lib/docker/**" ]`. Use it for paths that no feature owns and that pacnix must never delete. `claims` groups the paths by feature: when the feature goes, the audit offers to delete them.
 
 pacnix does not manage these items:
 
@@ -277,16 +277,15 @@ Run pacnix as your user. pacnix starts itself again with `sudo`, which asks for 
 
 | Command | Function |
 |---|---|
-| `pacnix plan` | Shows each change that `apply` will do. It does not change the system. |
-| `pacnix apply` | Upgrades the system, then makes it agree with the configuration. It also shows the Arch Linux news since the last upgrade. With `--config-only`, it does not upgrade. With `--upgrade-only`, it only upgrades. |
+| `pacnix apply` | Shows the plan, upgrades the system, then makes it agree with the configuration. It also shows the Arch Linux news since the last upgrade. `--no-plan`, `--no-upgrade` and `--no-config` skip a stage. With `--no-upgrade --no-config`, it shows the plan and changes nothing. |
 | `pacnix uninstall` | Removes pacnix, aurutils and Nix with pacman, and deletes the data, users and groups that they made. The declared files, units and packages stay. The Home Manager files become copies outside the Nix store. |
-| `pacnix audit` | Shows the state that the configuration does not explain: files without an owner, changed package files, `.pacnew` files, explicitly installed packages that are not declared, enabled units that are not declared and that no vendor preset enables, and paths in home directories that no claim explains. It shows first if a reboot is necessary and the install notes of the last change. Then it shows the number of items, the items of each kind, and what to do. The last line shows the number of items of each kind. |
+| `pacnix audit` | Shows the state that the configuration does not explain: files without an owner, changed package files, `.pacnew` files, explicitly installed packages that are not declared, enabled units that are not declared and that no vendor preset enables, and paths in home directories that no claim explains. It shows first if a reboot is necessary, the install notes of the last change and the notices of the last 30 days. Then it shows the number of items, the items of each kind, and what to do. Last, it shows the numbered leftovers of removed packages and features and asks which to delete. |
 
-`apply` asks one question at most, before they change the system, and only for items that the configuration does not show: package removals, new maintainers or new AUR dependencies of AUR packages, the Arch Linux news and the data of removed features. `--yes` accepts the items. Without a terminal, pacnix stops if there is a question and you do not give `--yes`.
+`apply` asks only for the secrets that the changes need, before it changes the system: the passwords of new accounts and the passphrases and PINs of LUKS devices. The configuration is the approval of each change. The changes of AUR packages and the Arch Linux news show as notices at the end of `apply`, and in `pacnix audit` for 30 days. `uninstall` asks before it changes the system. As with pacman, the answers of `audit` and `uninstall` come from the standard input, also without a terminal.
 
 Each line that pacnix writes breaks between words before column 80. A line that starts with `pacnix:` is a step or a result; the indented lines under it are its items. An empty line separates the sections. When the standard output is a terminal and [`NO_COLOR`](https://no-color.org/) is not set, the names of items show in bold, errors in red, and a download or a long step shows one live progress line. Without a terminal, the output has the same lines without colors, and a download shows its progress every 30 s.
 
-`plan` shows the packages that the local sync databases have in a newer version, each change with its item, the declared items that need no change and what the removal of their declaration does, and a last line with the number of changes. `apply` refreshes the sync databases first, thus it can upgrade more packages than `plan` shows. A line marked `apply asks first` is an item of the question of `apply`. A change of a file shows its mode and owner when they change, and the target of a link. The Home Manager support files are the files that Home Manager writes also for an empty home configuration, for example `~/.cache/.keep`: `plan` and `apply` show only their number.
+The plan shows each change with its item. With `--no-upgrade`, it also shows the packages that the local sync databases have in a newer version. Without `--no-upgrade`, `apply` refreshes the sync databases first, thus it can upgrade more packages than the plan shows. A change of a file shows its mode and owner when they change, and the target of a link. The Home Manager support files are the files that Home Manager writes also for an empty home configuration, for example `~/.cache/.keep`: the plan shows only their number.
 
 `apply` shows each step with its items when the step starts. The output of pacman, makepkg and the other commands shows only when a command fails, with its last lines. A step that changes nothing, for example the evaluation, shows only when it takes 2 s or more. The host and the flake show only when you give `--host` or `--flake` with a value that is not the default. At the end, `apply` shows the items that you must know: if this run made a reboot necessary (the kernel that runs is not installed, a boot image changed, or a DKMS module was built for a kernel that does not run), the new messages of the install scripts of the declared packages, and the names of other packages with new messages (`pacnix audit` shows all messages), and new `.pacnew` files. The last line shows the result, the changes and the exit status. For each kind of change, it names the items when there are three or fewer, and else it shows their number and the declared packages among them:
 
@@ -310,9 +309,9 @@ A failed step that changes only one item does not stop `apply`, as with [`nix bu
 - a `systemctl` command that starts, stops, restarts, masks or unmasks a unit
 - the activation of a home configuration
 
-pacnix shows the reason of each failed step when it fails, and applies the rest of the configuration. The last line shows the number of failed steps, and the exit status is 4. The next `apply` does the failed steps again, and `plan` shows them. A failed `systemctl` command runs again only while the configuration wants its result: for example, when you remove a unit from `units.enable`, pacnix does not start it again. A failure in the network stops a step only after the last attempt. Each other failure, for example an error in the configuration, a refused plan or a pacman transaction that fails, stops pacnix with the reason and the exit status 1.
+pacnix shows the reason of each failed step when it fails, and applies the rest of the configuration. The last line shows the number of failed steps, and the exit status is 4. The next `apply` does the failed steps again, and its plan shows them. A failed `systemctl` command runs again only while the configuration wants its result: for example, when you remove a unit from `units.enable`, pacnix does not start it again. A failure in the network stops a step only after the last attempt. Each other failure, for example an error in the configuration, a refused plan or a pacman transaction that fails, stops pacnix with the reason and the exit status 1.
 
-pacnix refuses to remove `base`, `pacman`, `nix`, `pacnix` and the kernel that runs, unless you give `--allow-protected-removal`. Each apply keeps a generation in the Nix profile `/nix/var/nix/profiles/pacnix`.
+`apply` never removes pacnix and the packages that it needs: `pacnix uninstall` does. Each apply keeps a generation in the Nix profile `/nix/var/nix/profiles/pacnix`.
 
 ## See also
 

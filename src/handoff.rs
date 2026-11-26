@@ -1,12 +1,12 @@
 //! The handoff to the new pacnix after a system upgrade that replaced the
 //! running one: the new executable continues the same apply with the same
-//! arguments, the lock, the answers and the secrets of the run. The state goes
+//! arguments, the lock and the secrets of the run. The state goes
 //! in a sealed anonymous file whose descriptor the new process gets; only the
 //! number of the descriptor is in the environment.
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::io::{Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
@@ -41,8 +41,6 @@ struct State {
     last_attempt: bool,
     serial: bool,
     closed: bool,
-    delete: bool,
-    approved: BTreeSet<String>,
     passwords: BTreeMap<String, String>,
     secrets: BTreeMap<String, (String, String)>,
     recovered: Vec<String>,
@@ -133,8 +131,6 @@ fn exec() -> Result<()> {
         last_attempt: crate::FINAL.load(Relaxed),
         serial: crate::packages::SERIAL.load(Relaxed),
         closed: crate::closed(),
-        delete: crate::DELETE.load(Relaxed),
-        approved: crate::APPROVED.lock().unwrap().clone(),
         passwords: crate::users::PASSWORDS.lock().unwrap().clone(),
         secrets: crate::secure::SECRETS.lock().unwrap().clone(),
         recovered: crate::secure::RECOVERED.lock().unwrap().clone(),
@@ -224,8 +220,6 @@ fn restore(fd: Option<RawFd>) -> Result<()> {
     if s.closed {
         crate::close();
     }
-    crate::DELETE.store(s.delete, Relaxed);
-    *crate::APPROVED.lock().unwrap() = s.approved;
     *crate::users::PASSWORDS.lock().unwrap() = s.passwords;
     *crate::secure::SECRETS.lock().unwrap() = s.secrets;
     *crate::secure::RECOVERED.lock().unwrap() = s.recovered;

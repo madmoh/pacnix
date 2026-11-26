@@ -12,7 +12,7 @@ on $h 'sudo pacman -Sw --noconfirm biber >/dev/null'
 step "measure"
 pac_syu=$(t on $h 'sudo pacman -Syu --noconfirm')
 noop=$(t apply $h)
-config_only=$(t apply $h --config-only)
+no_upgrade=$(t apply $h --no-upgrade)
 plan_s=$(t plan $h)
 pac_add=$(t on $h 'sudo pacman -S --noconfirm biber')
 pac_rm=$(t on $h 'sudo pacman -Rns --noconfirm biber')
@@ -20,7 +20,7 @@ scenario $h '{ packages.repo = [ "biber" ]; }'
 nix_add=$(t apply $h)
 scenario $h ''
 nix_rm=$(t apply $h)
-printf 'no-op: pacman -Syu %.1f s, pacnix apply %.1f s, pacnix apply --config-only %.1f s, plan %.1f s\n' "$pac_syu" "$noop" "$config_only" "$plan_s"
+printf 'no-op: pacman -Syu %.1f s, pacnix apply %.1f s, pacnix apply --no-upgrade %.1f s, plan (apply --no-upgrade --no-config) %.1f s\n' "$pac_syu" "$noop" "$no_upgrade" "$plan_s"
 printf 'add biber: pacman %.1f s, pacnix apply %.1f s\n' "$pac_add" "$nix_add"
 printf 'remove biber: pacman %.1f s, pacnix apply %.1f s\n' "$pac_rm" "$nix_rm"
 pass

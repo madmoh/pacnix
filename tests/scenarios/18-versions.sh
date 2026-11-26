@@ -3,7 +3,7 @@
 # the Arch Linux Archive, pacnix apply keeps it and corrects a manual
 # upgrade, and an AUR package at a version that the AUR does not have is refused.
 # pacnix apply upgrades an AUR package without a question and without a diff
-# of its files. A new maintainer of a built AUR package needs a confirmation.
+# of its files. A new maintainer of a built AUR package is a notice one time.
 source "$(dirname "$0")/../lib.sh"
 fresh $h
 cache=$(cache_list $h)
@@ -19,7 +19,7 @@ apply $h >/dev/null || fail "apply failed"
 check $h "test \"\$(pacman -Q tree)\" = 'tree $old'" "tree is not at the pinned version"
 empty_plan $h
 step "pacnix apply keeps the pinned version"
-pacnix $h apply --yes >/dev/null || fail "upgrade failed"
+pacnix $h apply >/dev/null || fail "upgrade failed"
 check $h "test \"\$(pacman -Q tree)\" = 'tree $old'" "the upgrade changed the pinned version"
 step "apply corrects a manual upgrade"
 cache_kept $h "$cache"
@@ -46,12 +46,11 @@ scenario $h '{ packages.aur = [ "downgrade" ]; }'
 out=$(pacnix $h apply 2>&1) || { echo "$out" | tail -5; fail "the upgrade of the AUR package failed or asked"; }
 grep -q '^+pkgname=downgrade' <<<"$out" && { echo "$out" | tail -5; fail "the upgrade shows a diff of the package"; }
 check $h "test \"\$(pacman -Q downgrade)\" != '$old'" "the AUR package is not upgraded"
-step "a new maintainer of a built AUR package needs a confirmation"
+step "a new maintainer of a built AUR package is a notice one time"
 on $h "sudo jq '.downgrade.maintainer = \"someone-else\"' /var/lib/pacnix/aur.json | sudo tee /var/lib/pacnix/aur.json.new >/dev/null && sudo mv /var/lib/pacnix/aur.json.new /var/lib/pacnix/aur.json && sudo jq 'del(.downgrade)' /var/lib/pacnix/pruned.json | sudo tee /var/lib/pacnix/pruned.json.new >/dev/null && sudo mv /var/lib/pacnix/pruned.json.new /var/lib/pacnix/pruned.json"
-out=$(pacnix $h apply 2>&1) && fail "apply built a package with a new maintainer without a confirmation"
-matches "$out" 'The AUR package downgrade has new maintainers: .*, before: someone-else \(co-maintainers: .*\)\.' || { echo "$out" | tail -5; fail "apply does not show the new maintainer"; }
-has "$out" '• Error: these items need a confirmation. Give --yes to continue without a terminal' || fail "apply without a terminal does not ask for --yes"
-apply $h >/dev/null || fail "apply --yes failed"
-out=$(pacnix $h apply 2>&1) || { echo "$out" | tail -5; fail "apply asks again after the confirmation"; }
+out=$(apply $h) || { echo "$out" | tail -5; fail "apply failed"; }
+matches "$out" '• The AUR package downgrade has new maintainers: .*, before: someone-else \(co-maintainers: .*\)\.' || { echo "$out" | tail -5; fail "apply does not show the new maintainer"; }
+out=$(apply $h) || { echo "$out" | tail -5; fail "the next apply failed"; }
+grep -q 'new maintainers' <<<"$out" && { echo "$out" | tail -5; fail "the next apply shows the notice again"; }
 cache_kept $h "$cache"
 pass

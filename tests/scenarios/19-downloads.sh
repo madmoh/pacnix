@@ -5,7 +5,7 @@
 # the downloaded files, and the pacman.conf of the user does not change. A
 # mirror that stays down stops pacnix after four attempts in about two
 # minutes. A mirror without a file of the sync databases (404) stops pacnix at
-# once and tells to run pacnix apply without --config-only. A no-op apply
+# once and tells to run pacnix apply without --no-upgrade. A no-op apply
 # downloads nothing. The package files stay in /var/lib/pacnix/cache after a
 # failed step, for the next apply, and leave after an apply without a failure;
 # the files in /var/cache/pacman/pkg do not change.
@@ -58,10 +58,10 @@ echo "stopped after $(($(date +%s) - s)) s"
 has "$out" '• Attempt 3 of 4 failed in the network' || { echo "$out" | tail; fail "apply does not try three times again"; }
 matches "$out" '• Error: pacman -S.*failed with exit status: 1. Its last output:' || fail "the error does not show the reason"
 
-step "a mirror without the package of the sync databases: run pacnix apply without --config-only"
+step "a mirror without the package of the sync databases: run pacnix apply without --no-upgrade"
 on $h 'echo "Server = https://fastly.mirror.pkgbuild.com/\$repo/os/\$arch/pacnix-missing" | sudo tee /etc/pacman.d/mirrorlist >/dev/null'
-out=$(apply $h --config-only) && fail "apply succeeded without the package files"
-has "$out" '• Error: the mirror does not have a package of the sync databases, thus the databases or the mirror are old. Run pacnix apply without --config-only, or use a different mirror: ' || { echo "$out" | tail; fail "the error does not tell to run pacnix apply without --config-only"; }
+out=$(apply $h --no-upgrade) && fail "apply succeeded without the package files"
+has "$out" '• Error: the mirror does not have a package of the sync databases, thus the databases or the mirror are old. Run pacnix apply without --no-upgrade, or use a different mirror: ' || { echo "$out" | tail; fail "the error does not tell to run pacnix apply without --no-upgrade"; }
 grep -q 'Attempt 1 of' <<<"$out" && fail "pacnix tried a missing file again"
 on $h 'sudo cp /var/tmp/mirrorlist /etc/pacman.d/mirrorlist'
 

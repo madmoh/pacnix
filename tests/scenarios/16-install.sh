@@ -8,7 +8,7 @@
 # disk boots with UEFI, without cloud-init. The user clones the configuration
 # (a repository on the disk takes the role of GitHub), and the plan shows that
 # pacnix keeps the originals of the files that it replaces. pacnix apply, as
-# the user without --yes, asks nothing. The local package slow first fails
+# the user, asks nothing. The local package slow first fails
 # with a message that has "timed out": pacnix shows the reason, does not try
 # again, applies the rest of the configuration and exits with status 4, and
 # the download stays for the next attempt. After
@@ -59,7 +59,7 @@ pacman -S --noconfirm pacnix >/dev/null 2>&1'
 sudo ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf" || fail "the installation by hand failed"
 step "pacnix apply in arch-chroot refuses"
 before=$(on live 'sudo find /mnt -xdev -newer /mnt/etc/hostname 2>/dev/null | grep -v "^/mnt/\(var/log\|proc\|sys\|dev\|run\|tmp\)" | sort')
-out=$(on live 'sudo arch-chroot /mnt pacnix apply --yes 2>&1') && fail "pacnix apply ran in arch-chroot"
+out=$(on live 'sudo arch-chroot /mnt pacnix apply 2>&1') && fail "pacnix apply ran in arch-chroot"
 has "$out" '• Error: pacnix runs only on the booted system. Boot the installed system, then run pacnix again' || { echo "$out"; fail "the refusal does not tell to boot"; }
 [[ $before == "$(on live 'sudo find /mnt -xdev -newer /mnt/etc/hostname 2>/dev/null | grep -v "^/mnt/\(var/log\|proc\|sys\|dev\|run\|tmp\)" | sort')" ]] || fail "the refused apply changed the system"
 # pacstrap -K starts a gpg-agent for the new keyring, which keeps /mnt busy.

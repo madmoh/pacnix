@@ -6,7 +6,7 @@ source "$(dirname "$0")/../lib.sh"
 step "plan the package lists of a workstation"
 fresh $h
 s=$(date +%s)
-out=$(pacnix $h plan --host workstation) || { echo "$out" | tail; fail "plan failed"; }
+out=$(pacnix $h apply --no-upgrade --no-config --host workstation) || { echo "$out" | tail; fail "plan failed"; }
 echo "plan took $(($(date +%s) - s)) s"
 grep 'unknown package' <<<"$out" && fail "the plan has unknown packages"
 echo "AUR builds: $(changes "$out" | grep -c '^Build AUR package'), packages to install: $(changes "$out" | grep -c '^Install package')"

@@ -1,5 +1,5 @@
 use crate::generation::{Generation, STATE};
-use crate::{Opts, cmd, report, run_cmd};
+use crate::{cmd, report, run_cmd};
 use anyhow::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, Write};
@@ -10,7 +10,7 @@ use std::sync::Mutex;
 /// Only these go when their declaration goes.
 const CREATED: &str = "/var/lib/pacnix/accounts";
 
-/// The passwords of the new accounts, from the question of the apply. They stay in memory.
+/// The passwords of the new accounts, from the start of the apply. They stay in memory.
 pub static PASSWORDS: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
 #[derive(Default)]
@@ -121,10 +121,10 @@ pub fn plan(g: &Generation, old: &Generation) -> Result<Plan> {
 }
 
 /// Asks for the password of each account that the apply creates, at the
-/// question of the apply, before any change. Without a terminal, or with
-/// --yes, the account has no password, and the summary says so.
-pub fn ask_passwords(plan: &Plan, opts: &Opts) -> Result<()> {
-    if opts.yes || !std::io::stdin().is_terminal() {
+/// start of the apply, before any change. Without a terminal, the account has
+/// no password, and the summary says so.
+pub fn ask_passwords(plan: &Plan) -> Result<()> {
+    if !std::io::stdin().is_terminal() {
         return Ok(());
     }
     let mut passwords = PASSWORDS.lock().unwrap();

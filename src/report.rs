@@ -121,7 +121,13 @@ struct Notes {
     last: BTreeMap<String, String>,
     /// The message of each install note without a check that showed.
     manual: BTreeMap<String, String>,
+    /// The notices of the applies, with their time, for the audit: the changes
+    /// of AUR packages and the Arch Linux news.
+    notices: Vec<(i64, String)>,
 }
+
+/// How long the audit shows a notice, in seconds: 30 days.
+const NOTICE_AGE: i64 = 30 * 24 * 3600;
 
 /// The install notes of the configuration that this apply activates.
 struct ManualNotes {
@@ -581,7 +587,7 @@ pub fn heartbeat(command: &str, minutes: u64, meter: &str) -> bool {
     true
 }
 
-/// The install notes and the new .pacnew files in the part of the pacman log
+/// The install notes and the new .pacnew and .pacsave files in the part of the pacman log
 /// that the run wrote. pacman logs the output of a scriptlet after the line of
 /// its package, and the output of a hook after the line that runs the hook.
 /// Hook output, for example of DKMS and mkinitcpio, is not a note.
@@ -605,7 +611,9 @@ fn log_segment(offset: u64) -> (BTreeMap<String, String>, Vec<String>) {
                 .find_map(|p| msg.strip_prefix(p))
                 .and_then(|m| m.split_whitespace().next())
                 .map(String::from);
-            if let Some(file) = msg.strip_prefix("warning: ").and_then(|m| m.split_once(" installed as ")).map(|(_, f)| f) {
+            // A removal saves the edited configuration files of a package as .pacsave.
+            let warning = msg.strip_prefix("warning: ");
+            if let Some(file) = warning.and_then(|m| m.split_once(" installed as ").or_else(|| m.split_once(" saved as "))).map(|(_, f)| f) {
                 pacnew.push(file.to_string());
             }
         }
@@ -614,7 +622,7 @@ fn log_segment(offset: u64) -> (BTreeMap<String, String>, Vec<String>) {
 }
 
 /// Prints what the user must know after the run: a necessary reboot, new or
-/// changed install notes and new .pacnew files. The notes stay for the audit.
+/// changed install notes and new .pacnew and .pacsave files. The notes stay for the audit.
 pub fn summary() {
     let Some((_, _, offset, before)) = RUN.lock().unwrap().clone() else { return };
     let (notes, pacnew) = log_segment(offset);
@@ -666,10 +674,33 @@ pub fn summary() {
         }
     }
     for f in &pacnew {
-        say!("• New file {f}: merge it with {}.", f.trim_end_matches(".pacnew"));
+        match f.strip_suffix(".pacsave") {
+            Some(original) => say!("• Saved file {f}: the edits of {original} of a removed package."),
+            None => say!("• New file {f}: merge it with {}.", f.trim_end_matches(".pacnew")),
+        }
     }
     for l in LAST.lock().unwrap().iter() {
         say!("{l}");
+    }
+}
+
+/// Shows each new notice and keeps it for the audit at once, so that a
+/// handoff or a failure later in the run does not lose it.
+pub fn notices(items: &[String]) {
+    let mut saved: Notes = std::fs::read(NOTES).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    let new: Vec<&String> = items.iter().filter(|i| !saved.notices.iter().any(|(_, n)| n == *i)).collect();
+    if new.is_empty() {
+        return;
+    }
+    for i in &new {
+        say!("• {i}");
+    }
+    saved.notices.retain(|(t, _)| now - t < NOTICE_AGE);
+    saved.notices.extend(new.into_iter().map(|i| (now, i.clone())));
+    let tmp = format!("{NOTES}.new");
+    if let Ok(b) = serde_json::to_vec(&saved) {
+        let _ = std::fs::write(&tmp, b).and_then(|_| std::fs::rename(&tmp, NOTES));
     }
 }
 
@@ -678,6 +709,8 @@ pub fn audit(report: &mut Vec<String>) {
     report.extend(reboot_reasons().into_iter().map(|r| format!("Reboot necessary: {r}")));
     let saved: Notes = std::fs::read(NOTES).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     report.extend(saved.last.iter().map(|(p, n)| format!("Install note of the last change: {p}\n  {}", n.trim_end().replace('\n', "\n  "))));
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    report.extend(saved.notices.iter().filter(|(t, _)| now - t < NOTICE_AGE).map(|(_, n)| n.clone()));
 }
 
 fn boot_time() -> i64 {

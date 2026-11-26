@@ -1,9 +1,128 @@
 use crate::generation::{Generation, build, history};
 use crate::{Ctx, cmd, files, output, output_any};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{IsTerminal, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+
+/// What the removed packages can leave: the pacman hook pkg/removal.hook
+/// records it from the files of each package before pacman removes it, and the
+/// audit shows the paths that it explains as leftovers.
+const REMOVED: &str = "/var/lib/pacnix/removed.json";
+
+/// The evidence of one removed package: its name, programs and desktop IDs;
+/// the system and home paths that its tmpfiles rules, units and /etc files
+/// give, with a note; and the system users of its sysusers files.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct Removed {
+    names: BTreeSet<String>,
+    paths: BTreeMap<String, String>,
+    home: BTreeMap<String, String>,
+    users: BTreeMap<u32, String>,
+}
+
+type Records = BTreeMap<String, Removed>;
+
+fn records() -> Records {
+    std::fs::read(REMOVED).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn save(records: &Records) -> Result<()> {
+    std::fs::create_dir_all(crate::generation::STATE)?;
+    std::fs::write(format!("{REMOVED}.new"), serde_json::to_vec(records)?)?;
+    std::fs::rename(format!("{REMOVED}.new"), REMOVED).context("save the record of the removed packages")
+}
+
+/// The path of a tmpfiles rule that creates it, without specifiers and globs:
+/// a type of these letters, with modifiers.
+fn rule_path(line: &str) -> Option<&str> {
+    let mut w = line.split_whitespace();
+    let (t, p) = (w.next()?, w.next()?);
+    let creates = t.starts_with(['f', 'd', 'D', 'v', 'q', 'Q', 'p', 'L', 'c', 'b', 'C']) && t[1..].chars().all(|c| "+!-=~^?$".contains(c));
+    (creates && p.starts_with('/') && !p.contains(['%', '*', '?', '[', '"', '\'', '\\'])).then(|| p.trim_end_matches('/'))
+}
+
+/// The system users that the sysusers files declare, by name.
+fn sysusers(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().filter_map(|l| {
+        let mut w = l.split_whitespace();
+        (w.next()?.trim_end_matches('!') == "u").then(|| w.next()).flatten()
+    })
+}
+
+/// The system users of /etc/passwd: UID and name.
+fn passwd() -> BTreeMap<u32, String> {
+    let text = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+    text.lines().filter_map(|l| {
+        let f: Vec<&str> = l.split(':').collect();
+        Some((f.get(2)?.parse().ok()?, f[0].to_string()))
+    }).collect()
+}
+
+/// Records what the packages can leave, before pacman removes them.
+pub fn record(packages: &[&str]) -> Result<()> {
+    if packages.is_empty() {
+        return Ok(());
+    }
+    let mut records = records();
+    let users: BTreeMap<String, u32> = passwd().into_iter().map(|(u, n)| (n, u)).collect();
+    let list = output(cmd("pacman", &["-Ql"]).args(packages))?;
+    for (pkg, path) in list.lines().filter_map(|l| l.split_once(' ')) {
+        let r = records.entry(pkg.to_string()).or_default();
+        r.names.insert(pkg.to_string());
+        if let Some(n) = path.strip_prefix("/usr/bin/").filter(|n| !n.is_empty() && !n.contains('/')) {
+            r.names.insert(n.to_string());
+        }
+        if let Some(d) = path.strip_prefix("/usr/share/applications/").and_then(|d| d.strip_suffix(".desktop")) {
+            r.names.insert(d.to_string());
+        }
+        if path.starts_with("/etc/") && !path.ends_with('/') {
+            r.paths.insert(format!("{path}.pacsave"), format!("the saved copy of {path}"));
+        }
+        let unit = path.strip_prefix("/usr/lib/systemd/system/").map(|u| (u, false)).or_else(|| path.strip_prefix("/usr/lib/systemd/user/").map(|u| (u, true)));
+        let reads = path.starts_with("/usr/lib/tmpfiles.d/") || path.starts_with("/usr/lib/sysusers.d/") || unit.is_some_and(|(u, _)| !u.contains('/'));
+        let Some(text) = reads.then(|| std::fs::read_to_string(path).ok()).flatten() else { continue };
+        if path.starts_with("/usr/lib/tmpfiles.d/") {
+            r.paths.extend(text.lines().filter_map(rule_path).map(|p| (p.to_string(), format!("a tmpfiles rule in {path}"))));
+        } else if path.starts_with("/usr/lib/sysusers.d/") {
+            r.users.extend(sysusers(&text).filter_map(|n| Some((*users.get(n)?, n.to_string()))));
+        } else if let Some((unit, user)) = unit {
+            // The directories that systemd makes for a unit: systemd.exec(5).
+            let dynamic = text.lines().any(|l| l.trim().strip_prefix("DynamicUser=").is_some_and(|v| ["yes", "true", "on", "1"].contains(&v)));
+            for (key, value) in text.lines().filter_map(|l| l.trim().split_once('=')) {
+                let base = match (key, user) {
+                    ("StateDirectory", false) => "/var/lib",
+                    ("CacheDirectory", false) => "/var/cache",
+                    ("LogsDirectory", false) => "/var/log",
+                    ("ConfigurationDirectory", false) => "/etc",
+                    ("StateDirectory", true) => ".local/state",
+                    ("CacheDirectory", true) => ".cache",
+                    ("LogsDirectory", true) => ".local/state/log",
+                    ("ConfigurationDirectory", true) => ".config",
+                    _ => continue,
+                };
+                for d in value.split_whitespace().flat_map(|v| v.split(':')).filter(|d| !d.is_empty()) {
+                    let note = format!("the {key} of unit {unit}");
+                    match user {
+                        true => _ = r.home.insert(format!("{base}/{d}"), note),
+                        false => {
+                            if dynamic && base != "/etc" {
+                                r.paths.insert(format!("{base}/private/{d}"), note.clone());
+                            }
+                            r.paths.insert(format!("{base}/{d}"), note);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    save(&records)
+}
 
 const SKIP: &[&str] = &[
     "/proc", "/sys", "/dev", "/run", "/tmp", "/var/tmp", "/home", "/root", "/mnt", "/media", "/lost+found",
@@ -36,6 +155,9 @@ struct Evidence {
     /// The notes of DKMS paths, and the DKMS directories whose entries the audit lists.
     dkms: BTreeMap<String, String>,
     containers: BTreeSet<String>,
+    /// The records of the packages that are not installed, and the names of the records that explain a path.
+    removed: Records,
+    used: RefCell<BTreeSet<String>>,
 }
 
 impl Evidence {
@@ -63,23 +185,29 @@ impl Evidence {
                 file = f.to_string();
                 continue;
             }
-            let mut w = l.split_whitespace();
-            let (Some(t), Some(p)) = (w.next(), w.next()) else { continue };
-            if owned.contains(&file)
-                && t.starts_with(['f', 'd', 'D', 'v', 'q', 'Q', 'p', 'L', 'c', 'b', 'C'])
-                && t[1..].chars().all(|c| "+!-=~^?$".contains(c))
-                && p.starts_with('/')
-                && !p.contains(['%', '*', '?', '[', '"', '\'', '\\'])
-            {
-                rules.entry(p.trim_end_matches('/').to_string()).or_insert_with(|| file.clone());
+            if let Some(p) = rule_path(l).filter(|_| owned.contains(&file)) {
+                rules.entry(p.to_string()).or_insert_with(|| file.clone());
             }
         }
         let (dkms, containers) = dkms(inventory, owned);
+        let names: BTreeSet<String> = inventory.lines().filter_map(|l| l.split_once(' ')).map(|(n, _)| n.to_string()).collect();
+        // A user that an installed package also declares, or that has a different UID now, is no evidence.
+        let shared: BTreeSet<String> = owned.iter().filter(|p| p.starts_with("/usr/lib/sysusers.d/")).filter_map(|p| std::fs::read_to_string(p).ok()).flat_map(|t| sysusers(&t).map(str::to_string).collect::<Vec<_>>()).collect();
+        let users = passwd();
+        let mut removed = records();
+        removed.retain(|p, _| !names.contains(p));
+        // A path that an installed package owns is no leftover, and neither are the paths below it.
+        removed.values_mut().for_each(|r| {
+            r.users.retain(|u, n| *u != 0 && users.get(u) == Some(n) && !shared.contains(n));
+            r.paths.retain(|p, _| !owned.contains(p));
+        });
         Ok(Evidence {
+            removed,
+            used: RefCell::default(),
             dkms,
             containers,
             former,
-            names: inventory.lines().filter_map(|l| l.split_once(' ')).map(|(n, _)| n.to_string()).collect(),
+            names,
             programs: inventory.lines().filter_map(|l| l.split_once(' ')).filter_map(|(n, p)| Some((p.strip_prefix("/usr/bin/")?.to_string(), n.to_string()))).filter(|(p, _)| !p.is_empty() && !p.contains('/')).collect(),
             desktop: desktop.map(str::to_string).collect(),
             rules,
@@ -93,12 +221,24 @@ impl Evidence {
     /// directory without its dot; rel is the path in the home directory.
     fn of(&self, path: &str, rel: Option<&str>) -> (u8, String) {
         let found = self.former.iter().find(|(.., s, h)| match rel {
-            Some(r) => h.is_match(r),
-            None => s.is_match(path),
+            // A path below a former claim is part of the data of that claim.
+            Some(r) => Path::new(r).ancestors().any(|a| h.is_match(a)),
+            None => Path::new(path).ancestors().any(|a| s.is_match(a)),
         });
         if let Some((n, f, kept, ..)) = found {
             let why = if *kept { "the feature no longer claims it" } else { "the feature is no longer enabled" };
             return (0, format!(" (claimed by feature {f} in generation {n}; {why})"));
+        }
+        let owner = std::fs::symlink_metadata(path).ok().map(|m| m.uid());
+        for (pkg, r) in &self.removed {
+            let exact = match rel {
+                Some(rel) => Path::new(rel).ancestors().find_map(|a| r.home.get(a.to_str()?)).cloned(),
+                None => Path::new(path).ancestors().find_map(|a| r.paths.get(a.to_str()?)).cloned(),
+            };
+            if let Some(note) = exact.or_else(|| Some(format!("the owner is user {}", owner.and_then(|u| r.users.get(&u))?))) {
+                self.used.borrow_mut().insert(pkg.clone());
+                return (0, format!(" ({note} of removed package {pkg})"));
+            }
         }
         if let Some(note) = rel.is_none().then(|| self.dkms.get(path)).flatten() {
             return (2, note.clone());
@@ -113,7 +253,14 @@ impl Evidence {
             Some(n) if self.desktop.contains(n) => (2, format!(" (the name is the same as desktop ID {n})")),
             _ => match rel.is_none().then(|| self.rules.get(path)).flatten() {
                 Some(file) => (2, format!(" (a tmpfiles rule in {file} has this path)")),
-                None => (1, String::new()),
+                None => match name.and_then(|n| self.removed.iter().find(|(_, r)| r.names.contains(n)).map(|(p, _)| (n, p))) {
+                    Some((n, p)) => {
+                        self.used.borrow_mut().insert(p.clone());
+                        let what = if n == p { String::new() } else { format!("program or desktop ID {n} of ") };
+                        (0, format!(" (the name is the same as {what}removed package {p})"))
+                    }
+                    None => (1, String::new()),
+                },
             },
         }
     }
@@ -124,7 +271,7 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
     let _stage = crate::report::stage("Checking the system");
     let mut report: Vec<String> = Vec::new();
     // Paths with the rank of their evidence: Evidence::of.
-    let mut paths: Vec<(u8, String)> = Vec::new();
+    let mut paths: Vec<Found> = Vec::new();
     let inventory = output(cmd("pacman", &["-Ql"]))?;
     let owned: BTreeSet<String> = inventory.lines().filter_map(|l| l.split_once(' ')).map(|(_, p)| p.trim_end_matches('/').to_string()).collect();
     let evidence = Evidence::new(&g, &inventory, &owned)?;
@@ -145,7 +292,11 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
             continue;
         }
         if path.ends_with(".pacnew") || path.ends_with(".pacsave") {
-            report.push(format!("File {}: {path}", &path[path.rfind('.').unwrap()..]));
+            let line = format!("File {}: {path}", &path[path.rfind('.').unwrap()..]);
+            match evidence.of(&path, None) {
+                (0, note) => paths.push((0, format!("{line}{note}"), path.clone())),
+                _ => report.push(line),
+            }
             continue;
         }
         // A link to a file of a package, for example a fontconfig link in /etc/fonts/conf.d, is explained.
@@ -158,7 +309,7 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
         }
         let kind = if e.file_type().is_dir() { "directory" } else { "file" };
         let (rank, note) = evidence.of(&path, None);
-        paths.push((rank, format!("Unowned {kind}: {path}{note}")));
+        paths.push((rank, format!("Unowned {kind}: {path}{note}"), path.clone()));
         if e.file_type().is_dir() {
             walk.skip_current_dir();
         }
@@ -192,6 +343,13 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
     report.extend(units.enable.iter().filter(|u| g.m.units.enable.contains(*u)).map(|u| format!("Declared unit not enabled: {u}")));
 
     home(&g, &evidence, &mut paths)?;
+    // A record goes when its package is installed again or when it explains no path.
+    let used = evidence.used.take();
+    let mut kept = records();
+    if kept.len() != used.len() {
+        kept.retain(|p, _| used.contains(p));
+        save(&kept)?;
+    }
     if let Some(state) = crate::secure::audit(&g, &mut report)? {
         say!("• {state}");
     }
@@ -199,14 +357,78 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
     let mut notes = Vec::new();
     crate::report::audit(&mut notes);
     notes.iter().for_each(|n| say!("• {n}"));
+    // A path that pacnix never deletes, for example a bash file, is no leftover to delete.
+    let keep = Keep::new(&g)?;
+    paths.iter_mut().filter(|p| p.0 == 0 && keep.covers(&p.2)).for_each(|p| p.0 = 1);
     print(&report, &paths);
+    let leftovers: Vec<&str> = paths.iter().filter(|p| p.0 == 0).map(|p| p.2.as_str()).collect();
+    // The claims of a configuration that apply did not activate yet are not the claims of the system.
+    let deleted = match crate::generation::active()?.is_some_and(|a| a.path == g.path) {
+        true => clean(&g, &leftovers)?,
+        false if !leftovers.is_empty() => {
+            say!("• The configuration differs from the active configuration. Run pacnix apply, then pacnix audit can delete the leftovers.");
+            0
+        }
+        false => 0,
+    };
+    if !report.is_empty() || !paths.is_empty() {
+        crate::report::gap();
+        let deleted = if deleted == 0 { String::new() } else { format!(", {deleted} deleted") };
+        say!("• Audit done: {}{deleted}.", crate::count(report.len() + paths.len(), "item"));
+    }
     Ok(())
 }
 
-/// Shows the number of items first. Then the paths with the evidence of a
-/// former claim, the paths with no evidence, the paths whose name agrees with
-/// a package, and the other items, under one heading for each kind.
-fn print(report: &[String], paths: &[(u8, String)]) {
+/// A path that the audit found: the rank of its evidence (Evidence::of), its line and the path.
+type Found = (u8, String, String);
+
+/// Asks which leftovers of removed packages and features to delete, as the AUR helpers
+/// ask: a for all, Enter or n for none, or the numbers and ranges, for example
+/// 1 3-5. As with pacman, the answer comes from standard input, also without a
+/// terminal, and nothing is deleted at its end. The leftovers that stay show
+/// again in the next audit. Returns the number of deleted leftovers.
+fn clean(g: &Generation, leftovers: &[&str]) -> Result<usize> {
+    if leftovers.is_empty() {
+        return Ok(0);
+    }
+    // With the output in a pager or a file, the user does not see the question.
+    if std::io::stdin().is_terminal() && !std::io::stdout().is_terminal() {
+        say!("• To delete leftovers, run pacnix audit with the output in the terminal.");
+        return Ok(0);
+    }
+    print!("Delete leftovers? [a]ll, [N]one, or numbers such as 1 3-5: ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer)? == 0 {
+        println!();
+    }
+    let answer = answer.trim().to_lowercase();
+    let chosen: BTreeSet<usize> = match answer.as_str() {
+        "" | "n" | "none" => BTreeSet::new(),
+        "a" | "all" => (1..=leftovers.len()).collect(),
+        _ => {
+            let mut set = BTreeSet::new();
+            for w in answer.split([' ', ',']).filter(|w| !w.is_empty()) {
+                let (a, b) = w.split_once('-').unwrap_or((w, w));
+                match (a.parse::<usize>(), b.parse::<usize>()) {
+                    (Ok(a), Ok(b)) if 1 <= a && a <= b && b <= leftovers.len() => set.extend(a..=b),
+                    _ => bail!("{w} is not a number or a range of the list, thus nothing is deleted. Run pacnix audit again"),
+                }
+            }
+            set
+        }
+    };
+    let data: Vec<(String, Vec<String>)> = chosen.iter().map(|i| (leftovers[i - 1].to_string(), vec![leftovers[i - 1].to_string()])).collect();
+    delete(g, &data)?;
+    Ok(chosen.len())
+}
+
+/// Shows the number of items first. Then the paths with no evidence, the
+/// paths whose name agrees with a package and the other items, under one
+/// heading for each kind. Last, the numbered leftovers of removed packages and
+/// features: the paths with the evidence of a removed package or a former
+/// claim, for the question of `clean`.
+fn print(report: &[String], paths: &[Found]) {
     if report.is_empty() && paths.is_empty() {
         say!("• The system agrees with the configuration.");
         return;
@@ -215,25 +437,26 @@ fn print(report: &[String], paths: &[(u8, String)]) {
         1 => say!("• 1 item that is not declared or that differs from the configuration:"),
         n => say!("• {n} items that are not declared or that differ from the configuration:"),
     }
-    let blocks = [
-        "Paths that a feature claimed in an earlier generation:",
-        "Paths with no known origin:",
-        "Paths with a name, rule or DKMS match. These matches give clues about the origin:",
-    ];
-    for (rank, title) in blocks.iter().enumerate() {
-        let items: Vec<&str> = paths.iter().filter(|p| p.0 as usize == rank).map(|p| p.1.as_str()).collect();
+    let blocks = [(1, "Paths with no known origin:"), (2, "Paths with a name, rule or DKMS match. These matches give clues about the origin:")];
+    for (rank, title) in blocks {
+        let items: Vec<&str> = paths.iter().filter(|p| p.0 == rank).map(|p| p.1.as_str()).collect();
         if !items.is_empty() {
             say!("• {title}");
             kinds(&items);
         }
     }
-    if !report.is_empty() && !paths.is_empty() {
+    if !report.is_empty() && paths.iter().any(|p| p.0 != 0) {
         say!("• Other items:");
     }
     kinds(&report.iter().map(String::as_str).collect::<Vec<_>>());
     say!("• Apply corrects the managed files, the declared units, the boot files and the TPM2 keys. It never removes a package that it did not install. Declare each other item, add it to claims or audit.ignore, or remove it.");
-    crate::report::gap();
-    say!("• Audit done: {}.", crate::count(report.len() + paths.len(), "item"));
+    let leftovers: Vec<&str> = paths.iter().filter(|p| p.0 == 0).map(|p| p.1.as_str()).collect();
+    if !leftovers.is_empty() {
+        say!("• Leftovers of removed packages and features ({}):", leftovers.len());
+        for (i, l) in leftovers.iter().enumerate() {
+            say!("  {:>2}  {}", i + 1, l);
+        }
+    }
 }
 
 /// Shows the items under one heading for each kind.
@@ -354,7 +577,7 @@ const SHELL_FILES: &[&str] = &[".bashrc", ".bash_profile", ".bash_logout", ".bas
 /// of the directories in CONTAINERS, and of each directory above a Home
 /// Manager file or above the fixed part of a pattern. Another directory shows
 /// as one entry for all of its content. The walk does not follow links.
-fn home(g: &Generation, evidence: &Evidence, paths: &mut Vec<(u8, String)>) -> Result<()> {
+fn home(g: &Generation, evidence: &Evidence, paths: &mut Vec<Found>) -> Result<()> {
     let claims: Vec<&String> = g.m.claims.values().flat_map(|c| &c.home).collect();
     for (dir, managed) in homes()? {
         let base = globset::escape(&dir);
@@ -379,7 +602,7 @@ fn home(g: &Generation, evidence: &Evidence, paths: &mut Vec<(u8, String)>) -> R
             }
             if !explained {
                 let (rank, note) = evidence.of(&abs, Some(&rel));
-                paths.push((rank, format!("Unclaimed home path: {abs}{note}")));
+                paths.push((rank, format!("Unclaimed home path: {abs}{note}"), abs.clone()));
             }
             if is_dir {
                 walk.skip_current_dir();
@@ -548,13 +771,21 @@ pub fn asks(data: &[(String, Vec<String>)]) -> Vec<String> {
     data.iter().map(|(f, paths)| format!("Delete the data of removed feature {f}: {}.", paths.join(", "))).collect()
 }
 
+/// The label of the deletion: the feature, or the path that audit deletes.
+fn feature_or_path(feature: &str, paths: &[String]) -> String {
+    match paths {
+        [p] if p == feature => p.clone(),
+        _ => format!("the data of removed feature {feature}"),
+    }
+}
+
 /// Deletes the data of removed features. A path inside that the target keeps
 /// stays, with its directories. Outside the home directories of the users, the
 /// empty directories above a deleted path that no package owns go too.
 pub fn delete(target: &Generation, data: &[(String, Vec<String>)]) -> Result<()> {
     let keep = Keep::new(target)?;
     for (feature, paths) in data {
-        crate::report::progress(&format!("Deleting the data of removed feature {feature}"));
+        crate::report::progress(&format!("Deleting {}", feature_or_path(feature, paths)));
         for path in paths {
             for e in walkdir::WalkDir::new(path).follow_root_links(false).contents_first(true) {
                 let e = e?;

@@ -4,13 +4,14 @@
 # the package before it, two packages of one transaction keep their own notes,
 # and the output of a hook is not a note. A note that did not change does not
 # show again; a changed note does. A backup file that the user changed gives a
-# .pacnew file in the summary. The audit shows the last notes.
+# .pacnew file in the summary, and a .pacsave file when its package goes. The
+# audit shows the last notes.
 # The install notes of the configuration: a note without a check shows in the
 # same block as the notes of the packages, one time, again when its message
 # changes and after its removal and addition, and not after an apply with a
 # failed step. A note with a check shows while the check, which runs as its
-# user with a clean environment, exits with status 1, also at a no-op and an
-# config-only apply; exit status 0 hides it. A check without a result (other exit
+# user with a clean environment, exits with status 1, also at a no-op apply and
+# an apply --no-upgrade; exit status 0 hides it. A check without a result (other exit
 # status, time limit, missing program, unknown user, UID 0) shows one line and
 # does not fail the apply. Plan and audit do not run the checks or show the notes.
 source "$(dirname "$0")/../lib.sh"
@@ -80,8 +81,8 @@ grep -q 'probe\|welcome' <<<"$out$(pacnix $h audit)" && fail "plan or audit show
 out=$(apply $h) || fail "the no-op apply failed"
 grep -q '^• Apply done. No changes.' <<<"$out" && grep -qx '  probe: Enroll the probe.' <<<"$out" || { echo "$out"; fail "the no-op apply does not show the note or counts it as a change"; }
 rc 1
-out=$(apply $h --config-only) || fail "the config-only apply failed"
-grep -qx '  probe: Enroll the probe.' <<<"$out" || { echo "$out"; fail "the config-only apply does not show the note"; }
+out=$(apply $h --no-upgrade) || fail "apply --no-upgrade failed"
+grep -qx '  probe: Enroll the probe.' <<<"$out" || { echo "$out"; fail "apply --no-upgrade does not show the note"; }
 
 step "exit status 0 hides the note, and it comes back when the check exits with status 1 again"
 rc 0
@@ -179,24 +180,26 @@ scenario "$h" "$setup"
 plan "$h" >/dev/null || fail "plan rejected the setup"
 pacnix "$h" audit >/dev/null
 refute "$h" 'test -e /var/tmp/setup-done || systemctl --user is-active --quiet setup-demo.service' "plan or audit ran a setup action"
-out=$(apply "$h" --config-only) || { echo "$out"; fail "the start action failed"; }
+out=$(apply "$h" --no-upgrade) || { echo "$out"; fail "the start action failed"; }
 check "$h" 'systemctl --user is-active --quiet setup-demo.service' "the setup service did not start"
 grep -qx '  login: Complete the login.' <<<"$out" || { echo "$out"; fail "the manual step did not appear after the action"; }
 refute "$h" 'test -e /var/tmp/setup-done' "the final action ran before the login"
+has "$out" '• Saved file /etc/notes.conf.pacsave: the edits of /etc/notes.conf of a removed package.' || { echo "$out" | tail; fail "the summary does not show the .pacsave file of the removed package"; }
+check "$h" 'grep -qx "# local change" /etc/notes.conf.pacsave' "the .pacsave file does not have the local change"
 
 step "a later apply resumes setup, retries a failed action and skips finished actions"
 on "$h" 'touch /var/tmp/setup-login'
 rc=0
-out=$(apply "$h" --config-only) || rc=$?
+out=$(apply "$h" --no-upgrade) || rc=$?
 ((rc == 4)) || { echo "$out"; fail "the failed setup action did not give exit status 4"; }
 has "$out" 'Setup action finish: the action ended with exit status 8.' || { echo "$out"; fail "the action failure did not show"; }
 has "$out" 'Complete the login.' && fail "a completed manual step still shows"
 refute "$h" 'test -e /var/tmp/setup-done' "the failed action completed the step"
 on "$h" 'touch /var/tmp/setup-ready'
-out=$(apply "$h" --config-only) || { echo "$out"; fail "the final action did not resume"; }
+out=$(apply "$h" --no-upgrade) || { echo "$out"; fail "the final action did not resume"; }
 has "$out" 'setup action run: finish' || { echo "$out"; fail "the summary missed the action"; }
 check "$h" 'test "$(cat /var/tmp/setup-done)" = arch && test "$(stat -c %U /var/tmp/setup-done)" = arch' "the final action did not run as its user"
-out=$(apply "$h" --config-only) || { echo "$out"; fail "the no-op apply failed"; }
+out=$(apply "$h" --no-upgrade) || { echo "$out"; fail "the no-op apply failed"; }
 has "$out" 'Apply done. No changes.' || { echo "$out"; fail "completed setup ran again"; }
 
 step "plan refuses missing, unchecked and cyclic prerequisites"

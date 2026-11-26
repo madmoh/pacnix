@@ -8,7 +8,7 @@ use std::process::Command;
 const REPO: &str = "/var/lib/pacnix/repo";
 const BUILD: &str = "/var/lib/pacnix/build";
 /// The pacman configurations of pacnix. Each run writes them again, thus they
-/// are in /run, and pacnix plan does not change /var/lib/pacnix.
+/// are in /run, and the plan does not change /var/lib/pacnix.
 pub const CONF: &str = "/run/pacnix/pacman.conf";
 const LOCAL_CONF: &str = "/run/pacnix/pacman-local.conf";
 /// The first cache directory of the pacman configuration of pacnix. pacman
@@ -34,7 +34,6 @@ const PRUNED: &str = "/var/lib/pacnix/pruned.json";
 /// install from this repository check the fingerprint of its public key.
 const GNUPG: &str = "/var/lib/pacnix/gnupg";
 const KEY: &str = "/var/lib/pacnix/repo/pacnix-local.asc";
-const PROTECTED: &[&str] = &["base", "pacman", "nix", "pacnix"];
 
 #[derive(Default)]
 pub struct Plan {
@@ -48,8 +47,7 @@ pub struct Plan {
     archive: Vec<String>,
     explicit: Vec<String>,
     deps: Vec<String>,
-    remove: Vec<String>,
-    protected: Vec<String>,
+    pub remove: Vec<String>,
     /// The record of the packages that pacnix made.
     made: BTreeSet<String>,
     /// The orphans before the apply, which stay.
@@ -99,7 +97,7 @@ impl Plan {
         // An archive package is a URL: its item is the name of the package.
         let name = |url: &String| url.rsplit('/').next().and_then(|f| f.rsplitn(4, '-').nth(3)).unwrap_or(url).to_string();
         l.extend(self.archive.iter().map(|u| (name(u), format!("Install package from the Arch Linux Archive {u}"))));
-        l.extend(self.remove.iter().map(|p| (p.clone(), format!("Remove package {p} (apply asks first)"))));
+        l.extend(self.remove.iter().map(|p| (p.clone(), format!("Remove package {p}"))));
         marks.extend(self.explicit.iter().map(|p| (p.clone(), format!("Set the install reason of {p} to explicit (it is installed as a dependency)"))));
         // A package that leaves in the same run gets its reason only as a step of the removal.
         let deps = self.deps.iter().filter(|p| !self.remove.contains(p));
@@ -511,7 +509,8 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
         Some((n.clone(), version.clone()))
     }).collect();
     plan.explicit = declared.iter().filter(|n| inst.get(*n).is_some_and(|i| !i.explicit)).cloned().collect();
-    plan.deps = inst.values().filter(|i| i.explicit && !declared.contains(&i.name) && plan.made.contains(&i.name)).map(|i| i.name.clone()).collect();
+    // Apply never removes pacnix and the packages that it needs: uninstall does.
+    plan.deps = inst.values().filter(|i| i.explicit && !declared.contains(&i.name) && plan.made.contains(&i.name) && i.name != "pacnix").map(|i| i.name.clone()).collect();
     plan.deps.sort();
     plan.orphans = output_any(&mut pacman(&["-Qqdtt"]))?.split_whitespace().map(String::from).collect();
     pin(g, &mut plan, &inst, &sync, &repo)?;
@@ -635,13 +634,6 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
     }
     plan.remove = inst.keys().filter(|n| reach.contains(*n) && !keep.contains(*n) && !plan.orphans.contains(*n)).cloned().collect();
     plan.remove.sort();
-    let kernel = output_any(pacman(&["-Qqo", &format!("/usr/lib/modules/{}/vmlinuz", uname())]))?;
-    plan.protected = plan
-        .remove
-        .iter()
-        .filter(|n| PROTECTED.contains(&n.as_str()) || kernel.trim() == n.as_str())
-        .cloned()
-        .collect();
     Ok(plan)
 }
 
@@ -723,11 +715,6 @@ fn ignored(g: &Generation) -> Vec<String> {
     if keys.is_empty() { vec![] } else { vec!["--ignore".to_string(), keys.join(",")] }
 }
 
-fn uname() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default().trim().to_string()
-}
-
-/// Refuses a plan that is not safe. Runs before any change.
 /// The name with the sync packages of the closest names, for a name that does not exist.
 fn suggest(name: String, sync: &BTreeSet<String>) -> String {
     let mut close: Vec<(usize, &String)> = sync.iter().map(|s| (strsim::levenshtein(&name, s), s)).filter(|(d, _)| *d <= 2).collect();
@@ -746,13 +733,7 @@ pub fn newer() -> Result<Vec<String>> {
     Ok(output_any(pacman(&["-Qqu", "--config", CONF]))?.lines().map(String::from).collect())
 }
 
-/// Whether pacnix installed the package or set it to explicitly installed.
-impl Plan {
-    pub fn made(&self, name: &str) -> bool {
-        self.made.contains(name)
-    }
-}
-
+/// Refuses a plan that is not safe. Runs before any change.
 pub fn check(ctx: &Ctx, plan: &Plan) -> Result<()> {
     if !plan.unknown.is_empty() {
         let line = |u: &String| {
@@ -769,26 +750,7 @@ pub fn check(ctx: &Ctx, plan: &Plan) -> Result<()> {
         pairs.dedup();
         bail!("declared packages conflict: {}. Declare one package of each pair.", pairs.join(", "));
     }
-    if !plan.protected.is_empty() && !ctx.opts.allow_protected_removal {
-        bail!(
-            "the plan removes protected packages: {}. Declare them, or give --allow-protected-removal.",
-            plan.protected.join(", ")
-        );
-    }
     Ok(())
-}
-
-/// The item of the question for the packages that the plan removes.
-pub fn removals(plan: &Plan) -> Vec<String> {
-    match plan.remove.is_empty() {
-        true => vec![],
-        false if plan.remove.len() == 1 => vec![format!("Remove 1 package that is no longer declared and that pacnix installed: {}.", plan.remove[0])],
-        false => vec![format!(
-            "Remove {} packages that are no longer declared and that pacnix installed, with the dependencies that only they need: {}.",
-            plan.remove.len(),
-            plan.remove.join(", ")
-        )],
-    }
 }
 
 /// Set after a network failure: the pacman configuration of pacnix then
@@ -1478,13 +1440,13 @@ pub fn apply(plan: &Plan, skip: &BTreeSet<String>) -> Result<()> {
     let remove: Vec<&str> = plan.remove.iter().map(String::as_str).filter(remains).collect();
     if !remove.is_empty() {
         report::progress(&format!("Removing {}: {}", count(remove.len(), "package"), report::items(&remove)));
-        transaction(&[&["-Rns", "--noconfirm"][..], &remove].concat())?;
+        transaction(&[&["-Rs", "--noconfirm"][..], &remove].concat())?;
     }
     let orphans = output_any(&mut pacman(&["-Qqdtt"]))?;
     let orphans: Vec<&str> = orphans.split_whitespace().filter(|n| !plan.orphans.contains(*n)).collect();
     if !orphans.is_empty() {
         report::progress(&format!("Removing {} that no declared package needs: {}", count(orphans.len(), "package"), report::items(&orphans)));
-        transaction(&[&["-Rns", "--noconfirm"][..], &orphans].concat())?;
+        transaction(&[&["-Rs", "--noconfirm"][..], &orphans].concat())?;
     }
     save_made(plan)
 }
@@ -1642,12 +1604,13 @@ pub fn prune(g: &Generation) -> Result<()> {
     sync_pacnix_db(g)
 }
 
-/// The packages that pacnix uninstall removes: pacnix, aurutils and nix, less
+/// The packages that pacnix uninstall removes: pacnix and its keyring, less
 /// the ones that a different package needs, and the dependencies that only
-/// they need.
+/// they need. As with pacman -Rs, an aurutils or nix that the user installed
+/// explicitly stays.
 pub fn uninstall_plan() -> Result<Vec<String>> {
     let inst = installed()?;
-    let mut targets: Vec<&str> = ["pacnix", "pacnix-keyring", "aurutils", "nix"].into_iter().filter(|n| inst.contains_key(*n)).collect();
+    let mut targets: Vec<&str> = ["pacnix", "pacnix-keyring"].into_iter().filter(|n| inst.contains_key(*n)).collect();
     while let Some(i) = targets.iter().position(|t| inst[*t].required.iter().any(|r| !targets.contains(&r.as_str()))) {
         targets.remove(i);
     }
@@ -1668,5 +1631,5 @@ pub fn uninstall(remove: &[String]) -> Result<()> {
         run_cmd(cmd("systemctl", &["--quiet", "disable", "--now"]).args(&units))?;
     }
     report::progress(&format!("Removing {}", count(remove.len(), "package")));
-    transaction(&[&["-Rns", "--noconfirm"][..], &remove.iter().map(String::as_str).collect::<Vec<_>>()].concat())
+    transaction(&[&["-Rs", "--noconfirm"][..], &remove.iter().map(String::as_str).collect::<Vec<_>>()].concat())
 }

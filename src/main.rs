@@ -24,7 +24,7 @@ mod users;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use std::borrow::BorrowMut;
-use std::io::{BufRead, IsTerminal, Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, ExitStatus, Stdio};
@@ -32,13 +32,13 @@ use std::time::{Duration, Instant};
 
 /// Make an Arch Linux system agree with its configuration in a Nix flake.
 #[derive(Parser)]
-#[command(version, after_help = "To start, see \"First configuration\" in /usr/share/doc/pacnix/README.md.")]
+#[command(version, disable_help_subcommand = true, after_help = "To start, see \"First configuration\" in /usr/share/doc/pacnix/README.md.")]
 struct Cli {
     /// The flake [default: /etc/pacnix]
-    #[arg(long, global = true, default_value = "/etc/pacnix", hide_default_value = true)]
+    #[arg(long, global = true, default_value = "/etc/pacnix", hide_default_value = true, display_order = 100)]
     flake: String,
     /// The host in the flake [default: this host name]
-    #[arg(long, global = true)]
+    #[arg(long, global = true, display_order = 101)]
     host: Option<String>,
     #[command(subcommand)]
     verb: Verb,
@@ -46,53 +46,44 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Verb {
-    /// Show each change that apply makes. Change nothing
-    Plan,
-    /// Upgrade the system, then make it agree with the configuration
+    /// Show the plan, upgrade the system, then make it agree with the configuration
     Apply(ApplyOpts),
-    /// Show what the configuration does not explain. Change nothing
+    /// Show the notes and what the configuration does not explain. Delete the leftovers that you select
     Audit,
     /// Remove pacnix and Nix. The declared files, units and packages stay
-    Uninstall(Opts),
+    Uninstall,
+    /// The pacman hook pkg/removal.hook: the names of the packages come on standard input
+    #[command(hide = true)]
+    RecordRemoval,
 }
 
 impl Verb {
     fn name(&self) -> &'static str {
         match self {
-            Verb::Plan => "plan",
             Verb::Apply(_) => "apply",
             Verb::Audit => "audit",
-            Verb::Uninstall(_) => "uninstall",
+            Verb::Uninstall => "uninstall",
+            Verb::RecordRemoval => "record-removal",
         }
     }
 }
 
-#[derive(Args, Clone, Default)]
-pub struct Opts {
-    /// Accept the items of the question
-    #[arg(long, short)]
-    pub yes: bool,
-    /// Permit the removal of protected packages
-    #[arg(long)]
-    pub allow_protected_removal: bool,
-}
-
-#[derive(Args, Clone)]
+#[derive(Args, Clone, Copy)]
 struct ApplyOpts {
-    #[command(flatten)]
-    opts: Opts,
-    /// Only upgrade the system, with the active configuration
-    #[arg(long, conflicts_with = "config_only")]
-    upgrade_only: bool,
-    /// Only apply the configuration. Do not upgrade the system
+    /// Do not show the plan
     #[arg(long)]
-    config_only: bool,
+    no_plan: bool,
+    /// Do not upgrade the system
+    #[arg(long)]
+    no_upgrade: bool,
+    /// Do not apply the configuration
+    #[arg(long)]
+    no_config: bool,
 }
 
 pub struct Ctx {
     pub flake: String,
     pub host: String,
-    pub opts: Opts,
 }
 
 /// Each run ends with one line: the result, the changes and the exit status.
@@ -101,6 +92,14 @@ pub struct Ctx {
 fn main() {
     handoff::probe();
     let cli = Cli::parse();
+    if let Verb::RecordRemoval = cli.verb {
+        let mut names = String::new();
+        let result = std::io::stdin().read_to_string(&mut names).map_err(anyhow::Error::from).and_then(|_| audit::record(&names.split_whitespace().collect::<Vec<_>>()));
+        if let Err(e) = &result {
+            eprintln!("error: pacnix could not record the removed packages: {e:#}");
+        }
+        std::process::exit(result.is_err() as i32);
+    }
     let verb = cli.verb.name();
     report::signals();
     let result = handoff::receive().and_then(|_| run(cli));
@@ -152,12 +151,12 @@ fn run(cli: Cli) -> Result<()> {
     if name.ok().as_ref() != Some(&host) || cli.flake != "/etc/pacnix" {
         say!("• Host {host} of the flake {flake}.");
     }
-    let ctx = |opts| Ctx { flake: flake.clone(), host: host.clone(), opts };
+    let ctx = Ctx { flake, host };
     match cli.verb {
-        Verb::Plan => generation::plan(&ctx(Opts::default())),
-        Verb::Apply(a) => resilient(|| generation::apply(&ctx(a.opts.clone()), !a.config_only, !a.upgrade_only)),
-        Verb::Audit => audit::audit(&ctx(Opts::default())),
-        Verb::Uninstall(o) => resilient(|| generation::uninstall(&ctx(o.clone()))),
+        Verb::Apply(a) => resilient(|| generation::apply(&ctx, !a.no_plan, !a.no_upgrade, !a.no_config)),
+        Verb::Audit => audit::audit(&ctx),
+        Verb::Uninstall => resilient(generation::uninstall),
+        Verb::RecordRemoval => unreachable!("main runs the pacman hook before the lock"),
     }
 }
 
@@ -250,7 +249,7 @@ fn resilient(f: impl Fn() -> Result<()>) -> Result<()> {
                     packages::SERIAL.store(true, std::sync::atomic::Ordering::Relaxed);
                     std::thread::sleep(Duration::from_secs(*pause));
                 }
-                Cause::Stale => return Err(e.context("the mirror does not have a package of the sync databases, thus the databases or the mirror are old. Run pacnix apply without --config-only, or use a different mirror")),
+                Cause::Stale => return Err(e.context("the mirror does not have a package of the sync databases, thus the databases or the mirror are old. Run pacnix apply without --no-upgrade, or use a different mirror")),
                 Cause::Other => return Err(e),
             },
         }
@@ -297,13 +296,11 @@ pub fn close() {
     CLOSED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The one question of a run: it shows each item that the user must accept and
-/// asks one time. --yes accepts. Without a terminal and without --yes, pacnix
-/// stops. The answer k continues and keeps the data of `data`. Returns true
-/// when the user accepts the deletion of the data. A later call returns the
-/// same answer for the accepted items. After the questions of the run end, a
-/// new item stops pacnix, because only the next apply can ask for it.
-pub fn ask(items: &[String], data: &[String], opts: &Opts) -> Result<bool> {
+/// The question of uninstall: it shows each item and asks one time. As with
+/// pacman, the answer comes from standard input, also without a terminal. The
+/// answer k continues and keeps the data of `data`. Returns true when the user
+/// accepts the deletion of the data. A later attempt returns the same answer.
+pub fn ask(items: &[String], data: &[String]) -> Result<bool> {
     use std::sync::atomic::Ordering::Relaxed;
     let new: Vec<&String> = items.iter().chain(data).filter(|i| !APPROVED.lock().unwrap().contains(*i)).collect();
     if new.is_empty() {
@@ -314,19 +311,10 @@ pub fn ask(items: &[String], data: &[String], opts: &Opts) -> Result<bool> {
     for i in &new {
         say!("  {i}");
     }
-    if closed() && !opts.yes {
-        bail!("pacnix asks only at the start of the run, and these items came after it. Run pacnix apply again to confirm them.");
-    }
-    if !opts.yes && !std::io::stdin().is_terminal() {
-        bail!("these items need a confirmation. Give --yes to continue without a terminal.");
-    }
-    let mut answer = String::from("y");
-    if !opts.yes {
-        print!("Continue? [y/N]{} ", if !data_new { " (N stops pacnix)" } else { " (N stops pacnix, k continues and keeps the data)" });
-        std::io::stdout().flush()?;
-        answer.clear();
-        std::io::stdin().lock().read_line(&mut answer)?;
-    }
+    print!("Continue? [y/N]{} ", if !data_new { " (N stops pacnix)" } else { " (N stops pacnix, k continues and keeps the data)" });
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
     match answer.trim() {
         "y" | "Y" | "yes" => DELETE.store(DELETE.load(Relaxed) || data_new, Relaxed),
         "k" if data_new => {}

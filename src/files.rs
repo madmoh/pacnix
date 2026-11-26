@@ -76,7 +76,7 @@ fn mode(spec: &FileSpec) -> Option<u32> {
 
 /// The copy of a file that a declared file replaced. Without the declaration,
 /// the copy goes back.
-const ORIGINALS: &str = "/var/lib/pacnix/originals";
+pub const ORIGINALS: &str = "/var/lib/pacnix/originals";
 
 fn original(path: &str) -> std::path::PathBuf {
     Path::new(ORIGINALS).join(path.trim_start_matches('/'))

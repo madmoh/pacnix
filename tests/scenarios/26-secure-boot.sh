@@ -238,7 +238,7 @@ pcrs '7 23 7'
 before=$(on sbbox "$tokens")
 out=$(plan sbbox)
 has "$out" '• Note: the TPM2 key of LUKS device root waits: PCR 23 of the SHA-256 bank has no measurement for this boot' || { echo "$out"; fail "the plan does not wait for a PCR without a measurement"; }
-grep -q '^• Plan done: no changes' <<<"$out" || { echo "$out"; fail "the plan counts the TPM2 key that waits as a change"; }
+grep -q '^• Planned changes' <<<"$out" && { echo "$out"; fail "the plan counts the TPM2 key that waits as a change"; }
 out=$(tty_apply)
 echo "$out" | tail -4
 has "$out" '• The TPM2 key of LUKS device root waits: PCR 23 of the SHA-256 bank has no measurement for this boot' || fail "the apply does not show that the TPM2 key waits"

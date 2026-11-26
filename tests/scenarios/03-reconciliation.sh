@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Scenario 3: add and remove a repo package, a group and AUR packages, remove a whole
 # feature, and restore the original files after an override is dropped. A new AUR
-# dependency of a built AUR package and package removals are in the one
-# question of a run, which needs --yes without a terminal. The output of aur sync
+# dependency of a built AUR package is a notice at the end of the apply and in
+# the audit; apply asks no question for it or for package removals, also
+# without a terminal, and the plan lists the removals. The output of aur sync
 # does not show when the build succeeds. After the install, the AUR checkouts
 # keep only their git history, PKGBUILD and .SRCINFO, and no copy of the build
 # chroot stays. A package base in packages.keepBuildCache keeps its sources until
@@ -48,12 +49,12 @@ done
 check $h 'test "$(sudo ls /var/lib/aurbuild/x86_64 | tr "\n" " ")" = "root root.lock "' "a copy of the build chroot stays"
 packages_match $h
 
-step "a new AUR dependency of a built AUR package needs a confirmation"
+step "a new AUR dependency of a built AUR package is a notice"
 scenario $h '{ packages.repo = [ "htop" ]; packages.aur = [ "downgrade" "perl-email-outlook-message" ]; packages.keepBuildCache = [ "perl-email-outlook-message" ]; }'
 on $h "sudo jq '.\"perl-email-outlook-message\".depends = []' /var/lib/pacnix/aur.json | sudo tee /var/lib/pacnix/aur.json.new >/dev/null && sudo mv /var/lib/pacnix/aur.json.new /var/lib/pacnix/aur.json && sudo jq 'del(.\"perl-email-outlook-message\")' /var/lib/pacnix/pruned.json | sudo tee /var/lib/pacnix/pruned.json.new >/dev/null && sudo mv /var/lib/pacnix/pruned.json.new /var/lib/pacnix/pruned.json"
-out=$(pacnix $h apply 2>&1) && fail "apply built a package with a new AUR dependency without a confirmation"
-has "$out" 'The AUR package perl-email-outlook-message has new AUR dependencies: perl-ole-storage-lite.' || { echo "$out" | tail -5; fail "apply does not show the new AUR dependency"; }
-out=$(apply $h) || { echo "$out"; fail "apply --yes failed"; }
+out=$(apply $h) || { echo "$out"; fail "apply failed"; }
+has "$out" '• The AUR package perl-email-outlook-message has new AUR dependencies: perl-ole-storage-lite.' || { echo "$out" | tail -5; fail "apply does not show the new AUR dependency"; }
+has "$(pacnix $h audit)" 'The AUR package perl-email-outlook-message has new AUR dependencies: perl-ole-storage-lite.' || fail "the audit does not show the notice"
 grep -q 'packages ignored' <<<"$out" && fail "apply shows the list of aur sync"
 check $h "$ckout/perl-email-outlook-message | grep -q '^Email-Outlook-Message-.*tar.gz$'" "the sources of a package in keepBuildCache do not stay"
 
@@ -96,11 +97,8 @@ empty_plan $h
 
 step "remove them"
 scenario $h ''
-out=$(pacnix $h apply 2>&1) && fail "apply removed packages without a confirmation"
-matches "$out" 'Remove [0-9]+ packages that are no longer declared and that pacnix installed, with the dependencies that only they need: .*downgrade.*htop' || { echo "$out" | tail -5; fail "apply does not list the removals in the question"; }
-has "$out" '• Error: these items need a confirmation. Give --yes to continue without a terminal' || fail "apply without a terminal does not ask for --yes"
-check $h "pacman -Q htop" "apply changed the system before the confirmation"
-apply $h || fail "apply failed"
+out=$(apply $h) || { echo "$out" | tail -20; fail "apply failed"; }
+changes "$out" | grep -qx 'Remove package htop' || { echo "$out"; fail "the plan of the apply does not list the removal"; }
 for p in htop downgrade perl-email-outlook-message perl-ole-storage-lite; do
 	refute $h "pacman -Q $p" "$p is still installed"
 	refute $h "$repo | grep -qx $p" "$p is still in the local repository"

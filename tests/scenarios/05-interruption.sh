@@ -7,7 +7,7 @@ fresh $h
 apply $h >/dev/null || fail "first apply failed"
 # Starts apply in a transient unit, so that a kill reaches pacnix and pacman.
 # The configuration is on the disk first, so that it stays after a power off.
-start() { on $h 'sync && sudo systemd-run --quiet --unit pacnix-test --collect pacnix apply --yes'; }
+start() { on $h 'sync && sudo systemd-run --quiet --unit pacnix-test --collect pacnix apply'; }
 # Waits until a shell condition is true in the VM.
 until_true() { on $h "for i in \$(seq 900); do $1 && exit 0; sleep 0.2; done; exit 1" || fail "timeout: $1"; }
 converge() {

@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use crate::{Ctx, ask, audit, cmd, files, forward, home, notes, packages, report, run_cmd, secure, trust, units, users};
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -371,14 +370,19 @@ impl Plan {
         self.units.print(&mut units.1);
         self.home.print([&mut activate.1, &mut home_created.1, &mut home_changed.1, &mut home_deleted.1, &mut home_restored.1]);
         self.secure.print(&mut secure.1);
-        data.1.extend(self.data.iter().map(|(f, paths)| (f.clone(), format!("Delete the data of removed feature {f} (apply asks first): {}", paths.join(", ")))));
+        data.1.extend(self.data.iter().map(|(f, paths)| (f.clone(), format!("Keep the data of removed feature {f} for pacnix audit: {}", paths.join(", ")))));
         s
     }
 
     /// The upgrade, the changes, the declared items that need no change, and a last line.
-    fn print(&self) -> Result<()> {
-        let newer = packages::newer()?;
-        // The local sync databases tell what is newer since their last refresh. Apply refreshes them.
+    /// Shows the plan once in a run: the changes and the notes of Secure Boot.
+    /// Without the upgrade, also the packages that the local sync databases
+    /// tell are newer.
+    fn show(&self, upgrade: bool) -> Result<()> {
+        if SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) || crate::handoff::resumed() {
+            return Ok(());
+        }
+        let newer = if upgrade { vec![] } else { packages::newer()? };
         match newer.len() {
             0 => {}
             1 => say!("• System upgrade: {} is newer.", newer[0]),
@@ -392,42 +396,7 @@ impl Plan {
         }
         lines.iter().for_each(|l| say!("{}", report::plan_line(l)));
         self.secure.notes().iter().for_each(|n| say!("• Note: {n}"));
-        self.same();
-        let upgrade = "Apply refreshes the sync databases first, thus it can also upgrade packages that this plan does not show.";
-        match lines.len() {
-            0 => say!("• Plan done: no changes. {upgrade}"),
-            n => say!("• Plan done: {}. The system is unchanged. {upgrade}", crate::count(n, "change")),
-        }
         Ok(())
-    }
-
-    /// The declared items that need no change, with the state of each unit.
-    fn same(&self) {
-        let sections = self.sections();
-        let changed: BTreeSet<&String> = sections.iter().flat_map(|s| &s.1).map(|l| &l.0).collect();
-        let m = &self.target.m;
-        // What the removal of the declaration does, from the records of pacnix.
-        let units = |list: &Vec<String>, state: &str| {
-            let by = |u: &String| if self.units.made(u) { "by pacnix; vendor preset if you remove the declaration" } else { "before pacnix; stays if you remove the declaration" };
-            list.iter().map(|u| (u.clone(), format!("{u} ({state} {})", by(u)))).collect::<Vec<_>>()
-        };
-        let plain = |list: Vec<&String>| list.into_iter().map(|i| (i.clone(), i.clone())).collect::<Vec<_>>();
-        let packages = m.packages.repo.iter().chain(&m.packages.aur).chain(m.packages.local.keys());
-        let declared = [
-            ("package", packages.map(|p| (p.clone(), format!("{p} (installed {})", if self.packages.made(p) { "by pacnix; removed if you remove the declaration" } else { "before pacnix; stays if you remove the declaration" }))).collect()),
-            ("user", plain(m.users.users.keys().collect())),
-            ("file", plain(m.files.keys().collect())),
-            ("unit", [units(&m.units.enable, "enabled"), units(&m.units.disable, "disabled"), units(&m.units.mask, "masked")].concat()),
-        ];
-        let same: Vec<String> = declared
-            .into_iter()
-            .map(|(noun, items)| (noun, items.into_iter().filter(|i| !changed.contains(&i.0)).map(|i| i.1).collect::<Vec<_>>()))
-            .filter(|(_, items)| !items.is_empty())
-            .map(|(noun, items)| if items.len() > 3 { crate::count(items.len(), noun) } else { items.join(", ") })
-            .collect();
-        if !same.is_empty() {
-            say!("• Already as declared: {}.", same.join(", "));
-        }
     }
 }
 
@@ -446,26 +415,47 @@ pub fn locate(ctx: &Ctx, text: &str) -> Option<String> {
     })
 }
 
-pub fn plan(ctx: &Ctx) -> Result<()> {
-    Plan::compute(ctx, build(ctx)?)?.print()
-}
+/// Set when the plan showed in this run, so that a retry does not show it again.
+static SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Makes the system agree with the configuration: pacman -Syu, the rebuild
-/// of changed AUR packages, then the plan. The questions of the run come
-/// before any long work, see `preflight`: the removals and the AUR builds that
-/// the plan shows now, the changes of the AUR packages that upgrade, and the
-/// Arch Linux news since the last upgrade. Without `upgrade`, the sync
+/// Makes the system agree with the configuration in stages: the plan, the
+/// upgrade (pacman -Syu and the rebuild of changed AUR packages), then the
+/// configuration. Apply asks only for the secrets, before any long work, see
+/// `preflight`. The changes of AUR packages and the Arch Linux news since the
+/// last upgrade show as notices, which audit also shows. The plan stage
+/// evaluates the flake also without `configure`, thus apply --no-upgrade
+/// --no-config shows the plan and changes nothing. Without `upgrade`, the sync
 /// databases and the AUR packages stay as they are. Without `configure`, the
-/// upgrade uses the active generation and the flake is not evaluated.
-pub fn apply(ctx: &Ctx, upgrade: bool, configure: bool) -> Result<()> {
-    let target = match configure {
-        true => build(ctx)?,
-        false => active()?.context("no generation is active. Run pacnix apply without --upgrade-only")?,
+/// upgrade uses the active generation.
+pub fn apply(ctx: &Ctx, show: bool, upgrade: bool, configure: bool) -> Result<()> {
+    let mut before = match (show || configure).then(|| build(ctx).and_then(|g| Plan::compute(ctx, g))) {
+        // With --no-config, the plan only shows: its failure does not stop the upgrade.
+        Some(Err(e)) if !configure && upgrade && !report::interrupted() => {
+            say!("• The plan failed: {e:#}. The system upgrade continues.");
+            None
+        }
+        other => other.transpose()?,
+    };
+    if let Some(b) = before.as_ref().filter(|_| show) {
+        b.show(upgrade)?;
+    }
+    if !upgrade {
+        say!("• System upgrade: skipped, because of --no-upgrade.");
+    }
+    if !configure {
+        say!("• Configuration: skipped, because of --no-config.");
+        before = None;
+        if !upgrade {
+            return Ok(());
+        }
+    }
+    let target = match &before {
+        Some(b) => b.target.clone(),
+        None => active()?.context("no generation is active. Run pacnix apply without --no-config")?,
     };
     let (mut plan, mut read) = (None, false);
     if upgrade {
         let news = (!crate::handoff::resumed()).then(|| std::thread::spawn(trust::news));
-        let mut before = configure.then(|| Plan::compute(ctx, target.clone())).transpose()?;
         if let Some(b) = &before {
             files::check(ctx, &b.target, &b.files)?;
         }
@@ -477,19 +467,19 @@ pub fn apply(ctx: &Ctx, upgrade: bool, configure: bool) -> Result<()> {
         let news = news.and_then(|n| n.join().ok()).flatten();
         read = news.is_some() || crate::handoff::NEWS.load(std::sync::atomic::Ordering::Relaxed);
         crate::handoff::NEWS.store(read, std::sync::atomic::Ordering::Relaxed);
-        let removals = before.as_ref().map(|b| packages::removals(&b.packages)).unwrap_or_default();
-        let asks = [removals, builds.asks.clone(), fetched.asks.clone(), news.unwrap_or_default()].concat();
-        match &mut before {
-            Some(b) => preflight(ctx, b, &asks)?,
-            None => ask(&asks, &[], &ctx.opts)?,
-        };
+        report::notices(&[builds.asks.clone(), fetched.asks.clone(), news.unwrap_or_default()].concat());
+        if let Some(b) = &mut before {
+            preflight(b)?;
+        }
         // When the upgrade changes no package and no sync database, the plan and its builds stay the same.
         let (state, built) = (packages::databases(), builds.queue.is_empty());
         report::changing();
         packages::upgrade(&target, builds)?;
         plan = before.filter(|_| built && packages::databases() == state).map(|b| (b, fetched));
-    } else {
-        say!("• System upgrade: skipped, because of --config-only.");
+    } else if let Some(b) = before {
+        files::check(ctx, &b.target, &b.files)?;
+        let fetched = packages::fetch_builds(&b.target, &b.packages)?;
+        plan = Some((b, fetched));
     }
     if configure {
         activate(ctx, target.clone(), plan)?;
@@ -515,19 +505,17 @@ fn commit(target: &Generation) -> Result<()> {
 }
 
 /// The questions of the run, one time before the long work, also for the
-/// retries: the one question, the passwords of the new users, the passphrases
-/// and PINs of the LUKS devices, then the recovery keys, which pacnix enrolls
-/// and shows at once. After them, a new item of the question stops pacnix,
-/// and the late steps do not ask: they show the next command.
-fn preflight(ctx: &Ctx, plan: &mut Plan, asks: &[String]) -> Result<bool> {
-    let delete = ask(asks, &audit::asks(&plan.data), &ctx.opts)?;
+/// retries: the passwords of the new users, the passphrases and PINs of the
+/// LUKS devices, then the recovery keys, which pacnix enrolls and shows at
+/// once. The late steps do not ask: they show the next command.
+fn preflight(plan: &mut Plan) -> Result<()> {
     if !crate::closed() {
-        users::ask_passwords(&plan.users, &ctx.opts)?;
+        users::ask_passwords(&plan.users)?;
         secure::ask_secrets(&plan.target, &plan.secure)?;
         secure::recover(&mut plan.secure)?;
         crate::close();
     }
-    Ok(delete)
+    Ok(())
 }
 
 /// Brings the system to the target generation. The profile is not changed.
@@ -542,8 +530,8 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<(Plan, packages::Builds)
             (plan, builds)
         }
     };
-    let asks = [packages::removals(&plan.packages), builds.asks.clone()].concat();
-    let delete = preflight(ctx, &mut plan, &asks)?;
+    report::notices(&builds.asks);
+    preflight(&mut plan)?;
     // The last line names the target of a declared link.
     let link = |p: String| match plan.target.m.files.get(&p).and_then(|f| f.target.clone()) {
         Some(t) => format!("{p} (link to {t})"),
@@ -573,7 +561,9 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<(Plan, packages::Builds)
     secure::apply(&plan.target, &plan.secure)?;
     units::apply(&plan.units, &changed)?;
     home::apply(&plan.target, &plan.home)?;
-    keep_or_delete(&plan.target, &plan.data, delete)?;
+    if !plan.data.is_empty() || !plan.packages.remove.is_empty() {
+        report::last("• The data of the removed packages and features stays. pacnix audit shows it and deletes it when you ask.".to_string());
+    }
     if !report::failed() {
         packages::clean_staging()?;
         packages::prune(&plan.target)?;
@@ -582,31 +572,30 @@ fn activate(ctx: &Ctx, target: Generation, plan: Option<(Plan, packages::Builds)
     Ok(())
 }
 
-fn keep_or_delete(target: &Generation, data: &[(String, Vec<String>)], delete: bool) -> Result<()> {
-    if delete {
-        return audit::delete(target, data);
-    }
-    if !data.is_empty() {
-        report::last("• The data of the removed features stays. pacnix audit shows it.".to_string());
-    }
-    Ok(())
-}
-
 /// Removes pacnix and keeps the system as configured: the declared files,
 /// units and packages stay, and the Home Manager files become copies outside
-/// the Nix store. The packages pacnix, aurutils and nix leave with pacman.
-/// Then the footprint of pacnix, the feature pacnix, goes as the data of a
-/// removed feature, with the users and groups of pacnix and Nix and the key of
-/// packages.server in the pacman keyring.
-pub fn uninstall(ctx: &Ctx) -> Result<()> {
+/// the Nix store. The package pacnix leaves with pacman, with the aurutils and
+/// nix that it brought. Then the footprint of pacnix, the feature pacnix, goes
+/// as the data of a removed feature, with the users and groups of pacnix and
+/// Nix and the key of packages.server in the pacman keyring. The originals of
+/// the replaced files stay, and a Nix that the user installed stays with its
+/// data, users and groups.
+pub fn uninstall() -> Result<()> {
     let current = active()?.context("no active generation")?;
-    let mut target = current.clone();
-    target.m.claims.remove("pacnix");
-    let data = audit::leftovers(&current, &target)?;
     let remove = packages::uninstall_plan()?;
+    let nix_stays = !remove.iter().any(|p| p == "nix");
+    let mut target = current.clone();
+    let footprint = target.m.claims.remove("pacnix").unwrap_or_default();
+    let of_nix = |p: &String| nix_stays && p.contains("nix") && !p.contains("pacnix");
+    let stays = Claim {
+        system: footprint.system.iter().filter(|p| of_nix(p)).cloned().chain([files::ORIGINALS.to_string()]).collect(),
+        home: footprint.home.iter().filter(|p| of_nix(p)).cloned().collect(),
+    };
+    target.m.claims.insert("uninstall".to_string(), stays);
+    let data = audit::leftovers(&current, &target)?;
     // The users of pacnix and of the Nix builds have the group pacnix or nixbld as primary group.
     let gid = |g: &str| crate::output_any(cmd("getent", &["group", g])).ok()?.split(':').nth(2)?.parse::<u32>().ok();
-    let groups: Vec<&str> = ["pacnix", "nixbld"].into_iter().filter(|g| gid(g).is_some()).collect();
+    let groups: Vec<&str> = ["pacnix", "nixbld"].into_iter().filter(|g| gid(g).is_some() && !(nix_stays && *g == "nixbld")).collect();
     let gids: Vec<u32> = groups.iter().filter_map(|g| gid(g)).collect();
     let passwd = std::fs::read_to_string("/etc/passwd")?;
     let users: Vec<&str> = passwd.lines().map(|l| l.split(':').collect::<Vec<_>>()).filter(|f| f.get(3).and_then(|g| g.parse().ok()).is_some_and(|g| gids.contains(&g))).map(|f| f[0]).collect();
@@ -617,12 +606,12 @@ pub fn uninstall(ctx: &Ctx) -> Result<()> {
     }
     asks.extend(key.iter().map(|k| format!("Delete the key {k} of packages.server in the pacman keyring.")));
     let removals = if remove.is_empty() { vec![] } else { vec![format!("Remove {}: {}.", crate::count(remove.len(), "package"), remove.join(" "))] };
-    let delete = ask(&removals, &asks, &ctx.opts)?;
+    let delete = ask(&removals, &asks)?;
     report::changing();
     home::detach(&current)?;
     packages::uninstall(&remove)?;
-    keep_or_delete(&target, &data, delete)?;
     if delete {
+        audit::delete(&target, &data)?;
         for u in &users {
             run_cmd(cmd("userdel", &[u]))?;
         }
@@ -634,6 +623,16 @@ pub fn uninstall(ctx: &Ctx) -> Result<()> {
         if let Some(k) = key {
             run_cmd(cmd("pacman-key", &["--delete", &k]))?;
         }
+        // The Nix of the user keeps no generation of pacnix, so that its garbage collection frees them.
+        let profiles = Path::new(PROFILE).parent().unwrap();
+        for e in std::fs::read_dir(profiles).into_iter().flatten().flatten() {
+            if nix_stays && e.file_name().to_string_lossy().starts_with("pacnix") {
+                std::fs::remove_file(e.path())?;
+            }
+        }
+    }
+    if std::fs::read_dir(files::ORIGINALS).is_ok_and(|mut d| d.next().is_some()) {
+        report::last(format!("• The originals of the files that pacnix replaced stay in {}.", files::ORIGINALS));
     }
     Ok(())
 }
