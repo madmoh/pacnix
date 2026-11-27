@@ -24,6 +24,8 @@ const SOURCES: &str = "/var/lib/pacnix/local-sources.json";
 const CACHE: &str = "/var/lib/pacnix/build-cache.json";
 /// The AUR checkouts of aur sync, in the home directory of the builder user.
 const AURDEST: &str = "/var/lib/pacnix/build/.cache/aurutils/sync";
+/// The clean chroot `root` of aur chroot and the copies of makechrootpkg.
+const CHROOTS: &str = "/var/lib/aurbuild/x86_64";
 /// The package bases that did not build in this run.
 static FAILED_BASES: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
 const MADE: &str = "/var/lib/pacnix/packages.json";
@@ -960,14 +962,15 @@ fn chroot(args: &[&str]) -> Command {
 /// without it is the remainder of a failed attempt.
 fn ensure_chroot() -> Result<()> {
     std::fs::create_dir_all(STAGING)?;
-    let root = Path::new("/var/lib/aurbuild/x86_64/root");
+    isolated(COPIES, remove_copies)?;
+    let root = Path::new(CHROOTS).join("root");
     if root.join(".arch-chroot").exists() {
         report::progress("Updating the build chroot");
         return run_cmd(chroot(&["--update"]));
     }
     report::progress("Creating the build chroot");
     if root.exists() {
-        run_cmd(cmd("rm", &["-rf", "--one-file-system"]).arg(root))?;
+        run_cmd(cmd("rm", &["-rf", "--one-file-system"]).arg(&root))?;
     }
     // mkarchroot takes the cache directories from /etc/pacman.conf, thus it
     // sees the configuration of pacnix there, in a mount namespace of its own.
@@ -975,6 +978,46 @@ fn ensure_chroot() -> Result<()> {
     let mut c = cmd("unshare", &["--mount", "--propagation", "private", "--", "sh", "-c", r#"mount --bind "$1" /etc/pacman.conf && shift && exec "$@""#, "sh", CONF]);
     c.arg(create.get_program()).args(create.get_args()).envs(create.get_envs().filter_map(|(k, v)| Some((k, v?))));
     run_cmd(c)
+}
+
+const COPIES: &str = "remove the leftover build chroots";
+
+/// Removes the copies of the clean chroot that interrupted builds left, with
+/// the locks of makechrootpkg and systemd-nspawn: makechrootpkg removes its
+/// copy only at its exit. A copy that a build locks stays. As in
+/// makechrootpkg, a copy on Btrfs is a subvolume.
+fn remove_copies() -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::io::AsRawFd;
+    let Ok(dir) = std::fs::read_dir(CHROOTS) else { return Ok(()) };
+    let mut copies = BTreeSet::new();
+    for e in dir {
+        let name = e?.file_name().to_string_lossy().into_owned();
+        let nspawn = name.strip_prefix(".#").and_then(|n| n.strip_suffix(".lck"));
+        copies.insert(name.strip_suffix(".lock").or(nspawn).unwrap_or(&name).to_string());
+    }
+    copies.remove("root");
+    for copy in copies {
+        let (path, lock_path) = (Path::new(CHROOTS).join(&copy), Path::new(CHROOTS).join(format!("{copy}.lock")));
+        let lock = std::fs::OpenOptions::new().append(true).create(true).open(&lock_path)?;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            continue;
+        }
+        if let Ok(m) = std::fs::symlink_metadata(&path) {
+            report::progress(&format!("Removing the leftover build chroot {}.", path.display()));
+            let subvolume = m.ino() == 256 && output(cmd("stat", &["-f", "-c", "%T"]).arg(&path))?.trim() == "btrfs";
+            let mut c = match subvolume {
+                true => cmd("btrfs", &["subvolume", "delete", "--recursive"]),
+                false => cmd("rm", &["-rf", "--one-file-system"]),
+            };
+            run_cmd(c.arg(&path))?;
+        }
+        match std::fs::remove_file(Path::new(CHROOTS).join(format!(".#{copy}.lck"))) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => std::fs::remove_file(&lock_path)?,
+        }
+    }
+    Ok(())
 }
 
 /// The packages to build, in build order, with a flag for local packages, the
@@ -1178,7 +1221,7 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<BTreeSet<String>> {
         let name = base(dir);
         let kind = if *local { "local" } else { "AUR" };
         let step = format!("build {kind} package {name}");
-        let (names, version, deps) = srcinfo_file(dir);
+        let (names, version, deps, _) = srcinfo_file(dir);
         if let Some(d) = deps.iter().find(|d| failed.contains(*d)) {
             report::failure(&step, &format!("it needs {d}, which did not build."));
             failed.extend(names);
@@ -1279,18 +1322,47 @@ pub fn discard(g: &Generation) -> Result<()> {
     if after != before {
         save_build_cache(&after)?;
     }
+    isolated(COPIES, remove_copies)?;
+    remove_checkouts(g)
+}
+
+/// Removes the AUR checkouts that no declared or served AUR package needs,
+/// also through the AUR dependencies of the checkouts.
+fn remove_checkouts(g: &Generation) -> Result<()> {
+    let Ok(dir) = std::fs::read_dir(AURDEST) else { return Ok(()) };
+    let mut checkouts = BTreeMap::new();
+    for e in dir {
+        let e = e?;
+        if e.file_type()?.is_dir() {
+            let (mut names, _, deps, provides) = srcinfo_file(&e.path().to_string_lossy());
+            names.extend(provides);
+            checkouts.insert(e.path(), (names, deps));
+        }
+    }
+    let (mut needed, mut keep) = (built_aur(g), BTreeSet::new());
+    while let Some(name) = needed.pop() {
+        for (path, (names, deps)) in &checkouts {
+            if names.contains(&name) && keep.insert(path) {
+                needed.extend(deps.iter().cloned());
+            }
+        }
+    }
+    for path in checkouts.keys().filter(|p| !keep.contains(p)) {
+        std::fs::remove_dir_all(path).with_context(|| path.display().to_string())?;
+    }
     Ok(())
 }
 
-/// The package names, the version and the dependencies, also of the build, in
-/// the .SRCINFO of a package.
-fn srcinfo_file(dir: &str) -> (Vec<String>, String, Vec<String>) {
+/// The package names, the version, the dependencies, also of the build, and
+/// the provides in the .SRCINFO of a package.
+fn srcinfo_file(dir: &str) -> (Vec<String>, String, Vec<String>, Vec<String>) {
     let text = std::fs::read_to_string(Path::new(dir).join(".SRCINFO")).unwrap_or_default();
-    let (mut names, mut fields, mut deps) = (Vec::new(), BTreeMap::new(), Vec::new());
+    let (mut names, mut fields, mut deps, mut provides) = (Vec::new(), BTreeMap::new(), Vec::new(), Vec::new());
     for (k, v) in text.lines().filter_map(|l| l.trim().split_once(" = ")) {
         match k.split('_').next().unwrap_or(k) {
             "pkgname" => names.push(v.to_string()),
             "depends" | "makedepends" | "checkdepends" => deps.push(dep_name(v).to_string()),
+            "provides" => provides.push(dep_name(v).to_string()),
             "epoch" | "pkgver" | "pkgrel" => {
                 fields.entry(k).or_insert(v);
             }
@@ -1298,7 +1370,7 @@ fn srcinfo_file(dir: &str) -> (Vec<String>, String, Vec<String>) {
         }
     }
     let epoch = fields.get("epoch").filter(|e| **e != "0").map(|e| format!("{e}:")).unwrap_or_default();
-    (names, format!("{epoch}{}-{}", fields.get("pkgver").unwrap_or(&""), fields.get("pkgrel").unwrap_or(&"")), deps)
+    (names, format!("{epoch}{}-{}", fields.get("pkgver").unwrap_or(&""), fields.get("pkgrel").unwrap_or(&"")), deps, provides)
 }
 
 /// Removes a stale pacman lock that a killed transaction left, and the local

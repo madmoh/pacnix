@@ -7,7 +7,8 @@
 # does not show when the build succeeds. After the install, the AUR checkouts
 # keep only their git history, PKGBUILD and .SRCINFO, and no copy of the build
 # chroot stays. A package base in packages.keepBuildCache keeps its sources until
-# it leaves the list. The apply removes a link in the build directory, not its
+# it leaves the list. The checkout of an AUR package goes when no declared AUR
+# package needs it. The apply removes a link in the build directory, not its
 # target.
 # After an apply without a failure, the built packages leave the local
 # repository: an installed package does not build again, and a removed one
@@ -103,6 +104,7 @@ for p in htop downgrade perl-email-outlook-message perl-ole-storage-lite; do
 	refute $h "$repo | grep -qx $p" "$p is still in the local repository"
 	refute $h "ls /var/lib/pacnix/repo/$p-[0-9]*" "the file of $p stays in the local repository"
 done
+refute $h "$ckout | grep -q ." "the AUR checkouts of the removed packages stay"
 packages_match $h
 
 step "adopt an older AUR package installed outside pacnix"
