@@ -19,14 +19,14 @@
 # file of no package and a link to a directory stay listed with their target,
 # and a .pacnew link too. A dangling link is a leftover. The mask of a unit
 # that units.mask declares is explained, and another mask has a note.
-# The audit shows the paths with no known origin, then the paths with a clue:
-# the name is the same as an installed package, a program in /usr/bin or a
+# The audit shows the paths that nothing owns in one list, each with a clue
+# when it finds one: the name is the same as an installed package, a program in /usr/bin or a
 # desktop ID, also a hidden entry of the home directory without its dot, or a
 # package tmpfiles rule has the path, or the name agrees with an installed
 # package without its packaging parts, a GNOME Shell extension, a uv tool, a
 # home claim or the last part of a reverse-DNS ID, or the path is in a
 # directory of one or two packages, or a directory holds such a name. Then the
-# other items, and last the leftovers: the paths that a feature claimed
+# other differences, and last the leftovers: the paths that a feature claimed
 # before, also when the feature still exists and no longer claims the path. The
 # names of the directories above a path do not count. A claim of the
 # configuration and an audit.ignore pattern that match no path show, the claims
@@ -63,18 +63,18 @@ grep -q '^• The data of the removed packages and features stays. pacnix audit 
 check $h 'test -e /srv/demo/index.html && test -e ~/.cache/demo/page' "apply deleted the data"
 out=$(pacnix $h audit) || fail "audit failed"
 echo "$out"
-has "$out" '• Leftovers of removed packages and features, and broken links (2): 1 Unowned directory: /srv/demo (claimed by feature demo in generation' || fail "the audit does not list /srv/demo first with its origin"
-matches "$out" '2 Unclaimed home path: /home/arch/.cache/demo \(claimed by feature demo in generation [0-9]+; the feature is no longer enabled\)' || fail "the audit does not list ~/.cache/demo with its origin"
+has "$out" '• Leftovers of removed packages and features, and broken links (2): 1 /home/arch/.cache/demo (claimed by feature demo in generation' || fail "the audit does not list ~/.cache/demo first with its origin"
+matches "$out" '2 /srv/demo \(claimed by feature demo in generation [0-9]+; the feature is no longer enabled\)' || fail "the audit does not list /srv/demo with its origin"
 has "$out" 'Delete leftovers? [a]ll, [N]one, or numbers such as 1 3-5:' || fail "the audit does not ask which leftovers to delete"
 check $h 'test -e /srv/demo/index.html && test -e ~/.cache/demo/page' "the audit deleted data at the end of the input"
 out=$(pacnix $h audit <<<'1 3') && fail "the audit accepted a number that is not in the list"
 has "$out" '• Error: 3 is not a number or a range of the list, thus nothing is deleted. Run pacnix audit again' || { echo "$out" | tail; fail "wrong error for a number that is not in the list"; }
 check $h 'test -e /srv/demo/index.html && test -e ~/.cache/demo/page' "the audit deleted data at an answer with an error"
-out=$(pacnix $h audit <<<1) || { echo "$out" | tail; fail "audit with the answer 1 failed"; }
+out=$(pacnix $h audit <<<2) || { echo "$out" | tail; fail "audit with the answer 2 failed"; }
 has "$out" ', 1 deleted.' || { echo "$out" | tail; fail "the last line does not count the deleted leftover"; }
-refute $h 'test -e /srv/demo' "the answer 1 did not delete /srv/demo"
-check $h 'test -e ~/.cache/demo/page' "the answer 1 deleted ~/.cache/demo"
-has "$(pacnix $h audit)" '• Leftovers of removed packages and features, and broken links (1): 1 Unclaimed home path: /home/arch/.cache/demo' || fail "the next audit does not show the leftover that stays"
+refute $h 'test -e /srv/demo' "the answer 2 did not delete /srv/demo"
+check $h 'test -e ~/.cache/demo/page' "the answer 2 deleted ~/.cache/demo"
+has "$(pacnix $h audit)" '• Leftovers of removed packages and features, and broken links (1): 1 /home/arch/.cache/demo' || fail "the next audit does not show the leftover that stays"
 on $h "printf '%s\n' 'trash() { shift 2; mkdir -p /tmp/trash && mv -t /tmp/trash -- \"\$@\"; } # probe' 'alias rm=trash # probe' >>~/.\${SHELL##*/}rc"
 pacnix $h audit <<<a >/dev/null || fail "audit with the answer a failed"
 refute $h 'test -e ~/.cache/demo' "the answer a did not delete ~/.cache/demo"
@@ -107,52 +107,51 @@ on $h "test -f $d/v4l2loopback.ko.zst && test -d /var/lib/dkms/v4l2loopback/$v" 
 on $h "cd /var/lib/dkms/v4l2loopback && sudo mkdir 0.0.1 && sudo ln -s /usr/src/v4l2loopback-0.0.1 0.0.1/source && sudo ln -s 0.0.1/9.9.9-arch1-1/x86_64 kernel-9.9.9-arch1-1-x86_64 &&
 	sudo touch $d/stray.ko.zst && echo a | sudo tee $v/$k/x86_64/module/other.ko.zst >/dev/null && echo b | sudo tee $d/other.ko.zst >/dev/null" || fail "the stale DKMS paths cannot be made"
 dkms="DKMS module v4l2loopback $v for kernel $k; the source is in package v4l2loopback-dkms"
-# The number of items of a kind, in all blocks: count <output> <kind>.
-count() { grep -o "^  $2 ([0-9]*)" <<<"$1" | tr -dc '0-9\n' | awk '{ s += $1 } END { print s + 0 }'; }
 start=$(date +%s.%N)
 out=$(pacnix $h audit) || { echo "$out"; fail "audit failed"; }
-echo "COUNT home: $(count "$out" 'Unclaimed home path'), unowned files: $(count "$out" 'Unowned file'), unowned directories: $(count "$out" 'Unowned directory'), audit $(awk -v s="$start" -v e="$(date +%s.%N)" 'BEGIN { printf "%.2f", e - s }') s"
+echo "COUNT paths: $(grep -o '^• Paths that no package, declaration or claim owns ([0-9]*)' <<<"$out" | tr -dc '0-9'), audit $(awk -v s="$start" -v e="$(date +%s.%N)" 'BEGIN { printf "%.2f", e - s }') s"
 echo "$out"
 for l in '/home/arch/.config/fontconfig (the name is the same as installed package fontconfig)' '/home/arch/.var/app/org.pacnix.Desk (the name is the same as desktop ID org.pacnix.Desk)' '/var/lib/desk-rule (a tmpfiles rule in /usr/lib/tmpfiles.d/desk.conf has this path)' '/etc/xdg/nix (the name is the same as installed package nix)' '/home/arch/.desk-tool (the name is the same as program /usr/bin/desk-tool of installed package desk)'; do
-	grep -qxF "    $l" <<<"$out" || fail "the audit does not show: $l"
+	grep -qxF "  $l" <<<"$out" || fail "the audit does not show: $l"
 done
 for l in "$d/v4l2loopback.ko.zst (the same bytes as the build of $dkms)" "/var/lib/dkms/v4l2loopback/kernel-$k-x86_64 (active registration of $dkms)" "/var/lib/dkms/v4l2loopback/$v (DKMS module v4l2loopback $v: the source is in package v4l2loopback-dkms, and each kernel directory has an active registration)" \
 	'/home/arch/.local/bin/ku-banner (a link to ../share/uv/tools/ku-banner/bin/ku-banner, which feature other claims)' '/home/arch/.cache/ku-banner (the name agrees with uv tool ku-banner)' \
 	'/home/arch/.cache/desktray (the name agrees with installed package desk)' '/home/arch/.local/share/icons (it holds org.pacnix.Desk.desktop.png, whose name agrees with installed package desk)' \
 	'/home/arch/.desk-toolrc (the name agrees with installed package desk)' '/home/arch/.cache/desk-tool-recovery (the name agrees with installed package desk)' \
 	'/etc/systemd/system/debug-shell.service (a mask of unit debug-shell.service, which units.mask does not declare)' '/etc/demo-other (a link to demo-file)'; do
-	grep -qxF "    $l" <<<"$out" || fail "the audit does not show: $l"
+	grep -qxF "  $l" <<<"$out" || fail "the audit does not show: $l"
 done
 grep -qF /etc/systemd/system/fstrim.service <<<"$out" && fail "the audit lists a declared mask"
-grep -qE '^ *[0-9]+  Unowned file: /etc/demo-dangling \(a link to /nonexistent, which does not exist\)$' <<<"$out" || fail "the audit does not offer the dangling link as a leftover"
-grep -qE '^ *[0-9]+  Unowned file: /var/lib/dkms/v4l2loopback/kernel-9.9.9-arch1-1-x86_64 \(a link to .*, which does not exist\)$' <<<"$out" || fail "the audit does not offer the stale DKMS registration as a leftover"
+grep -qE '^ *[0-9]+  /etc/demo-dangling \(a link to /nonexistent, which does not exist\)$' <<<"$out" || fail "the audit does not offer the dangling link as a leftover"
+grep -qE '^ *[0-9]+  /var/lib/dkms/v4l2loopback/kernel-9.9.9-arch1-1-x86_64 \(a link to .*, which does not exist\)$' <<<"$out" || fail "the audit does not offer the stale DKMS registration as a leftover"
 # A stale DKMS path has no DKMS note, and a path in a directory of the kernel packages has no name note.
 for p in /var/lib/dkms/v4l2loopback/0.0.1 $d/stray.ko.zst $d/other.ko.zst /usr/share/fontconfig/demo-child; do
-	grep -qxE "    $p( \(in directory [^()]*, which only installed packages? [^()]*\))?" <<<"$out" || fail "the audit shows $p with a wrong note"
+	grep -qxE "  $p( \(in directory [^()]*, which only installed packages? [^()]*\))?" <<<"$out" || fail "the audit shows $p with a wrong note"
 done
 for p in /home/arch/.config/darkhttpd; do
-	grep -qxF "    $p" <<<"$out" || fail "the audit shows $p with a note"
+	grep -qxF "  $p" <<<"$out" || fail "the audit shows $p with a note"
 done
-awk '/^• Leftovers of removed packages and features, and broken links/ { a = NR } /^• Paths with no known origin/ { b = NR } /^• Paths with clues about their origin/ { c = NR } /^• Other items/ { d = NR } END { exit !(b && b < c && c < d && d < a) }' <<<"$out" || fail "the blocks of the audit are not in the order: no known origin, clues, other items, leftovers"
+awk '/^• Leftovers of removed packages and features, and broken links/ { a = NR } /^• Paths that no package, declaration or claim owns/ { b = NR } /^• Explicit package not declared/ { c = NR } END { exit !(b && b < c && c < a) }' <<<"$out" || fail "the sections of the audit are not in the order: paths, other differences, leftovers"
+LC_ALL=C sort -c <<<"$(awk '/^• Paths that no package, declaration or claim owns/ { p = 1; next } /^• / { p = 0 } p { print $1 }' <<<"$out")" || fail "the paths of the audit are not in alphabetical order"
 for p in demo-file demo-other demo-dir; do
-	audit_has "$out" 'Unowned file' "/etc/$p" || fail "the audit does not list /etc/$p"
+	audit_has "$out" paths "/etc/$p" || fail "the audit does not list /etc/$p"
 done
 for l in '.config/gone (home claim of feature other)' '/srv/gone (feature other)'; do
 	audit_has "$out" 'Claim that matches no path' "$l" || fail "the audit does not show the claim that matches no path: $l"
 done
 audit_has "$out" 'Pattern of audit.ignore that matches no path' '/srv/gone*' || fail "the audit does not show the audit.ignore pattern that matches no path"
-grep -qE '^    .*\((home claim of )?feature (arch|pacnix)\)$' <<<"$out" && fail "the audit shows a claim of the pacnix modules"
+grep -qE '^  .*\((home claim of )?feature (arch|pacnix)\)$' <<<"$out" && fail "the audit shows a claim of the pacnix modules"
 audit_has "$out" 'Claim that matches no path' '.var/app/org.demo/cache (home claim of feature other)' && fail "the audit shows a claim that matches a path"
 audit_has "$out" 'File .pacnew' /etc/demo.conf.pacnew || fail "the audit does not list /etc/demo.conf.pacnew"
 grep -q '/etc/demo-pkg\|/etc/demo-chain\|/etc/fonts' <<<"$out" && fail "the audit lists a link to a file of a package"
 for p in notes.txt .local/state/foo .local/bin/tool .local/lib/x/deep/other Work/other .config/demo/extra.conf .config/app .config/linkdir Music .bash_profile .bash_logout .var/app/org.demo/data .var/app/other; do
-	audit_has "$out" 'Unclaimed home path' "/home/arch/$p" || fail "the audit does not list ~/$p"
+	audit_has "$out" paths "/home/arch/$p" || fail "the audit does not list ~/$p"
 done
 # pacnix never deletes a bash file: the former claim is a note, not a leftover to delete.
-audit_has "$out" 'Unclaimed home path' '/home/arch/.bash_history (claimed by feature disposable in generation 4; the feature is no longer enabled)' || fail "the audit does not list ~/.bash_history with its former claim"
-grep -qE '^ *[0-9]+  Unclaimed home path: /home/arch/.bash_history' <<<"$out" && fail "the audit offers to delete ~/.bash_history"
+audit_has "$out" paths '/home/arch/.bash_history (claimed by feature disposable in generation 4; the feature is no longer enabled)' || fail "the audit does not list ~/.bash_history with its former claim"
+grep -qE '^ *[0-9]+  /home/arch/.bash_history' <<<"$out" && fail "the audit offers to delete ~/.bash_history"
 for p in .config/app/a .config/demo/settings.conf Documents Work Work/Templates Work/Pictures .local/lib .local/lib/x .local/lib/x/deep/keep .bashrc .cache/ignored-x .var/app/org.demo/cache .var .var/app .config/linkdir/passwd .config/Code; do
-	audit_has "$out" 'Unclaimed home path' "/home/arch/$p" && fail "the audit lists ~/$p"
+	audit_has "$out" paths "/home/arch/$p" && fail "the audit lists ~/$p"
 done
 on $h "sudo rm -rf /var/lib/dkms/v4l2loopback/0.0.1 /var/lib/dkms/v4l2loopback/kernel-9.9.9-arch1-1-x86_64 $d/stray.ko.zst $d/other.ko.zst /var/lib/dkms/v4l2loopback/$v/$k/x86_64/module/other.ko.zst"
 on $h 'sudo systemctl unmask --quiet debug-shell.service && ln -s ../../.config/dconf ~/.local/bin/desk-tool && sudo systemctl start desk.service && systemctl --user start desk.service && sudo install -d -o desk /srv/desk-data && echo setting=2 | sudo tee /etc/desk.conf >/dev/null' || fail "the desk services did not start"
@@ -161,17 +160,17 @@ scenario $h '{ features.home.enable = true; claims.other.home = [ ".bash_history
 apply $h >/dev/null || fail "apply failed"
 out=$(pacnix $h audit)
 echo "$out"
-for l in 'Unowned directory: /var/lib/desk-rule (a tmpfiles rule in /usr/lib/tmpfiles.d/desk.conf of removed package desk)' \
-	'Unowned directory: /var/lib/desk-state (the StateDirectory of unit desk.service of removed package desk)' \
-	'Unowned directory: /srv/desk-data (the owner is user desk of removed package desk)' \
-	'File .pacsave: /etc/desk.conf.pacsave (the saved copy of /etc/desk.conf of removed package desk)' \
-	'Unclaimed home path: /home/arch/.cache/desk-cache (the CacheDirectory of unit desk.service of removed package desk)' \
-	'Unclaimed home path: /home/arch/.desk-tool (the name is the same as program or desktop ID desk-tool of removed package desk)' \
-	'Unclaimed home path: /home/arch/.var/app/org.pacnix.Desk (the name is the same as program or desktop ID org.pacnix.Desk of removed package desk)'; do
+for l in '/var/lib/desk-rule (a tmpfiles rule in /usr/lib/tmpfiles.d/desk.conf of removed package desk)' \
+	'/var/lib/desk-state (the StateDirectory of unit desk.service of removed package desk)' \
+	'/srv/desk-data (the owner is user desk of removed package desk)' \
+	'/etc/desk.conf.pacsave (the saved copy of /etc/desk.conf of removed package desk)' \
+	'/home/arch/.cache/desk-cache (the CacheDirectory of unit desk.service of removed package desk)' \
+	'/home/arch/.desk-tool (the name is the same as program or desktop ID desk-tool of removed package desk)' \
+	'/home/arch/.var/app/org.pacnix.Desk (the name is the same as program or desktop ID org.pacnix.Desk of removed package desk)'; do
 	grep -E '^ *[0-9]+  ' <<<"$out" | grep -qF -- "  $l" || fail "the audit does not offer the leftover: $l"
 done
 grep -qE '^ *[0-9]+  .*/srv/pacnix' <<<"$out" && fail "the audit offers a path below a directory that an installed package owns"
-grep -qxF '    /home/arch/.local/bin/desk-tool (a link to ../../.config/dconf, which feature home claims; the name is also the same as program or desktop ID desk-tool of removed package desk)' <<<"$out" || fail "the audit does not show the clue and the removed package of ~/.local/bin/desk-tool"
+grep -qxF '  /home/arch/.local/bin/desk-tool (a link to ../../.config/dconf, which feature home claims; the name is also the same as program or desktop ID desk-tool of removed package desk)' <<<"$out" || fail "the audit does not show the clue and the removed package of ~/.local/bin/desk-tool"
 grep -qE '^ *[0-9]+  .*/\.local/bin/desk-tool' <<<"$out" && fail "the audit offers a path with a clue as a leftover"
 on $h 'rm ~/.local/bin/desk-tool'
 pacnix $h audit <<<a >/dev/null || fail "audit with the answer a failed"
@@ -180,5 +179,5 @@ grep -q 'of removed package desk' <<<"$(pacnix $h audit)" && fail "the audit sho
 check $h '! sudo jq -e "has(\"desk\")" /var/lib/pacnix/removed.json' "the record of desk stays after its leftovers went"
 grep -q '/home/arch/.bash_history' <<<"$out" && fail "the audit lists a claimed bash file"
 matches "$out" '/home/arch/.var/app/org.demo/cache \(claimed by feature other in generation [0-9]+; the feature no longer claims it\)' || fail "the audit does not show the path that feature other no longer claims"
-audit_has "$out" 'Unclaimed home path' /home/arch/.var && fail "the audit shows ~/.var as one entry"
+audit_has "$out" paths /home/arch/.var && fail "the audit shows ~/.var as one entry"
 pass

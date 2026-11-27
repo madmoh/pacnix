@@ -353,12 +353,11 @@ impl<'a> Evidence<'a> {
         })
     }
 
-    /// The rank and the note of a path: 0 for a leftover (a former claim, a path
-    /// of a removed package or a link to a path that does not exist), 1 for no
-    /// evidence, 2 for a clue. A system path compares its own name, a home path
+    /// Whether a path is a leftover (a former claim, a path of a removed package
+    /// or a link to a path that does not exist), and its note. A system path compares its own name, a home path
     /// its `app_name`; rel is the path in the home directory. A clue whose name is also the name of a removed package tells
     /// it, and the path is no leftover.
-    fn of(&self, path: &str, rel: Option<&str>) -> (u8, String) {
+    fn of(&self, path: &str, rel: Option<&str>) -> (bool, String) {
         let found = self.former.iter().find(|(.., s, h)| match rel {
             // A path below a former claim is part of the data of that claim.
             Some(r) => Path::new(r).ancestors().any(|a| h.is_match(a)),
@@ -366,7 +365,7 @@ impl<'a> Evidence<'a> {
         });
         if let Some((n, f, kept, ..)) = found {
             let why = if *kept { "the feature no longer claims it" } else { "the feature is no longer enabled" };
-            return (0, format!(" (claimed by feature {f} in generation {n}; {why})"));
+            return (true, format!(" (claimed by feature {f} in generation {n}; {why})"));
         }
         let owner = std::fs::symlink_metadata(path).ok().map(|m| m.uid());
         for (pkg, r) in &self.removed {
@@ -376,7 +375,7 @@ impl<'a> Evidence<'a> {
             };
             if let Some(note) = exact.or_else(|| Some(format!("the owner is user {}", owner.and_then(|u| r.users.get(&u))?))) {
                 self.used.borrow_mut().insert(pkg.clone());
-                return (0, format!(" ({note} of removed package {pkg})"));
+                return (true, format!(" ({note} of removed package {pkg})"));
             }
         }
         let link = std::fs::read_link(path).ok().map(|t| t.display().to_string());
@@ -385,7 +384,7 @@ impl<'a> Evidence<'a> {
         if let Some(t) = &link {
             let abs = Path::new(path).parent().unwrap_or(Path::new("/")).join(t);
             if !back(&abs) && std::fs::metadata(&abs).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
-                return (0, format!(" (a link to {t}, which does not exist)"));
+                return (true, format!(" (a link to {t}, which does not exist)"));
             }
         }
         let name = match rel {
@@ -400,18 +399,15 @@ impl<'a> Evidence<'a> {
         };
         if let Some(clue) = self.clue(path, rel, name, link.as_deref()) {
             return match removed {
-                Some(r) => (2, format!(" ({clue}; the name is also the same as {})", what(r))),
-                None => (2, format!(" ({clue})")),
+                Some(r) => (false, format!(" ({clue}; the name is also the same as {})", what(r))),
+                None => (false, format!(" ({clue})")),
             };
         }
         if let Some(r) = removed {
-            return (0, format!(" (the name is the same as {})", what(r)));
+            return (true, format!(" (the name is the same as {})", what(r)));
         }
         let weak = rel.is_none().then(|| self.in_package_dir(path)).flatten().or_else(|| self.holds(path)).or_else(|| link.map(|t| format!("a link to {t}")));
-        match weak {
-            Some(clue) => (2, format!(" ({clue})")),
-            None => (1, String::new()),
-        }
+        (false, weak.map(|clue| format!(" ({clue})")).unwrap_or_default())
     }
 
     /// The clue of a path, strongest first: the target of a link, DKMS, the same
@@ -503,7 +499,7 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
     let g = build(ctx)?;
     let _stage = crate::report::stage("Checking the system");
     let mut report: Vec<String> = Vec::new();
-    // Paths with the rank of their evidence: Evidence::of.
+    // Paths with whether they are leftovers: Evidence::of.
     let mut paths: Vec<Found> = Vec::new();
     let inventory = output(cmd("pacman", &["-Ql"]))?;
     let owned: BTreeSet<String> = inventory.lines().filter_map(|l| l.split_once(' ')).map(|(_, p)| p.trim_end_matches('/').to_string()).collect();
@@ -531,10 +527,9 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
             continue;
         }
         if path.ends_with(".pacnew") || path.ends_with(".pacsave") {
-            let line = format!("File {}: {path}", &path[path.rfind('.').unwrap()..]);
             match evidence.of(&path, None) {
-                (0, note) => paths.push((0, format!("{line}{note}"), path.clone())),
-                _ => report.push(line),
+                (true, note) => paths.push((true, format!("{path}{note}"), path.clone())),
+                _ => report.push(format!("File {}: {path}", &path[path.rfind('.').unwrap()..])),
             }
             continue;
         }
@@ -551,9 +546,8 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
         if e.file_type().is_dir() && evidence.containers.contains(&path) && std::fs::read_dir(e.path()).is_ok_and(|mut d| d.next().is_some()) {
             continue;
         }
-        let kind = if e.file_type().is_dir() { "directory" } else { "file" };
-        let (rank, note) = evidence.of(&path, None);
-        paths.push((rank, format!("Unowned {kind}: {path}{note}"), path.clone()));
+        let (leftover, note) = evidence.of(&path, None);
+        paths.push((leftover, format!("{path}{note}"), path.clone()));
         if e.file_type().is_dir() {
             walk.skip_current_dir();
         }
@@ -614,9 +608,10 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
     g.m.warnings.iter().for_each(|w| say!("• Warning: {w}"));
     // A path that pacnix never deletes, for example a bash file, is no leftover to delete.
     let keep = Keep::new(&g)?;
-    paths.iter_mut().filter(|p| p.0 == 0 && keep.covers(&p.2)).for_each(|p| p.0 = 1);
+    paths.iter_mut().filter(|p| p.0 && keep.covers(&p.2)).for_each(|p| p.0 = false);
+    paths.sort_by(|a, b| a.2.cmp(&b.2));
     print(&report, &paths);
-    let leftovers: Vec<&str> = paths.iter().filter(|p| p.0 == 0).map(|p| p.2.as_str()).collect();
+    let leftovers: Vec<&str> = paths.iter().filter(|p| p.0).map(|p| p.2.as_str()).collect();
     // The claims of a configuration that apply did not activate yet are not the claims of the system.
     let deleted = match crate::generation::active()?.is_some_and(|a| a.path == g.path) {
         true => clean(&g, &leftovers)?,
@@ -629,13 +624,13 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
     if !report.is_empty() || !paths.is_empty() {
         crate::report::gap();
         let deleted = if deleted == 0 { String::new() } else { format!(", {deleted} deleted") };
-        say!("• Audit done: {}{deleted}.", crate::count(report.len() + paths.len(), "item"));
+        say!("• Audit done: {}{deleted}.", crate::count(report.len() + paths.len(), "difference"));
     }
     Ok(())
 }
 
-/// A path that the audit found: the rank of its evidence (Evidence::of), its line and the path.
-type Found = (u8, String, String);
+/// A path that the audit found: whether it is a leftover (Evidence::of), its line and the path.
+type Found = (bool, String, String);
 
 /// Asks which leftovers to delete, as the AUR helpers
 /// ask: a for all, Enter or n for none, or the numbers and ranges, for example
@@ -688,36 +683,13 @@ fn print(report: &[String], paths: &[Found]) {
         say!("• The system agrees with the configuration.");
         return;
     }
-    match report.len() + paths.len() {
-        1 => say!("• 1 item that is not declared or that differs from the configuration:"),
-        n => say!("• {n} items that are not declared or that differ from the configuration:"),
+    let unowned: Vec<&str> = paths.iter().filter(|p| !p.0).map(|p| p.1.as_str()).collect();
+    if !unowned.is_empty() {
+        say!("• Paths that no package, declaration or claim owns ({}):", unowned.len());
+        unowned.iter().for_each(|p| say!("  {p}"));
     }
-    let blocks = [(1, "Paths with no known origin:"), (2, "Paths with clues about their origin:")];
-    for (rank, title) in blocks {
-        let items: Vec<&str> = paths.iter().filter(|p| p.0 == rank).map(|p| p.1.as_str()).collect();
-        if !items.is_empty() {
-            say!("• {title}");
-            kinds(&items);
-        }
-    }
-    if !report.is_empty() && paths.iter().any(|p| p.0 != 0) {
-        say!("• Other items:");
-    }
-    kinds(&report.iter().map(String::as_str).collect::<Vec<_>>());
-    say!("• Apply corrects the managed files, the declared units, the boot files and the TPM2 keys. It never removes a package that it did not install. Declare each other item, add it to claims or audit.ignore, or remove it.");
-    let leftovers: Vec<&str> = paths.iter().filter(|p| p.0 == 0).map(|p| p.1.as_str()).collect();
-    if !leftovers.is_empty() {
-        say!("• Leftovers of removed packages and features, and broken links ({}):", leftovers.len());
-        for (i, l) in leftovers.iter().enumerate() {
-            say!("  {:>2}  {}", i + 1, l);
-        }
-    }
-}
-
-/// Shows the items under one heading for each kind.
-fn kinds(lines: &[&str]) {
     let mut kinds: Vec<(&str, Vec<&str>)> = Vec::new();
-    for line in lines {
+    for line in report {
         let (kind, item) = line.split_once(": ").unwrap_or((line, ""));
         match kinds.iter_mut().find(|k| k.0 == kind) {
             Some(k) => k.1.push(item),
@@ -725,8 +697,16 @@ fn kinds(lines: &[&str]) {
         }
     }
     for (kind, items) in &kinds {
-        say!("  {kind} ({}):", items.len());
-        items.iter().for_each(|i| say!("    {}", i.replace('\n', "\n    ")));
+        say!("• {kind} ({}):", items.len());
+        items.iter().for_each(|i| say!("  {i}"));
+    }
+    say!("• Apply corrects the managed files, the declared units, the boot files and the TPM2 keys. It never removes a package that it did not install. Declare each other difference, add it to claims or audit.ignore, or remove it.");
+    let leftovers: Vec<&str> = paths.iter().filter(|p| p.0).map(|p| p.1.as_str()).collect();
+    if !leftovers.is_empty() {
+        say!("• Leftovers of removed packages and features, and broken links ({}):", leftovers.len());
+        for (i, l) in leftovers.iter().enumerate() {
+            say!("  {:>2}  {}", i + 1, l);
+        }
     }
 }
 
@@ -856,8 +836,8 @@ fn home(g: &Generation, evidence: &Evidence, paths: &mut Vec<Found>) -> Result<(
                 continue;
             }
             if !explained {
-                let (rank, note) = evidence.of(&abs, Some(&rel));
-                paths.push((rank, format!("Unclaimed home path: {abs}{note}"), abs.clone()));
+                let (leftover, note) = evidence.of(&abs, Some(&rel));
+                paths.push((leftover, format!("{abs}{note}"), abs.clone()));
             }
             if is_dir {
                 walk.skip_current_dir();

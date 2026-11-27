@@ -132,7 +132,7 @@ scenario $h '{ packages.repo = [ "fprint" ]; }'
 apply $h >/dev/null || fail "apply failed"
 check $h "pacman -Qqe fprintd libfprint" "the members of the group are not explicitly installed"
 empty_plan $h
-pacnix $h audit | grep -q '^    fprint' && fail "the audit does not count the members as declared"
+pacnix $h audit | grep -q '^  fprint' && fail "the audit does not count the members as declared"
 scenario $h ''
 apply $h >/dev/null || fail "apply failed"
 refute $h "pacman -Q fprintd" "a member of the removed group is still installed"

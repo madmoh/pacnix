@@ -61,12 +61,13 @@ matches() { flat "$1" | grep -qE -- "$2"; }
 # The change lines of a plan: the lines indented by two spaces under "• Planned changes".
 changes() { awk '/^• Planned changes/ { c = 1; next } /^• / { c = 0 } c && /^  [^ ]/ { print substr($0, 3) }' <<<"$1"; }
 # Whether the audit output lists an item under a kind: audit_has <output> <kind> <item>.
+# The kind "paths" is the list of the paths that nothing owns.
 # The item is the whole line or the path without the note in parentheses after it.
 audit_has() {
 	awk -v k="$2" -v i="$3" '
 		function check() { path = item; sub(/ \(.*\)$/, "", path); if (kind == k && (item == i || path == i)) found = 1 }
-		/^  [^ ]/ { check(); item = ""; kind = substr($0, 3); sub(/ \([0-9]+\):$/, "", kind); next }
-		/^    [^ ]/ { check(); item = substr($0, 5); next }
+		/^• / { check(); item = ""; kind = $0; sub(/^• /, "", kind); sub(/ \([0-9]+\):$/, "", kind); if (kind == "Paths that no package, declaration or claim owns") kind = "paths"; next }
+		/^  [^ ]/ { check(); item = substr($0, 3); next }
 		{ check(); item = "" }
 		END { check(); exit !found }' <<<"$1"
 }
