@@ -129,6 +129,9 @@ let
     claims = cfg.claims;
     installSteps = map (name: cfg.installNotes.${name} // { inherit name; }) noteNames;
     audit.ignore = lib.unique cfg.audit.ignore;
+    # The claim patterns of the pacnix modules: the audit shows only the patterns of the configuration that match no path.
+    audit.builtin = lib.unique (lib.concatMap (d: lib.optionals (lib.hasPrefix (toString ./modules) d.file) (lib.concatMap (c: c.system or [ ] ++ c.home or [ ]) (lib.attrValues d.value))) eval.options.claims.definitionsWithLocations);
+    warnings = cfg.warnings ++ lib.concatLists (lib.mapAttrsToList (user: hm: map (w: "home.users.${user}: ${w}") hm.config.warnings) homes);
     home = lib.mapAttrs (user: hm: {
       directory = hm.config.home.homeDirectory;
       drv = builtins.unsafeDiscardStringContext hm.activationPackage.drvPath;

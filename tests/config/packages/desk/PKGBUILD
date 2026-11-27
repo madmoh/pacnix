@@ -1,5 +1,5 @@
-# A package with a program and a desktop file whose names are not the package
-# name, a tmpfiles rule that creates a directory that no package owns and one
+# A package with a program, a desktop file and a GNOME Shell extension whose
+# names are not the package name, a tmpfiles rule that creates a directory that no package owns and one
 # for /srv, which package filesystem owns, a
 # system user, a system unit and a user unit with directories, and a backup file.
 pkgname=desk
@@ -13,6 +13,7 @@ backup=(etc/desk.conf)
 package() {
   install -Dm755 /dev/null "$pkgdir/usr/bin/desk-tool"
   printf '[Desktop Entry]\nType=Application\nName=Desk\nExec=true\n' | install -Dm644 /dev/stdin "$pkgdir/usr/share/applications/org.pacnix.Desk.desktop"
+  install -d "$pkgdir/usr/share/gnome-shell/extensions/DeskTray@pacnix.test"
   printf 'd /var/lib/desk-rule 0755 root root -\nd /srv 0755 root root -\n' | install -Dm644 /dev/stdin "$pkgdir/usr/lib/tmpfiles.d/desk.conf"
   echo 'u desk - "pacnix test" -' | install -Dm644 /dev/stdin "$pkgdir/usr/lib/sysusers.d/desk.conf"
   echo 'setting=1' | install -Dm644 /dev/stdin "$pkgdir/etc/desk.conf"

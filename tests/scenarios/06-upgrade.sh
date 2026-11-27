@@ -3,19 +3,21 @@
 # kernel update, DKMS builds from the repositories and the AUR, .pacnew files
 # and a reboot. The summary of the upgrade tells to reboot for the new kernel.
 # A system upgrade that replaces pacnix hands the apply to the new pacnix,
-# which evaluates the configuration again and completes the same apply. An
-# apply with --no-config upgrades with the active generation.
+# which evaluates the configuration again and completes the same apply: a
+# configuration with an option of the new pacnix does not stop the old pacnix
+# before the upgrade. An apply with --no-config upgrades with the active
+# generation.
 size=(4 4096 1)
 source "$(dirname "$0")/../lib.sh"
 old=$cache/base-20261001.604814.qcow2
 [[ -f $old ]] || "$vm" base "$cache/cloud-20261001.604814.qcow2" 2026/10/01 >/dev/null
-# A later pacnix package, with modules that declare /etc/pacnix-next: a copy
+# A later pacnix package, with modules that declare /etc/pacnix-next and the option next: a copy
 # of the source with its own build directory, built while the VM upgrades.
 next=$(mktemp -d -p "$cache")
 (
 	cd "$root" && cp -a Cargo.toml Cargo.lock PKGBUILD LICENSE README.md pacnix.asc src nix pkg "$next/" && cd "$next" &&
 	sed -i '0,/^version = /s/^version = .*/version = "0.99.0"/' Cargo.toml && sed -i '/^name = "pacnix"$/{n;s/.*/version = "0.99.0"/}' Cargo.lock &&
-	sed -i 's/^pkgver=.*/pkgver=0.99.0/' PKGBUILD && sed -i 's|^  options = {|  config.files."/etc/pacnix-next".text = "0.99.0";\n  options = {|' nix/modules/default.nix &&
+	sed -i 's/^pkgver=.*/pkgver=0.99.0/' PKGBUILD && sed -i 's|^  options = {|  config.files."/etc/pacnix-next".text = "0.99.0";\n  options = {\n    next = lib.mkOption { default = false; };|' nix/modules/default.nix &&
 	BUILDDIR=$next/build PKGDEST=$next PACNIX_KEY=$cache/pkg/test-key.asc makepkg -df --noconfirm >"$next/log" 2>&1 &&
 	export GNUPGHOME=$cache/gnupg && key=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr/ { print $10; exit }') &&
 	gpg --batch --detach-sign --local-user "$key" pacnix-0.99.0-1-x86_64.pkg.tar.zst &&
@@ -73,9 +75,12 @@ on old "cd /tmp && sudo mv $pkg $pkg.sig pacnix.db.tar.gz pacnix.db.tar.gz.sig /
 # A package file of an earlier run in the staging cache, which only an apply without a failure deletes.
 on old 'sudo mkdir -p /var/lib/pacnix/cache && sudo touch /var/lib/pacnix/cache/old-1-1-any.pkg.tar.zst'
 log=$(on old 'stat -c %s /var/log/pacman.log')
+# The option of the new pacnix: the old pacnix cannot evaluate the configuration.
+scenario old "{ files.\"/etc/pacman.d/mirrorlist\".text = \"$servers\"; features.overrides.enable = true; next = true; }"
 # A second pacnix while the new pacnix continues: the lock refuses it.
 on old "sudo systemd-run --quiet sh -c 'until grep -q \"continues the apply\" /var/log/pacnix-test.log; do sleep 0.1; done; pacnix apply --no-upgrade --no-config >/var/tmp/parallel 2>&1'"
 out=$(apply old) || { echo "$out" | tail -30; fail "the apply that upgrades pacnix failed"; }
+once "$out" "• The plan failed: " || { echo "$out"; fail "the old pacnix does not show that it cannot evaluate the option of the new pacnix"; }
 once "$out" "• pacnix was upgraded. The new version continues the apply." || { echo "$out"; fail "the old pacnix did not hand off"; }
 once "$out" "• pacnix 0.99.0 continues the apply." || { echo "$out"; fail "the new pacnix did not continue the apply"; }
 has "$out" "package upgraded: pacnix" || { echo "$out"; fail "the summary does not show the upgrade of pacnix from before the handoff"; }

@@ -7,8 +7,8 @@
 # does not show when the build succeeds. After the install, the AUR checkouts
 # keep only their git history, PKGBUILD and .SRCINFO, and no copy of the build
 # chroot stays. A package base in packages.keepBuildCache keeps its sources until
-# it leaves the list. The apply removes the sources that an earlier version of
-# pacnix kept, and removes a link in the build directory, not its target.
+# it leaves the list. The apply removes a link in the build directory, not its
+# target.
 # After an apply without a failure, the built packages leave the local
 # repository: an installed package does not build again, and a removed one
 # builds again. A local split package with a version from pkgver() does not
@@ -58,15 +58,14 @@ has "$(pacnix $h audit)" 'The AUR package perl-email-outlook-message has new AUR
 grep -q 'packages ignored' <<<"$out" && fail "apply shows the list of aur sync"
 check $h "$ckout/perl-email-outlook-message | grep -q '^Email-Outlook-Message-.*tar.gz$'" "the sources of a package in keepBuildCache do not stay"
 
-step "the sources go when the package base leaves keepBuildCache, and old sources go"
-on $h 'sudo -u pacnix sh -c "cd /var/lib/pacnix/build && touch .cache/aurutils/sync/downgrade/old.tar.gz && mkdir -p local/old sources/old && touch sources/old/big" &&
-	sudo mkdir -p /srv/target && sudo touch /srv/target/file && sudo ln -s /srv/target /var/lib/pacnix/build/sources/link && sudo rm /var/lib/pacnix/build-cache.json'
+step "the sources go when the package base leaves keepBuildCache, and a link goes without its target"
+on $h 'sudo -u pacnix mkdir -p /var/lib/pacnix/build/sources && sudo mkdir -p /srv/target && sudo touch /srv/target/file && sudo ln -s /srv/target /var/lib/pacnix/build/sources/perl-email-outlook-message'
 scenario $h '{ packages.repo = [ "htop" ]; packages.aur = [ "downgrade" "perl-email-outlook-message" ]; }'
 apply $h >/dev/null || fail "apply failed"
 for b in downgrade perl-email-outlook-message; do
 	clean $b "the sources of $b stay"
 done
-check $h 'test -z "$(sudo ls -A /var/lib/pacnix/build/local /var/lib/pacnix/build/sources | grep -v "^/\|^$")"' "old sources or a link stay"
+check $h 'test -z "$(sudo ls -A /var/lib/pacnix/build/local /var/lib/pacnix/build/sources | grep -v "^/\|^$")"' "sources or a link stay"
 check $h 'test -f /srv/target/file' "the apply removed the target of a link"
 before=$(on $h 'stat -c %Y /var/lib/pacnix/build-cache.json')
 empty_plan $h

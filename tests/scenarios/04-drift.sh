@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scenario 4: manual changes. The plan and apply correct only what pacnix owns,
-# a declared file; a package and a unit that the configuration does not declare
+# a declared file and a declared unit that the user masked; a package and a unit that the configuration does not declare
 # stay as the user made them, and the audit shows them. A file system that cannot keep the declared mode stops the apply
 # before any change, instead of a drift that each apply corrects again.
 source "$(dirname "$0")/../lib.sh"
@@ -10,15 +10,15 @@ apply $h >/dev/null || fail "first apply failed"
 
 step "change the system by hand"
 on $h 'sudo pacman -S --noconfirm tree >/dev/null && echo "net.core.somaxconn = 1" | sudo tee -a /etc/sysctl.d/90-demo.conf >/dev/null &&
-	sudo systemctl enable --now systemd-time-wait-sync.service 2>/dev/null; sudo touch /etc/stray.conf'
+	sudo systemctl enable --now systemd-time-wait-sync.service 2>/dev/null; sudo systemctl mask --now --quiet systemd-homed.service; sudo touch /etc/stray.conf'
 out=$(plan $h)
 echo "$out"
-for l in 'Changing file /etc/sysctl.d/90-demo.conf (it differs from the declaration)' 'Run trigger sysctl: sysctl --system >/dev/null'; do
+for l in 'Changing file /etc/sysctl.d/90-demo.conf (it differs from the declaration)' 'Run trigger sysctl: sysctl --system >/dev/null' 'Unmask unit systemd-homed.service' 'Enable and start unit systemd-homed.service'; do
 	changes "$out" | grep -qxF "$l" || fail "the plan does not show: $l"
 done
 grep -e tree -e systemd-time-wait-sync <<<"$out" && fail "the plan changes a package or a unit that the configuration does not declare"
 out=$(pacnix $h audit)
-for l in 'Explicit package not declared|tree' 'Managed file differs from the generation|/etc/sysctl.d/90-demo.conf' 'Enabled unit not declared and not enabled by a vendor preset|systemd-time-wait-sync.service' 'Unowned file|/etc/stray.conf'; do
+for l in 'Declared unit not enabled|systemd-homed.service' 'Explicit package not declared|tree' 'Managed file differs from the generation|/etc/sysctl.d/90-demo.conf' 'Enabled unit not declared and not enabled by a vendor preset|systemd-time-wait-sync.service' 'Unowned file|/etc/stray.conf'; do
 	audit_has "$out" "${l%%|*}" "${l#*|}" || { echo "$out"; fail "the audit does not show: $l"; }
 done
 
@@ -27,6 +27,7 @@ apply $h || fail "apply failed"
 check $h "pacman -Qe tree" "the package that the user installed is not explicitly installed"
 refute $h "grep -q 'somaxconn = 1$' /etc/sysctl.d/90-demo.conf" "the managed file is not restored"
 check $h "systemctl is-enabled systemd-time-wait-sync.service" "the unit that the user enabled is not enabled"
+check $h 'test "$(systemctl is-enabled systemd-homed.service)" = enabled && systemctl is-active --quiet systemd-homed.service' "the declared unit that the user masked is not enabled and started"
 check $h "test \$(sysctl -n net.core.somaxconn) = 8192" "the trigger did not reapply sysctl"
 empty_plan $h
 audit_has "$(pacnix $h audit)" 'Unowned file' /etc/stray.conf || fail "the audit does not show the stray file after apply"

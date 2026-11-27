@@ -7,6 +7,12 @@
       internal = true;
       default = [ ];
     };
+    # The warnings of the module system, for example of a renamed option: apply and audit show them.
+    warnings = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      internal = true;
+      default = [ ];
+    };
     home.users = lib.mkOption {
       type = lib.types.attrsOf lib.types.deferredModule;
       default = { };

@@ -140,13 +140,98 @@ fn globs(patterns: impl IntoIterator<Item = String>) -> GlobSet {
 }
 
 /// The directories of a home directory whose children are named after an application.
-const NAMESPACES: &[&str] = &[".config", ".cache", ".local/share", ".local/state", ".var/app"];
+const NAMESPACES: &[&str] = &[".config", ".cache", ".local/share", ".local/state", ".local/bin", ".var/app"];
+/// The application name of a home path: the name below a directory of
+/// NAMESPACES, or the name of a hidden entry of the home directory without its dot.
+fn app_name(rel: &str) -> Option<&str> {
+    NAMESPACES.iter().find_map(|ns| rel.strip_prefix(ns)?.strip_prefix('/')?.split('/').next()).or_else(|| rel.split('/').next()?.strip_prefix('.'))
+}
+
+/// The packaging parts of a package name that a path name does not have.
+const PREFIXES: &[&str] = &["gnome-shell-extension-", "python-", "perl-", "lib32-"];
+const SUFFIXES: &[&str] = &["-bin", "-git", "-nightly", "-appimage", "-beta"];
+/// The file extensions that a path name can add to the name of an application.
+const EXTENSIONS: &[&str] = &["desktop", "png", "svg", "json", "conf", "db", "cache", "list", "xml", "ini", "toml", "yaml", "yml", "log", "lock", "sqlite", "txt"];
+
+/// The name in lower case, with only its letters and digits.
+fn norm(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
+
+/// The last part of a reverse-DNS ID, for example T3Code of com.t3tools.T3Code.
+fn reverse_dns(s: &str) -> Option<&str> {
+    let parts: Vec<&str> = s.split('.').collect();
+    (parts.len() >= 3 && parts.iter().all(|p| !p.is_empty())).then(|| parts[parts.len() - 1])
+}
+
+/// The kinds of the keys of a path name and of the forms of the index.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Kind {
+    /// A key: the whole name. A form: the name of a package, a GNOME Shell
+    /// extension, a tool or a feature, which agrees with each key.
+    Whole,
+    /// The last part of a reverse-DNS ID, which agrees only with the same part.
+    Tail,
+    /// A key: a part of the name. A form: a program or a desktop ID, which
+    /// agrees only with a whole name, because a program name can be a general
+    /// word, for example test.
+    Part,
+}
+
+/// The forms of a name of installed software that a path name can agree with:
+/// the name, the name without its packaging parts and the last part of a
+/// reverse-DNS ID, each with only letters and digits, of 3 characters or more.
+/// The name of a program or a desktop ID gives forms of the kind Part.
+fn forms(name: &str, program: bool) -> Vec<(String, Kind)> {
+    let mut bare = PREFIXES.iter().find_map(|p| name.strip_prefix(p)).unwrap_or(name);
+    while let Some(b) = SUFFIXES.iter().find_map(|s| bare.strip_suffix(s)) {
+        bare = b;
+    }
+    let kind = if program { Kind::Part } else { Kind::Whole };
+    let mut forms = vec![(norm(name), kind), (norm(bare), kind)];
+    forms.extend(reverse_dns(name).map(|t| (norm(t), Kind::Tail)));
+    forms.retain(|f| f.0.len() >= 3);
+    forms.dedup();
+    forms
+}
+
+/// The keys of a path name, in order: the name and the name without its file
+/// extensions (Whole), the last part of a reverse-DNS ID (Tail), the name
+/// without the rc, config or history of a configuration file, for example git
+/// of .gitconfig, and the first word (Part), each with only letters and digits,
+/// of 3 characters or more.
+fn keys(name: &str) -> Vec<(String, Kind)> {
+    let name = name.trim_start_matches('.');
+    let mut base = name;
+    while let Some((b, _)) = base.rsplit_once('.').filter(|(b, e)| !b.is_empty() && EXTENSIONS.contains(&e.to_ascii_lowercase().as_str())) {
+        base = b;
+    }
+    let mut keys = vec![(norm(name), Kind::Whole), (norm(base), Kind::Whole)];
+    keys.extend(reverse_dns(base).map(|t| (norm(t), Kind::Tail)));
+    keys.extend(["rc", "config", "history"].iter().find_map(|s| norm(base).strip_suffix(s).map(|k| (k.to_string(), Kind::Part))));
+    keys.extend(base.split(['-', '_', '@', ' ']).next().map(|w| (norm(w), Kind::Part)));
+    keys.retain(|k| k.0.len() >= 3);
+    let mut seen = BTreeSet::new();
+    keys.retain(|k| seen.insert(k.0.clone()));
+    keys
+}
+
+/// Whether a key agrees with a form of the index.
+fn agree(key: Kind, form: Kind) -> bool {
+    match form {
+        Kind::Whole => true,
+        Kind::Tail => key == Kind::Tail,
+        Kind::Part => key == Kind::Whole,
+    }
+}
 
 /// What the audit knows about the origin of a path that nothing explains: the
 /// claims of earlier generations that the current generation does not have,
-/// the names of the installed packages, of their programs in /usr/bin and of
-/// their desktop files, and the literal paths that package tmpfiles rules create.
-struct Evidence {
+/// the names of the installed packages, of their programs in /usr/bin, of
+/// their desktop files and GNOME Shell extensions, of the uv and pipx tools
+/// and of the home claims, the directories of the packages, and the literal
+/// paths that package tmpfiles rules create.
+struct Evidence<'a> {
     former: Vec<(u64, String, bool, Vec<String>, GlobSet, GlobSet)>,
     names: BTreeSet<String>,
     programs: BTreeMap<String, String>,
@@ -158,18 +243,29 @@ struct Evidence {
     /// The records of the packages that are not installed, and the names of the records that explain a path.
     removed: Records,
     used: RefCell<BTreeSet<String>>,
+    /// The forms of the names of installed software, with what has the name:
+    /// installed packages with their programs, desktop IDs and GNOME Shell
+    /// extensions, uv and pipx tools, and the features of the claims.
+    index: BTreeMap<String, BTreeSet<(Kind, String)>>,
+    /// The mount points of /etc/fstab and of the configuration, and the
+    /// directories of removable media: a link into them can work again.
+    mounts: Vec<String>,
+    /// The packages that own each directory, and the package of each other path.
+    dirs: BTreeMap<&'a str, BTreeSet<&'a str>>,
+    files: BTreeMap<&'a str, &'a str>,
+    /// The claims of the configuration, by feature: system patterns and home patterns.
+    claims: Vec<(String, GlobSet, GlobSet)>,
+    homes: Vec<String>,
 }
 
-impl Evidence {
-    fn new(current: &Generation, inventory: &str, owned: &BTreeSet<String>) -> Result<Self> {
+impl<'a> Evidence<'a> {
+    fn new(current: &Generation, inventory: &'a str, owned: &BTreeSet<String>) -> Result<Self> {
         let mut former = Vec::new();
         for (n, g) in history()?.into_iter().rev() {
             for (feature, c) in g.m.claims {
                 let now = current.m.claims.get(&feature);
                 let system: Vec<String> = c.system.into_iter().filter(|p| !now.is_some_and(|n| n.system.contains(p))).collect();
-                // Before 0.16, feature arch claimed the bash files for the audit; that is no evidence of data.
-                let builtin = |p: &String| feature == "arch" && SHELL_FILES.contains(&p.as_str());
-                let home: Vec<String> = c.home.into_iter().filter(|p| !now.is_some_and(|n| n.home.contains(p)) && !builtin(p)).collect();
+                let home: Vec<String> = c.home.into_iter().filter(|p| !now.is_some_and(|n| n.home.contains(p))).collect();
                 if !system.is_empty() || !home.is_empty() {
                     former.push((n, feature, now.is_some(), home.clone(), globs(system), globs(home)));
                 }
@@ -201,7 +297,50 @@ impl Evidence {
             r.users.retain(|u, n| *u != 0 && users.get(u) == Some(n) && !shared.contains(n));
             r.paths.retain(|p, _| !owned.contains(p));
         });
+        let homes: Vec<String> = homes()?.into_iter().map(|(h, _)| h).collect();
+        let mut index: BTreeMap<String, BTreeSet<(Kind, String)>> = BTreeMap::new();
+        let mut add = |name: &str, program: bool, what: String| forms(name, program).into_iter().for_each(|(f, k)| _ = index.entry(f).or_default().insert((k, what.clone())));
+        let (mut dirs, mut files) = (BTreeMap::new(), BTreeMap::new());
+        for (pkg, path) in inventory.lines().filter_map(|l| l.split_once(' ')) {
+            match path.strip_suffix('/') {
+                Some(dir) => _ = dirs.entry(if dir.is_empty() { "/" } else { dir }).or_insert_with(BTreeSet::new).insert(pkg),
+                None => _ = files.insert(path, pkg),
+            }
+            let program = path.strip_prefix("/usr/bin/").filter(|n| !n.is_empty() && !n.contains('/'))
+                .or_else(|| path.strip_prefix("/usr/share/applications/")?.strip_suffix(".desktop").filter(|d| !d.contains('/')));
+            // The part before @ of the UUID of a GNOME Shell extension.
+            let extension = path.strip_prefix("/usr/share/gnome-shell/extensions/").and_then(|e| e.strip_suffix('/')).filter(|u| !u.contains('/')).and_then(|u| u.split('@').next());
+            for (n, program) in program.map(|n| (n, true)).into_iter().chain(extension.map(|n| (n, false))) {
+                add(n, program, format!("installed package {pkg}"));
+            }
+        }
+        for pkg in &names {
+            add(pkg, false, format!("installed package {pkg}"));
+        }
+        for home in &homes {
+            for (dir, kind) in [(".local/share/uv/tools", "uv tool"), (".local/share/pipx/venvs", "pipx package")] {
+                for e in std::fs::read_dir(Path::new(home).join(dir)).into_iter().flatten().flatten() {
+                    let tool = e.file_name().to_string_lossy().into_owned();
+                    add(&tool, false, format!("{kind} {tool}"));
+                }
+            }
+        }
+        // The application name of a home claim, for example t3code of .config/t3code. The names of system claims are too general, for example cache of /var/cache.
+        for (feature, c) in &current.m.claims {
+            let names = c.home.iter().filter_map(|p| app_name(p)).filter(|n| !n.is_empty() && !n.contains(['*', '?', '[', '{', '\\']));
+            names.for_each(|n| add(n, false, format!("feature {feature}")));
+        }
+        let fstab = std::fs::read_to_string("/etc/fstab").unwrap_or_default();
+        let fstab = fstab.lines().filter(|l| !l.trim_start().starts_with('#')).filter_map(|l| l.split_whitespace().nth(1));
+        let mounts = fstab.chain(current.m.mounts.keys().map(String::as_str)).chain(["/mnt", "/media"]).filter(|m| m.starts_with('/') && *m != "/").map(str::to_string).collect();
+        let claims = current.m.claims.iter().map(|(f, c)| (f.clone(), globs(c.system.clone()), globs(c.home.clone()))).collect();
         Ok(Evidence {
+            mounts,
+            index,
+            dirs,
+            files,
+            claims,
+            homes,
             removed,
             used: RefCell::default(),
             dkms,
@@ -214,11 +353,11 @@ impl Evidence {
         })
     }
 
-    /// The rank and the note of a path: 0 for a former claim, 1 for no
-    /// evidence, 2 for a name or a rule that agrees with the path. A system
-    /// path compares its own name. A home path compares the name below a
-    /// directory of NAMESPACES, or the name of a hidden entry of the home
-    /// directory without its dot; rel is the path in the home directory.
+    /// The rank and the note of a path: 0 for a leftover (a former claim, a path
+    /// of a removed package or a link to a path that does not exist), 1 for no
+    /// evidence, 2 for a clue. A system path compares its own name, a home path
+    /// its `app_name`; rel is the path in the home directory. A clue whose name is also the name of a removed package tells
+    /// it, and the path is no leftover.
     fn of(&self, path: &str, rel: Option<&str>) -> (u8, String) {
         let found = self.former.iter().find(|(.., s, h)| match rel {
             // A path below a former claim is part of the data of that claim.
@@ -240,29 +379,123 @@ impl Evidence {
                 return (0, format!(" ({note} of removed package {pkg})"));
             }
         }
-        if let Some(note) = rel.is_none().then(|| self.dkms.get(path)).flatten() {
-            return (2, note.clone());
+        let link = std::fs::read_link(path).ok().map(|t| t.display().to_string());
+        // A target in /run and the other runtime directories, or on a file system that is not mounted, can come back.
+        let back = |t: &Path| ["/run", "/proc", "/sys", "/dev", "/tmp"].iter().any(|r| t.starts_with(r)) || self.mounts.iter().any(|m| t.starts_with(m));
+        if let Some(t) = &link {
+            let abs = Path::new(path).parent().unwrap_or(Path::new("/")).join(t);
+            if !back(&abs) && std::fs::metadata(&abs).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+                return (0, format!(" (a link to {t}, which does not exist)"));
+            }
         }
         let name = match rel {
-            Some(r) => NAMESPACES.iter().find_map(|ns| r.strip_prefix(ns)?.strip_prefix('/')?.split('/').next()).or_else(|| r.split('/').next()?.strip_prefix('.')),
+            Some(r) => app_name(r),
             None => Path::new(path).file_name().and_then(|n| n.to_str()),
         };
-        match name {
-            Some(n) if self.names.contains(n) => (2, format!(" (the name is the same as installed package {n})")),
-            Some(n) if self.programs.contains_key(n) => (2, format!(" (the name is the same as program /usr/bin/{n} of installed package {})", self.programs[n])),
-            Some(n) if self.desktop.contains(n) => (2, format!(" (the name is the same as desktop ID {n})")),
-            _ => match rel.is_none().then(|| self.rules.get(path)).flatten() {
-                Some(file) => (2, format!(" (a tmpfiles rule in {file} has this path)")),
-                None => match name.and_then(|n| self.removed.iter().find(|(_, r)| r.names.contains(n)).map(|(p, _)| (n, p))) {
-                    Some((n, p)) => {
-                        self.used.borrow_mut().insert(p.clone());
-                        let what = if n == p { String::new() } else { format!("program or desktop ID {n} of ") };
-                        (0, format!(" (the name is the same as {what}removed package {p})"))
-                    }
-                    None => (1, String::new()),
-                },
+        let removed = name.and_then(|n| self.removed.iter().find(|(_, r)| r.names.contains(n)).map(|(p, _)| (n, p)));
+        let what = |(n, p): (&str, &String)| {
+            self.used.borrow_mut().insert(p.clone());
+            let what = if n == p { String::new() } else { format!("program or desktop ID {n} of ") };
+            format!("{what}removed package {p}")
+        };
+        if let Some(clue) = self.clue(path, rel, name, link.as_deref()) {
+            return match removed {
+                Some(r) => (2, format!(" ({clue}; the name is also the same as {})", what(r))),
+                None => (2, format!(" ({clue})")),
+            };
+        }
+        if let Some(r) = removed {
+            return (0, format!(" (the name is the same as {})", what(r)));
+        }
+        let weak = rel.is_none().then(|| self.in_package_dir(path)).flatten().or_else(|| self.holds(path)).or_else(|| link.map(|t| format!("a link to {t}")));
+        match weak {
+            Some(clue) => (2, format!(" ({clue})")),
+            None => (1, String::new()),
+        }
+    }
+
+    /// The clue of a path, strongest first: the target of a link, DKMS, the same
+    /// name, a tmpfiles rule and a name that agrees.
+    fn clue(&self, path: &str, rel: Option<&str>, name: Option<&str>, link: Option<&str>) -> Option<String> {
+        if let Some(t) = link {
+            let unit = Path::new(path).parent().is_some_and(|d| d == Path::new("/etc/systemd/system") || d == Path::new("/etc/systemd/user"));
+            if unit && t == "/dev/null" {
+                return Some(format!("a mask of unit {}, which units.mask does not declare", name?));
+            }
+            if let Some(real) = std::fs::canonicalize(path).ok() {
+                let home = self.homes.iter().find_map(|h| real.strip_prefix(h).ok());
+                let feature = self.claims.iter().find(|(_, s, h)| match home {
+                    Some(r) => r.ancestors().any(|a| h.is_match(a)),
+                    None => real.ancestors().any(|a| s.is_match(a)),
+                });
+                if let Some((f, ..)) = feature {
+                    return Some(format!("a link to {t}, which feature {f} claims"));
+                }
+                let real = real.display().to_string();
+                if let Some(p) = self.files.get(real.as_str()) {
+                    return Some(format!("a link to {t} of installed package {p}"));
+                }
+                if let Some(owners) = self.dirs.get(real.as_str()) {
+                    return Some(format!("a link to {t}, a directory of {}", packages(owners)));
+                }
+            }
+        }
+        if let Some(note) = rel.is_none().then(|| self.dkms.get(path)).flatten() {
+            return Some(note.trim_start_matches(" (").trim_end_matches(')').to_string());
+        }
+        match name? {
+            n if self.names.contains(n) => Some(format!("the name is the same as installed package {n}")),
+            n if self.programs.contains_key(n) => Some(format!("the name is the same as program /usr/bin/{n} of installed package {}", self.programs[n])),
+            n if self.desktop.contains(n) => Some(format!("the name is the same as desktop ID {n}")),
+            n => match rel.is_none().then(|| self.rules.get(path)).flatten() {
+                Some(file) => Some(format!("a tmpfiles rule in {file} has this path")),
+                None => self.agrees(n).map(|w| format!("the name agrees with {w}")),
             },
         }
+    }
+
+    /// What has a name that agrees with the path name: the most specific key of
+    /// `keys` that agrees with a form of the index, with at most two of what has it.
+    fn agrees(&self, name: &str) -> Option<String> {
+        let found = keys(name).iter().find_map(|(k, kind)| {
+            let found: BTreeSet<&str> = self.index.get(k)?.iter().filter(|(f, _)| agree(*kind, *f)).map(|(_, w)| w.as_str()).collect();
+            (!found.is_empty()).then_some(found)
+        })?;
+        let first: Vec<&str> = found.iter().take(2).copied().collect();
+        Some(match found.len() {
+            1 | 2 => first.join(" and "),
+            n => format!("{}, {} and {} more", first[0], first[1], n - 2),
+        })
+    }
+
+    /// A system path in a directory that one or two installed packages own,
+    /// except filesystem: a package that has a path below a directory also owns
+    /// the directory, thus no other package has a path in it.
+    fn in_package_dir(&self, path: &str) -> Option<String> {
+        let (dir, owners) = Path::new(path).ancestors().skip(1).find_map(|a| Some((a, self.dirs.get(a.to_str()?)?)))?;
+        let verb = if owners.len() == 1 { "owns" } else { "own" };
+        (owners.len() <= 2 && !owners.contains("filesystem")).then(|| format!("in directory {}, which only {} {verb}", dir.display(), packages(owners)))
+    }
+
+    /// A directory that holds an application ID, for example the icon
+    /// com.t3tools.T3Code.png, whose name agrees with installed software or a
+    /// feature. Other entry names are too general, for example logs. It reads
+    /// at most 200 entries.
+    fn holds(&self, path: &str) -> Option<String> {
+        std::fs::symlink_metadata(path).ok().filter(|m| m.is_dir())?;
+        let mut names: Vec<String> = std::fs::read_dir(path).ok()?.take(200).flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        let id = |e: &&String| e.split('.').filter(|p| !p.is_empty() && !EXTENSIONS.contains(&p.to_ascii_lowercase().as_str())).count() >= 3;
+        names.iter().filter(id).find_map(|e| Some(format!("it holds {e}, whose name agrees with {}", self.agrees(e)?)))
+    }
+}
+
+/// The installed packages of a set: one or two by name, more by number.
+fn packages(owners: &BTreeSet<&str>) -> String {
+    match owners.len() {
+        1 => format!("installed package {}", owners.iter().next().unwrap()),
+        2 => format!("installed packages {}", owners.iter().copied().collect::<Vec<_>>().join(" and ")),
+        n => format!("{n} installed packages"),
     }
 }
 
@@ -275,7 +508,13 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
     let inventory = output(cmd("pacman", &["-Ql"]))?;
     let owned: BTreeSet<String> = inventory.lines().filter_map(|l| l.split_once(' ')).map(|(_, p)| p.trim_end_matches('/').to_string()).collect();
     let evidence = Evidence::new(&g, &inventory, &owned)?;
-    let parents: BTreeSet<&str> = g.m.files.keys().flat_map(|p| Path::new(p).ancestors().skip(1).filter_map(|a| a.to_str())).collect();
+    // The walk enters the directories above a declared file and above the fixed part of a system claim.
+    let fixed = g.m.claims.values().flat_map(|c| &c.system).map(|p| {
+        let p = Path::new(p.trim_end_matches('/'));
+        let literal: std::path::PathBuf = p.components().take_while(|c| !c.as_os_str().to_string_lossy().contains(['*', '?', '[', '{'])).collect();
+        if literal == p { literal.parent().map(Path::to_path_buf).unwrap_or_default() } else { literal }
+    });
+    let parents: BTreeSet<String> = g.m.files.keys().filter_map(|p| Some(Path::new(p).parent()?.to_path_buf())).chain(fixed).flat_map(|p| p.ancestors().map(|a| a.display().to_string()).collect::<Vec<_>>()).collect();
     let claimed = globs(g.m.claims.values().flat_map(|c| c.system.clone()).chain(g.m.audit.ignore.clone()));
     let mut walk = walkdir::WalkDir::new("/").into_iter();
     while let Some(entry) = walk.next() {
@@ -288,7 +527,7 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
             }
             continue;
         }
-        if owned.contains(&path) || parents.contains(path.as_str()) || path == "/" {
+        if owned.contains(&path) || parents.contains(&path) || path == "/" {
             continue;
         }
         if path.ends_with(".pacnew") || path.ends_with(".pacsave") {
@@ -302,6 +541,11 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
         // A link to a file of a package, for example a fontconfig link in /etc/fonts/conf.d, is explained.
         let target = if e.path_is_symlink() { std::fs::canonicalize(e.path()).ok() } else { None };
         if target.is_some_and(|t| !t.is_dir() && owned.contains(&t.display().to_string())) {
+            continue;
+        }
+        // The mask of a unit that units.mask declares.
+        let mask = path.strip_prefix("/etc/systemd/system/").is_some_and(|u| g.m.units.mask.iter().any(|m| m == u));
+        if mask && std::fs::read_link(e.path()).is_ok_and(|t| t == Path::new("/dev/null")) {
             continue;
         }
         if e.file_type().is_dir() && evidence.containers.contains(&path) && std::fs::read_dir(e.path()).is_ok_and(|mut d| d.next().is_some()) {
@@ -338,6 +582,16 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
         }
     }
 
+    // A pattern of the configuration that matches no path is out of date. The claims of the pacnix modules are not the configuration.
+    let none = |p: &str| expand(p, 1).is_empty();
+    let own = |p: &&String| !g.m.audit.builtin.contains(*p);
+    for (feature, c) in &g.m.claims {
+        report.extend(c.system.iter().filter(own).filter(|p| none(p)).map(|p| format!("Claim that matches no path: {p} (feature {feature})")));
+        let stale = c.home.iter().filter(own).filter(|p| evidence.homes.iter().all(|h| none(&format!("{}/{p}", globset::escape(h)))));
+        report.extend(stale.map(|p| format!("Claim that matches no path: {p} (home claim of feature {feature})")));
+    }
+    report.extend(g.m.audit.ignore.iter().filter(|p| none(p)).map(|p| format!("Pattern of audit.ignore that matches no path: {p}")));
+
     let units = crate::units::plan(&g, &g, true)?;
     report.extend(units.disable.iter().map(|u| format!("Enabled unit not declared and not enabled by a vendor preset: {u}")));
     report.extend(units.enable.iter().filter(|u| g.m.units.enable.contains(*u)).map(|u| format!("Declared unit not enabled: {u}")));
@@ -357,6 +611,7 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
     let mut notes = Vec::new();
     crate::report::audit(&mut notes);
     notes.iter().for_each(|n| say!("• {n}"));
+    g.m.warnings.iter().for_each(|w| say!("• Warning: {w}"));
     // A path that pacnix never deletes, for example a bash file, is no leftover to delete.
     let keep = Keep::new(&g)?;
     paths.iter_mut().filter(|p| p.0 == 0 && keep.covers(&p.2)).for_each(|p| p.0 = 1);
@@ -382,7 +637,7 @@ pub fn audit(ctx: &Ctx) -> Result<()> {
 /// A path that the audit found: the rank of its evidence (Evidence::of), its line and the path.
 type Found = (u8, String, String);
 
-/// Asks which leftovers of removed packages and features to delete, as the AUR helpers
+/// Asks which leftovers to delete, as the AUR helpers
 /// ask: a for all, Enter or n for none, or the numbers and ranges, for example
 /// 1 3-5. As with pacman, the answer comes from standard input, also without a
 /// terminal, and nothing is deleted at its end. The leftovers that stay show
@@ -424,10 +679,10 @@ fn clean(g: &Generation, leftovers: &[&str]) -> Result<usize> {
 }
 
 /// Shows the number of items first. Then the paths with no evidence, the
-/// paths whose name agrees with a package and the other items, under one
-/// heading for each kind. Last, the numbered leftovers of removed packages and
-/// features: the paths with the evidence of a removed package or a former
-/// claim, for the question of `clean`.
+/// paths with a clue and the other items, under one heading for each kind.
+/// Last, the numbered leftovers: the paths with the evidence of a removed
+/// package or a former claim, and the links to paths that do not exist, for
+/// the question of `clean`.
 fn print(report: &[String], paths: &[Found]) {
     if report.is_empty() && paths.is_empty() {
         say!("• The system agrees with the configuration.");
@@ -437,7 +692,7 @@ fn print(report: &[String], paths: &[Found]) {
         1 => say!("• 1 item that is not declared or that differs from the configuration:"),
         n => say!("• {n} items that are not declared or that differ from the configuration:"),
     }
-    let blocks = [(1, "Paths with no known origin:"), (2, "Paths with a name, rule or DKMS match. These matches give clues about the origin:")];
+    let blocks = [(1, "Paths with no known origin:"), (2, "Paths with clues about their origin:")];
     for (rank, title) in blocks {
         let items: Vec<&str> = paths.iter().filter(|p| p.0 == rank).map(|p| p.1.as_str()).collect();
         if !items.is_empty() {
@@ -452,7 +707,7 @@ fn print(report: &[String], paths: &[Found]) {
     say!("• Apply corrects the managed files, the declared units, the boot files and the TPM2 keys. It never removes a package that it did not install. Declare each other item, add it to claims or audit.ignore, or remove it.");
     let leftovers: Vec<&str> = paths.iter().filter(|p| p.0 == 0).map(|p| p.1.as_str()).collect();
     if !leftovers.is_empty() {
-        say!("• Leftovers of removed packages and features ({}):", leftovers.len());
+        say!("• Leftovers of removed packages and features, and broken links ({}):", leftovers.len());
         for (i, l) in leftovers.iter().enumerate() {
             say!("  {:>2}  {}", i + 1, l);
         }
@@ -723,19 +978,25 @@ impl Keep {
     }
 }
 
-/// The existing paths that a claim pattern matches, without the paths below a match.
-fn expand(pattern: &str) -> Vec<String> {
+/// The existing paths that a claim pattern matches, without the paths below a
+/// match, at most `limit`.
+fn expand(pattern: &str, limit: usize) -> Vec<String> {
     let pattern = Path::new(pattern.trim_end_matches('/'));
     let literal: std::path::PathBuf = pattern.components().take_while(|c| !c.as_os_str().to_string_lossy().contains(['*', '?', '[', '{'])).collect();
     if literal == pattern {
         return pattern.symlink_metadata().map(|_| pattern.display().to_string()).into_iter().collect();
     }
     let set = globs([pattern.display().to_string()]);
-    let (mut found, mut walk) = (Vec::new(), walkdir::WalkDir::new(literal).follow_root_links(false).into_iter());
+    // Without **, a match is at the depth of the pattern.
+    let depth = if pattern.to_string_lossy().contains("**") { usize::MAX } else { pattern.components().count() - literal.components().count() };
+    let (mut found, mut walk) = (Vec::new(), walkdir::WalkDir::new(&literal).max_depth(depth).follow_root_links(false).into_iter());
     while let Some(entry) = walk.next() {
         let Ok(e) = entry else { continue };
         if set.is_match(e.path()) {
             found.push(e.path().display().to_string());
+            if found.len() == limit {
+                break;
+            }
             if e.file_type().is_dir() {
                 walk.skip_current_dir();
             }
@@ -754,9 +1015,9 @@ pub fn leftovers(old: &Generation, target: &Generation) -> Result<Vec<(String, V
     let keep = Keep::new(target)?;
     let mut list = Vec::new();
     for (feature, c) in removed {
-        let mut paths: Vec<String> = c.system.iter().flat_map(|p| expand(p)).collect();
+        let mut paths: Vec<String> = c.system.iter().flat_map(|p| expand(p, usize::MAX)).collect();
         for (home, _) in &keep.homes {
-            paths.extend(c.home.iter().flat_map(|p| expand(&format!("{home}/{p}"))));
+            paths.extend(c.home.iter().flat_map(|p| expand(&format!("{home}/{p}"), usize::MAX)));
         }
         paths.retain(|p| !keep.covers(p));
         if !paths.is_empty() {

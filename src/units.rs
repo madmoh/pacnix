@@ -20,14 +20,9 @@ struct Made {
     mask: BTreeSet<String>,
 }
 
-/// The record of the units that pacnix changed. Without the record, the units
-/// of the earlier generation, which pacnix 0.10 changed.
-fn made(old: &Generation) -> Made {
-    let u = &old.m.units;
-    std::fs::read(MADE).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| Made {
-        preset: u.enable.iter().chain(&u.disable).cloned().collect(),
-        mask: u.mask.iter().cloned().collect(),
-    })
+/// The record of the units that pacnix changed.
+fn made() -> Made {
+    std::fs::read(MADE).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 const SCRATCH: &str = "/run/pacnix/preset-root";
 
@@ -122,8 +117,8 @@ fn preset_text(g: &Generation) -> String {
 /// Runs systemctl preset for the units, or preset-all without units, in a
 /// copy of the unit directories with the target preset file and the target
 /// unit files. systemd computes the result, so Also=, Alias= and
-/// DefaultInstance= work as they do on the live system.
-fn simulate(g: &Generation, old: &Generation, preset: &str, units: Option<&[String]>) -> Result<BTreeSet<String>> {
+/// DefaultInstance= work as they do on the live system. The masks of `unmask` go first.
+fn simulate(g: &Generation, old: &Generation, preset: &str, units: Option<&[String]>, unmask: &[String]) -> Result<BTreeSet<String>> {
     let root = Path::new(SCRATCH);
     let _ = std::fs::remove_dir_all(root);
     for dir in ["etc/systemd/system", "etc/systemd/system-preset", "usr/lib/systemd/system", "usr/lib/systemd/system-preset"] {
@@ -145,6 +140,9 @@ fn simulate(g: &Generation, old: &Generation, preset: &str, units: Option<&[Stri
             Some(link) => std::os::unix::fs::symlink(link, &dst)?,
             None => std::fs::copy(&spec.source, &dst).map(|_| ())?,
         }
+    }
+    for u in unmask {
+        let _ = std::fs::remove_file(root.join("etc/systemd/system").join(u));
     }
     std::fs::write(root.join(PRESET.trim_start_matches('/')), preset)?;
     match units {
@@ -177,13 +175,19 @@ pub fn plan(g: &Generation, old: &Generation, all: bool) -> Result<Plan> {
     let mut plan = Plan { preset: preset_text(g), declared: g.m.units.enable.iter().cloned().collect(), ..Default::default() };
     let states = unit_states(None)?;
     let now = in_state(&states, "enabled");
-    plan.made = made(old);
+    plan.made = made();
     plan.listed = g.m.units.enable.iter().chain(&g.m.units.disable).cloned().collect();
+    let masked = in_state(&states, "masked");
+    let masks: BTreeSet<&String> = g.m.units.mask.iter().collect();
+    // A declared unit that is masked by hand gets unmasked, as a declared unit that is disabled by hand gets enabled.
+    let drift: Vec<String> = g.m.units.enable.iter().filter(|u| masked.contains(*u) && !masks.contains(u)).cloned().collect();
     plan.touched = touched(g, old, &plan.made, &states);
+    // systemctl preset fails for a masked unit, and a mask already keeps the unit from starting.
+    plan.touched.retain(|u| !masked.contains(u) || drift.contains(u));
     let after = match (all, plan.touched.is_empty()) {
-        (true, _) => simulate(g, old, &plan.preset, None)?,
+        (true, _) => simulate(g, old, &plan.preset, None, &drift)?,
         (false, true) => now.clone(),
-        (false, false) => simulate(g, old, &plan.preset, Some(&plan.touched))?,
+        (false, false) => simulate(g, old, &plan.preset, Some(&plan.touched), &drift)?,
     };
     let known = in_state(&states, "disabled");
     plan.enable = after.difference(&now).cloned().collect();
@@ -191,10 +195,10 @@ pub fn plan(g: &Generation, old: &Generation, all: bool) -> Result<Plan> {
         g.m.units.enable.iter().filter(|u| !after.contains(*u) && !after.contains(&template(u)) && !known.contains(&template(u))).cloned(),
     );
     plan.disable = now.difference(&after).cloned().collect();
-    let masked = in_state(&states, "masked");
     plan.mask = g.m.units.mask.iter().filter(|u| !masked.contains(*u)).cloned().collect();
-    let masks: BTreeSet<&String> = g.m.units.mask.iter().collect();
-    plan.unmask = plan.made.mask.iter().filter(|u| !masks.contains(u) && masked.contains(*u)).cloned().collect();
+    plan.unmask = plan.made.mask.iter().filter(|u| !masks.contains(u) && masked.contains(*u)).cloned().chain(drift).collect();
+    plan.unmask.sort();
+    plan.unmask.dedup();
     // A command runs again only when the configuration still wants its result.
     let wanted = |c: &String| {
         let words: Vec<&str> = c.split(' ').collect();
@@ -312,7 +316,8 @@ pub fn apply(plan: &Plan, changed: &[String]) -> Result<()> {
 
 fn touched_now(plan: &Plan) -> Result<Vec<String>> {
     let states = unit_states(None)?;
-    let declared = plan.declared.iter().chain(&plan.touched).chain(&plan.enable).filter(|u| states.contains_key(*u) || states.contains_key(&template(u)));
+    let exists = |u: &&String| states.get(*u).or_else(|| states.get(&template(u))).is_some_and(|s| s != "masked");
+    let declared = plan.declared.iter().chain(&plan.touched).chain(&plan.enable).filter(exists);
     let mut units: Vec<String> = declared.cloned().collect();
     units.sort();
     units.dedup();

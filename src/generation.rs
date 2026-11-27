@@ -25,6 +25,8 @@ pub struct Manifest {
     pub boot: BootSpec,
     #[serde(rename = "installSteps")]
     pub install_steps: Vec<InstallStep>,
+    /// The warnings of the evaluation, with the paths of the flake and of the pacnix modules.
+    pub warnings: Vec<String>,
 }
 
 /// A setup step that waits for its prerequisites.
@@ -168,6 +170,9 @@ pub struct Claim {
 #[serde(default)]
 pub struct AuditSpec {
     pub ignore: Vec<String>,
+    /// The claim patterns of the pacnix modules.
+    #[serde(default)]
+    pub builtin: Vec<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -215,7 +220,26 @@ pub fn build(ctx: &Ctx) -> Result<Generation> {
     if !status.success() {
         return Err(crate::failed_with(eval_error(ctx, &lines), &lines));
     }
-    Generation::load(path?.trim())
+    let mut g = Generation::load(path?.trim())?;
+    g.m.warnings = g.m.warnings.iter().map(|w| local_paths(ctx, w)).collect();
+    Ok(g)
+}
+
+/// The text with the paths of the flake and of the pacnix modules instead of their copies in the Nix store.
+fn local_paths(ctx: &Ctx, text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("/nix/store/") {
+        out.push_str(&rest[..i]);
+        let path = &rest[i..];
+        let end = path.find(['\'', '`', ':', ' ', '"', '\n']).unwrap_or(path.len());
+        let (path, after) = path.split_at(end);
+        let local = path.split_once("-source/").map(|(_, rel)| rel).and_then(|rel| [ctx.flake.as_str(), MODULES].iter().map(|d| format!("{d}/{rel}")).find(|p| Path::new(p).exists()));
+        out.push_str(local.as_deref().unwrap_or(path));
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The error of Nix without its trace and its command: the last error with
@@ -236,18 +260,7 @@ fn eval_error(ctx: &Ctx, lines: &[String]) -> String {
     if text.contains("does not provide attribute") && text.contains(&format!("pacnixConfigurations.\"{}\"", ctx.host)) {
         return format!("the flake {} has no host {} in pacnixConfigurations. Add the host to the flake, or give --host with a host of the flake.", ctx.flake, ctx.host);
     }
-    let mut out = String::new();
-    let mut rest = text.as_str();
-    while let Some(i) = rest.find("/nix/store/") {
-        out.push_str(&rest[..i]);
-        let path = &rest[i..];
-        let end = path.find(['\'', '`', ':', ' ', '"', '\n']).unwrap_or(path.len());
-        let (path, after) = path.split_at(end);
-        let local = path.split_once("-source/").map(|(_, rel)| rel).and_then(|rel| [ctx.flake.as_str(), MODULES].iter().map(|d| format!("{d}/{rel}")).find(|p| Path::new(p).exists()));
-        out.push_str(local.as_deref().unwrap_or(path));
-        rest = after;
-    }
-    out.push_str(rest);
+    let mut out = local_paths(ctx, &text);
     // Nix names only the file of an option that does not exist: the line comes from the first line with the last part of the name.
     // The full name first, then its last part, for a name inside a nested set.
     let option = out.split_once("The option `").and_then(|(_, r)| r.split_once("' does not exist")).map(|(o, _)| o.to_string());
@@ -428,16 +441,32 @@ static SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new
 /// databases and the AUR packages stay as they are. Without `configure`, the
 /// upgrade uses the active generation.
 pub fn apply(ctx: &Ctx, show: bool, upgrade: bool, configure: bool) -> Result<()> {
+    // With --no-config, the plan only shows: its failure does not stop the
+    // upgrade. Otherwise a failed plan stops the apply before any change,
+    // unless the upgrade installs a newer pacnix, for example with a new
+    // option: the upgrade uses the active generation, and the new pacnix
+    // evaluates the configuration again.
+    let mut failed = None;
     let mut before = match (show || configure).then(|| build(ctx).and_then(|g| Plan::compute(ctx, g))) {
-        // With --no-config, the plan only shows: its failure does not stop the upgrade.
         Some(Err(e)) if !configure && upgrade && !report::interrupted() => {
             say!("• The plan failed: {e:#}. The system upgrade continues.");
             None
         }
+        Some(Err(e)) if upgrade && !crate::handoff::resumed() && !report::interrupted() => match active()? {
+            Some(a) if packages::pacnix_newer(&a).unwrap_or(false) => {
+                say!("• The plan failed: {e:#}. The system upgrade continues with the configuration of the last apply, and the new pacnix evaluates the configuration again.");
+                failed = Some(e);
+                None
+            }
+            _ => return Err(e),
+        },
         other => other.transpose()?,
     };
     if let Some(b) = before.as_ref().filter(|_| show) {
         b.show(upgrade)?;
+    }
+    if let Some(b) = before.as_ref().filter(|_| !crate::handoff::resumed()) {
+        b.target.m.warnings.iter().for_each(|w| say!("• Warning: {w}"));
     }
     if !upgrade {
         say!("• System upgrade: skipped, because of --no-upgrade.");
@@ -476,6 +505,11 @@ pub fn apply(ctx: &Ctx, show: bool, upgrade: bool, configure: bool) -> Result<()
         report::changing();
         packages::upgrade(&target, builds)?;
         plan = before.filter(|_| built && packages::databases() == state).map(|b| (b, fetched));
+        if let Some(e) = failed {
+            packages::clean_staging()?;
+            trust::news_read(read);
+            return Err(e.context("the system upgrade is done, and the configuration is not applied"));
+        }
     } else if let Some(b) = before {
         files::check(ctx, &b.target, &b.files)?;
         let fetched = packages::fetch_builds(&b.target, &b.packages)?;

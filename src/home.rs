@@ -156,12 +156,6 @@ fn activate(user: &str, home: &str, out: &str, packages: &str) -> Result<()> {
     run_cmd(cmd("nix-env", &["--profile", &format!("{profiles}/home-manager"), "--set", out]))?;
     std::fs::create_dir_all("/etc/profiles/per-user")?;
     run_cmd(cmd("nix-store", &["--realise", packages, "--add-root", &format!("/etc/profiles/per-user/{user}")]))?;
-    // pacnix 0.11 let Home Manager install home.path into the profile of the user.
-    for profile in [format!("{home}/.nix-profile"), format!("{profiles}/profile")] {
-        if Path::new(&profile).exists() {
-            run_cmd(cmd("nix-env", &["--profile", &profile, "--uninstall", "home-manager-path"]))?;
-        }
-    }
     let owner = |p: &str| run_cmd(cmd("chown", &["-h", &format!("{user}:")]).arg(p));
     for dir in [&profiles, &roots] {
         for e in std::fs::read_dir(dir)?.flatten() {

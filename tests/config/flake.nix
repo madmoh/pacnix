@@ -11,6 +11,6 @@
       };
     in
     {
-      pacnixConfigurations = lib.genAttrs ([ "desktop" "laptop" "newpc" "workstation" "old" "newbox" "ukibox" "sbbox" ] ++ lib.genList (i: "s${lib.fixedWidthNumber 2 (i + 1)}") 27) host;
+      pacnixConfigurations = lib.genAttrs ([ "desktop" "laptop" "newpc" "workstation" "old" "newbox" "ukibox" "sbbox" ] ++ lib.genList (i: "s${lib.fixedWidthNumber 2 (i + 1)}") 28) host;
     };
 }

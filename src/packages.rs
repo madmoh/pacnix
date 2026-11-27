@@ -412,10 +412,9 @@ fn local_dirs(g: &Generation) -> BTreeMap<String, String> {
     map
 }
 
-/// The record of the packages that pacnix made. Without the record, the
-/// packages of the earlier generation, which pacnix 0.10 made explicit.
-fn made(old: &BTreeSet<String>) -> BTreeSet<String> {
-    std::fs::read(MADE).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_else(|| old.clone())
+/// The record of the packages that pacnix made.
+fn made() -> BTreeSet<String> {
+    std::fs::read(MADE).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
 /// Writes the record: the earlier record and the packages of this apply, less
@@ -499,7 +498,7 @@ pub fn plan(_ctx: &Ctx, g: &Generation, old: &Generation) -> Result<Plan> {
     }
 
     // Reconciliation of the installed packages.
-    plan.made = made(&self::declared(old, &sync)?.0);
+    plan.made = made();
     plan.install = declared.iter().filter(|n| !inst.contains_key(*n)).cloned().collect();
     plan.aur_updates = p.aur.iter().filter_map(|n| {
         let version = &inst.get(n)?.version;
@@ -731,6 +730,29 @@ fn suggest(name: String, sync: &BTreeSet<String>) -> String {
 /// The installed packages that the local sync databases have in a newer version.
 pub fn newer() -> Result<Vec<String>> {
     Ok(output_any(pacman(&["-Qqu", "--config", CONF]))?.lines().map(String::from).collect())
+}
+
+/// Set when the sync databases were refreshed in this run.
+static REFRESHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Refreshes the sync databases one time in a run, also over the retries. The
+/// refresh changes no package.
+fn refresh() -> Result<()> {
+    if !REFRESHED.load(std::sync::atomic::Ordering::Relaxed) {
+        let _stage = report::stage("Refreshing package databases");
+        run_cmd(pacman(&["-Sy", "--config", CONF]))?;
+        REFRESHED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// Whether the refreshed sync databases have a newer pacnix, with the
+/// repositories of a generation.
+pub fn pacnix_newer(g: &Generation) -> Result<bool> {
+    write_confs(g)?;
+    trust_server(g)?;
+    refresh()?;
+    Ok(newer()?.iter().any(|n| n == "pacnix"))
 }
 
 /// Refuses a plan that is not safe. Runs before any change.
@@ -1217,17 +1239,9 @@ fn build_dirs(g: &Generation, mut builds: Builds) -> Result<BTreeSet<String>> {
 }
 
 /// The build directories that can have downloaded sources and build files, by
-/// package base or local package name. Without a record, the directories of an
-/// earlier pacnix version.
+/// package base or local package name. A build records its name before it starts.
 fn build_cache() -> BTreeSet<String> {
-    match std::fs::read(CACHE) {
-        Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
-        Err(_) => [AURDEST.to_string(), format!("{BUILD}/local"), format!("{BUILD}/sources")]
-            .iter()
-            .flat_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect(),
-    }
+    std::fs::read(CACHE).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
 fn save_build_cache(names: &BTreeSet<String>) -> Result<()> {
@@ -1262,7 +1276,7 @@ pub fn discard(g: &Generation) -> Result<()> {
             }
         }
     }
-    if after != before || (!after.is_empty() && !Path::new(CACHE).exists()) {
+    if after != before {
         save_build_cache(&after)?;
     }
     Ok(())
@@ -1352,10 +1366,6 @@ fn transaction(args: &[&str]) -> Result<()> {
 pub fn prepare(g: &Generation, plan: &mut Plan, builds: Builds) -> Result<BTreeSet<String>> {
     let mut failed = BTreeSet::new();
     write_confs(g)?;
-    // pacnix 0.11 kept its pacman configurations in /var/lib/pacnix.
-    let _ = std::fs::remove_file("/var/lib/pacnix/pacman.conf");
-    let _ = std::fs::remove_file("/var/lib/pacnix/pacman-local.conf");
-    let _ = std::fs::remove_file("/var/lib/pacnix/server.db");
     trust_server(g)?;
     if is_builder(g) && (!g.m.packages.aur.is_empty() || !g.m.packages.local.is_empty() || has_local(g)) {
         ensure_repo()?;
@@ -1510,9 +1520,7 @@ pub fn upgrade(g: &Generation, builds: Builds) -> Result<()> {
     let pins: Vec<&str> = pins.iter().map(String::as_str).collect();
     // After a handoff, the system upgrade is done, also for the next attempts.
     if !crate::handoff::resumed() {
-        let stage = report::stage("Refreshing package databases");
-        run_cmd(pacman(&["-Sy", "--config", CONF]))?;
-        drop(stage);
+        refresh()?;
         let newer = newer()?;
         if newer.is_empty() && pins.is_empty() {
             say!("• System upgrade: the packages are up to date.");
