@@ -779,24 +779,27 @@ fn feature_or_path(feature: &str, paths: &[String]) -> String {
     }
 }
 
-/// Deletes the data of removed features. A path inside that the target keeps
-/// stays, with its directories. Outside the home directories of the users, the
-/// empty directories above a deleted path that no package owns go too.
+/// Deletes the data of removed features with rm, as the user would type it:
+/// pacnix gives the paths to rm in the interactive shell of the user whose home
+/// directory holds them, else of root, thus an alias of rm applies, for example
+/// to a trash command. A path inside that the target keeps stays, with its
+/// directories. Outside the home directories of the users, the empty
+/// directories above a deleted path that no package owns go too.
 pub fn delete(target: &Generation, data: &[(String, Vec<String>)]) -> Result<()> {
     let keep = Keep::new(target)?;
     for (feature, paths) in data {
         crate::report::progress(&format!("Deleting {}", feature_or_path(feature, paths)));
         for path in paths {
-            for e in walkdir::WalkDir::new(path).follow_root_links(false).contents_first(true) {
-                let e = e?;
-                if keep.covers(&e.path().display().to_string()) {
-                    continue;
-                }
-                let done = if e.file_type().is_dir() { std::fs::remove_dir(e.path()) } else { std::fs::remove_file(e.path()) };
-                match done {
-                    Err(err) if err.raw_os_error() == Some(libc::ENOTEMPTY) => {}
-                    r => r.with_context(|| format!("delete {}", e.path().display()))?,
-                }
+            let entries = walkdir::WalkDir::new(path).follow_root_links(false).into_iter().collect::<Result<Vec<_>, _>>()?;
+            // rm gets the largest parts that hold no kept path.
+            let kept: BTreeSet<&Path> = entries.iter().filter(|e| keep.covers(&e.path().display().to_string())).flat_map(|e| e.path().ancestors()).collect();
+            let parts: Vec<&Path> = entries
+                .iter()
+                .map(|e| e.path())
+                .filter(|p| !kept.contains(p) && (*p == Path::new(path) || p.parent().is_some_and(|d| kept.contains(d))))
+                .collect();
+            if !parts.is_empty() {
+                shell_rm(path, &parts)?;
             }
             if !keep.homes.iter().any(|(home, _)| Path::new(path).starts_with(home)) {
                 files::prune_dirs(path);
@@ -804,4 +807,20 @@ pub fn delete(target: &Generation, data: &[(String, Vec<String>)]) -> Result<()>
         }
     }
     Ok(())
+}
+
+/// Runs rm -r on the parts in the interactive shell of the user whose home
+/// directory holds the path, else of root.
+fn shell_rm(path: &str, parts: &[&Path]) -> Result<()> {
+    let text = std::fs::read_to_string("/etc/passwd")?;
+    let users: Vec<Vec<&str>> = text.lines().map(|l| l.split(':').collect::<Vec<_>>()).filter(|f| f.len() >= 7).collect();
+    let person = |f: &&Vec<&str>| f[2].parse::<u32>().is_ok_and(|u| (1000..60000).contains(&u)) && Path::new(path).starts_with(f[5]);
+    let owner = match users.iter().filter(person).max_by_key(|f| f[5].len()) {
+        Some(f) => f,
+        None => users.iter().find(|f| f[2] == "0").context("/etc/passwd has no root user")?,
+    };
+    let mut c = cmd("runuser", &["-u", owner[0], "--", owner[6], "-ic", r#"rm -r -- "$@""#, "rm"]);
+    c.args(parts).env_clear().envs([("HOME", owner[5]), ("USER", owner[0]), ("LOGNAME", owner[0]), ("PATH", "/usr/local/bin:/usr/bin")]);
+    c.current_dir(if Path::new(owner[5]).is_dir() { owner[5] } else { "/" });
+    crate::run_cmd(c)
 }

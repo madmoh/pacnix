@@ -3,7 +3,8 @@
 # data of the feature and tells that the audit shows it. The audit lists it
 # last, numbered, with the feature that claimed it, and asks which leftovers to
 # delete: at the end of the input nothing goes, a number deletes one leftover,
-# and the others show again in the next audit. The answer a deletes all,
+# and the others show again in the next audit. The rm of the interactive shell
+# of the owner deletes, thus an alias of rm applies. The answer a deletes all,
 # except a declared file, a path that a feature of the configuration claims and
 # a bash file.
 # The audit of a home directory lists visible and hidden entries, the entries
@@ -68,8 +69,11 @@ has "$out" ', 1 deleted.' || { echo "$out" | tail; fail "the last line does not 
 refute $h 'test -e /srv/demo' "the answer 1 did not delete /srv/demo"
 check $h 'test -e ~/.cache/demo/page' "the answer 1 deleted ~/.cache/demo"
 has "$(pacnix $h audit)" '• Leftovers of removed packages and features (1): 1 Unclaimed home path: /home/arch/.cache/demo' || fail "the next audit does not show the leftover that stays"
+on $h "printf '%s\n' 'trash() { shift 2; mkdir -p /tmp/trash && mv -t /tmp/trash -- \"\$@\"; } # probe' 'alias rm=trash # probe' >>~/.\${SHELL##*/}rc"
 pacnix $h audit <<<a >/dev/null || fail "audit with the answer a failed"
 refute $h 'test -e ~/.cache/demo' "the answer a did not delete ~/.cache/demo"
+check $h 'test -e /tmp/trash/demo/page' "the audit did not use the rm alias of the user"
+on $h 'sed -i "/# probe$/d" ~/.${SHELL##*/}rc'
 step "remove the feature again and delete its data"
 scenario $h '{ features.demo.enable = true; claims.disposable.home = [ ".bash_history" ]; }'
 on $h 'echo ls >~/.bash_history'
